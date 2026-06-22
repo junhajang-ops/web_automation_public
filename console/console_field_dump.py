@@ -152,8 +152,8 @@ def parse_args():
     )
     parser.add_argument(
         "--url",
-        default="about:blank",
-        help="처음 열 주소 (기본: about:blank)",
+        default="https://console.example.io/",
+        help="처음 열 주소 (기본: https://console.example.io/)",
     )
     parser.add_argument(
         "--out",
