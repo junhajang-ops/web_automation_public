@@ -46,6 +46,8 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = "dumps_console_receipt"
 DEFAULT_UUID = TEST_UUID
 POLL_WAIT_MS = 1_000
+GRID_SCROLL_STEP_PX = 1_200
+GRID_SCROLL_IDLE_LIMIT = 3
 
 # (data-field, 화면 컬럼명) — dump console_20260623_121712.html 확인
 RECEIPT_FIELDS = [
@@ -181,6 +183,100 @@ def _read_cell(row, field: str) -> str:
         return ""
 
 
+def _row_key(row_data: dict) -> str:
+    key_fields = [
+        row_data.get("주문 ID", ""),
+        row_data.get("거래일시", ""),
+        row_data.get("상품 ID", ""),
+        row_data.get("번호", ""),
+    ]
+    return "||".join(key_fields)
+
+
+def _read_visible_receipt_rows(page):
+    rows = []
+    row_locator = page.locator("div.MuiDataGrid-row")
+    visible_count = row_locator.count()
+    for i in range(visible_count):
+        row = row_locator.nth(i)
+        row_data = {label: _read_cell(row, field) for field, label in RECEIPT_FIELDS}
+        rows.append(row_data)
+    return rows
+
+
+def _get_grid_scroll_state(page):
+    return page.evaluate(
+        """() => {
+          const el = document.querySelector('.MuiDataGrid-virtualScroller');
+          if (!el) return null;
+          return {
+            scrollTop: el.scrollTop,
+            clientHeight: el.clientHeight,
+            scrollHeight: el.scrollHeight,
+          };
+        }"""
+    )
+
+
+def _scroll_receipt_grid_once(page):
+    scroller = page.locator(".MuiDataGrid-virtualScroller").first
+    if not wait_for_visible(scroller, 5_000):
+        return False
+
+    box = scroller.bounding_box()
+    if not box:
+        return False
+
+    page.mouse.move(box["x"] + (box["width"] / 2), box["y"] + (box["height"] / 2))
+    page.mouse.wheel(0, GRID_SCROLL_STEP_PX)
+    page.wait_for_timeout(POLL_WAIT_MS)
+    return True
+
+
+def collect_all_receipt_rows(page):
+    collected = {}
+    idle_rounds = 0
+
+    while idle_rounds < GRID_SCROLL_IDLE_LIMIT:
+        visible_rows = _read_visible_receipt_rows(page)
+        added_this_round = 0
+
+        for row_data in visible_rows:
+            key = _row_key(row_data)
+            if key in collected:
+                continue
+            collected[key] = row_data
+            added_this_round += 1
+
+        before_state = _get_grid_scroll_state(page)
+        if before_state is None:
+            break
+
+        if added_this_round == 0:
+            idle_rounds += 1
+        else:
+            idle_rounds = 0
+
+        reached_bottom = (
+            before_state["scrollTop"] + before_state["clientHeight"]
+            >= before_state["scrollHeight"] - 4
+        )
+        if reached_bottom and idle_rounds > 0:
+            break
+
+        if not _scroll_receipt_grid_once(page):
+            break
+
+        after_state = _get_grid_scroll_state(page)
+        if (
+            after_state is not None
+            and before_state["scrollTop"] == after_state["scrollTop"]
+        ):
+            idle_rounds += 1
+
+    return list(collected.values())
+
+
 def collect_result(page, uuid_value, timeout_error):
     print("[7] 영수증 검증 결과를 수집합니다.")
 
@@ -200,16 +296,14 @@ def collect_result(page, uuid_value, timeout_error):
         raise timeout_error(f"영수증 검증 결과 행이 나타나지 않았습니다: {uuid_value}")
 
     set_rows_per_page(page, 100)
+    page.wait_for_timeout(POLL_WAIT_MS)
 
-    row_count = row_locator.count()
+    rows = collect_all_receipt_rows(page)
+    row_count = len(rows)
     total_amount = read_total_amount(page)
-    print(f"    결과 {row_count}건, 총액: {total_amount}")
+    print(f"    결과 {row_count}건 수집, 총액: {total_amount}")
 
-    rows = []
-    for i in range(row_count):
-        row = row_locator.nth(i)
-        row_data = {label: _read_cell(row, field) for field, label in RECEIPT_FIELDS}
-        rows.append(row_data)
+    for i, row_data in enumerate(rows):
         summary = " | ".join(f"{l}={v}" for l, v in row_data.items())
         print(f"    [{i + 1}] {summary}")
 
