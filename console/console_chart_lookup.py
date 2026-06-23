@@ -313,17 +313,37 @@ def open_chart_detail(page, chart_name):
     }
 
 
-def click_applied_chart_file_row(page):
-    """파일 이력 목록에서 현재 적용 중인 행(checkmark)을 클릭해 데이터 뷰를 엽니다."""
-    print("[10] 현재 적용 중인 차트 파일 행을 클릭합니다.")
+def _find_applied_row(page):
+    """checkmark 아이콘이 있는 파일 이력 행을 반환. 없으면 첫 번째 행."""
     row = page.locator("table tbody tr").filter(
-        has=page.locator("i.checkmark, i.check.circle, i.green.check")
+        has=page.locator("i.checkmark, i.check.circle, i.green.check, i.check")
     ).first
     if wait_for_visible(row, 3_000):
-        row.click()
+        return row
+    print("    (checkmark 행 미발견 — 첫 번째 행으로 fallback)")
+    return page.locator("table tbody tr").first
+
+
+def click_applied_chart_file_row(page):
+    """파일 이력 목록에서 현재 적용 중인 행을 클릭해 데이터 뷰를 엽니다."""
+    print("[10] 현재 적용 중인 차트 파일 행을 클릭합니다.")
+
+    # 이미 데이터 테이블이 보이면 클릭 불필요
+    data_tables = page.locator("table")
+    if data_tables.count() >= 2:
+        print("    (데이터 테이블 이미 표시 중 — 행 클릭 생략)")
+        return
+
+    row = _find_applied_row(page)
+    # tr 전체 클릭보다 번호 셀(두 번째 td) 클릭이 안정적
+    number_cell = row.locator("td").nth(1)
+    if wait_for_visible(number_cell, 2_000):
+        number_cell.click()
     else:
-        print("    (checkmark 행 미발견 — 첫 번째 행으로 fallback)")
-        page.locator("table tbody tr").first.click()
+        row.click()
+
+    # 데이터 테이블(두 번째 table)이 나타날 때까지 대기
+    page.locator("table").nth(1).wait_for(state="visible", timeout=15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
     step_pause(page)
 
