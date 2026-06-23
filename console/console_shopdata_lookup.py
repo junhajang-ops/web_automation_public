@@ -36,6 +36,7 @@ from console_user_search_test import (
     step_pause,
     wait_for_visible,
 )
+from test_config import TEST_PURCHASE_CODE, TEST_TABLE_NAME, TEST_UUID
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -46,9 +47,9 @@ except AttributeError:
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = "dumps_console_shopdata_lookup"
-DEFAULT_UUID = "00000000-0000-0000-0000-000000000000"  # placeholder — 실제 UUID는 --uuid 인자로 전달
-DEFAULT_TABLE_NAME = "ShopData"
-DEFAULT_PURCHASE_CODE = "gametitle_sub_purchase_119000_limit_petcard_combine_6"
+DEFAULT_UUID = TEST_UUID
+DEFAULT_TABLE_NAME = TEST_TABLE_NAME
+DEFAULT_PURCHASE_CODE = TEST_PURCHASE_CODE
 POLL_WAIT_MS = 1_000
 HIGHLIGHT_WAIT_MS = 3_000
 
