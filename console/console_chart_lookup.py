@@ -6,14 +6,18 @@ Scope:
 - Open the Console console
 - Select the target project
 - Open the chart page from the side menu
-- Change rows per page from 10 to 100
+- Change chart-list rows per page from 10 to 100
 - Search the exact chart link across paged list results
-- Click the chart link and verify that the chart detail page opens
+- Open the chart detail page
+- Click the currently applied chart file row
+- Change chart-data rows per page from 10 to 100
+- Traverse all chart-data pages
 
 This script is intentionally read-only. It does not click any mutation action.
 """
 
 import argparse
+import csv as csv_mod
 import datetime
 import re
 import sys
@@ -34,7 +38,7 @@ from console_user_search_test import (
     step_pause,
     wait_for_visible,
 )
-from test_config import TEST_CHART_NAME
+from test_config import TEST_CHART_NAME, TEST_PURCHASE_CODE
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -44,6 +48,7 @@ except AttributeError:
 
 
 BASE_DIR = Path(__file__).resolve().parent
+PAYMENT_DOCS_DIR = BASE_DIR.parent / "payment_docs"
 DEFAULT_OUTPUT = "dumps_console_chart_lookup"
 DEFAULT_CHART_NAME = TEST_CHART_NAME
 POLL_WAIT_MS = 1_000
@@ -98,6 +103,63 @@ def parse_args():
     return parser.parse_args()
 
 
+def set_dropdown_value(dropdown, target_text, label):
+    current_text_locator = dropdown.locator(".divider.text, .divider.default.text").first
+    current_text = current_text_locator.inner_text().strip()
+    print(f"    현재값: '{current_text}'")
+    if current_text == target_text:
+        print("    (이미 설정되어 있어 건너뜁니다.)")
+        step_pause(dropdown.page)
+        return
+
+    dropdown.scroll_into_view_if_needed()
+    step_pause(dropdown.page)
+
+    opened = False
+    for _ in range(3):
+        try:
+            dropdown.click(force=True)
+        except Exception:
+            dropdown.evaluate("el => el.click()")
+        step_pause(dropdown.page)
+        expanded = (dropdown.get_attribute("aria-expanded") or "").lower()
+        if expanded == "true":
+            opened = True
+            break
+
+    if not opened:
+        raise RuntimeError(f"{label} 드롭다운을 열지 못했습니다.")
+
+    option = dropdown.locator(".menu [role='option']").filter(
+        has_text=re.compile(rf"^{re.escape(target_text)}$")
+    ).first
+    option.wait_for(state="visible", timeout=10_000)
+    option.scroll_into_view_if_needed()
+    step_pause(dropdown.page)
+
+    try:
+        option.click(force=True)
+    except Exception:
+        option.evaluate("el => el.click()")
+    step_pause(dropdown.page)
+    safe_wait_for_load(dropdown.page, "networkidle", 5_000)
+
+    deadline = time.time() + 10
+    last_seen = current_text
+    while time.time() < deadline:
+        last_seen = current_text_locator.inner_text().strip()
+        if last_seen == target_text:
+            print(f"    전환 완료: '{last_seen}'")
+            step_pause(dropdown.page)
+            return
+        dropdown.page.wait_for_timeout(POLL_WAIT_MS)
+
+    raise RuntimeError(
+        f"{label} '{target_text}'로 전환하지 못했습니다(현재값 '{last_seen}'). "
+        "드롭다운/옵션 조작 방식 재확인 필요 — 실패를 무시하고 진행하지 않습니다."
+    )
+
+
 def open_chart_page(page):
     print("[4] 사이드 메뉴에서 '차트' 페이지로 이동합니다.")
     chart_link = page.locator("a#baseChart, a[href*='/baseChart']").first
@@ -112,40 +174,19 @@ def open_chart_page(page):
     step_pause(page)
 
 
-def get_chart_rows_per_page_dropdown(page):
+def get_chart_list_rows_per_page_dropdown(page):
     dropdown = page.locator("tfoot [role='listbox']").first
     dropdown.wait_for(state="visible", timeout=15_000)
     return dropdown
 
 
-def set_chart_rows_per_page(page, rows_per_page):
-    print(f"[5] 우측 하단 표시 개수를 '{rows_per_page}개씩 보기'로 변경합니다.")
-    target_text = f"{rows_per_page}개씩 보기"
-    dropdown = get_chart_rows_per_page_dropdown(page)
-    current_text = dropdown.locator(".divider.text").first
-
-    if current_text.inner_text().strip() == target_text:
-        step_pause(page)
-        return
-
-    dropdown.scroll_into_view_if_needed()
-    step_pause(page)
-    dropdown.click()
-    step_pause(page)
-
-    option = page.locator("[role='option'] .text").filter(has_text=target_text).first
-    option.wait_for(state="visible", timeout=15_000)
-    option.click()
-    step_pause(page)
-
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if current_text.inner_text().strip() == target_text:
-            step_pause(page)
-            return
-        page.wait_for_timeout(POLL_WAIT_MS)
-
-    raise RuntimeError(f"Rows-per-page dropdown did not change to: {target_text}")
+def set_chart_list_rows_per_page(page, rows_per_page):
+    print(f"[5] 우측 하단 {rows_per_page}개씩 보기로 변경합니다.")
+    set_dropdown_value(
+        get_chart_list_rows_per_page_dropdown(page),
+        f"{rows_per_page}개씩 보기",
+        "차트 목록 표시 개수",
+    )
 
 
 def build_chart_link_locator(page, chart_name):
@@ -178,9 +219,7 @@ def go_to_next_chart_page(page, current_page_number):
     next_button.wait_for(state="visible", timeout=15_000)
     next_button.scroll_into_view_if_needed()
     step_pause(page)
-    print(
-        f"[7] 현재 페이지에 없어서 차트 목록 {current_page_number + 1}페이지로 이동합니다."
-    )
+    print(f"[7] 현재 페이지에 없어서 차트 목록 {current_page_number + 1}페이지로 이동합니다.")
     next_button.click()
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
@@ -313,97 +352,194 @@ def open_chart_detail(page, chart_name):
     }
 
 
-def _find_applied_row(page):
-    """checkmark 아이콘이 있는 파일 이력 행을 반환. 없으면 첫 번째 행."""
-    row = page.locator("table tbody tr").filter(
+def find_applied_chart_file_row(page):
+    rows = page.locator("table tbody tr")
+    preferred = rows.filter(
         has=page.locator("i.checkmark, i.check.circle, i.green.check, i.check")
     ).first
-    if wait_for_visible(row, 3_000):
-        return row
-    print("    (checkmark 행 미발견 — 첫 번째 행으로 fallback)")
-    return page.locator("table tbody tr").first
+    if wait_for_visible(preferred, 2_000):
+        return preferred
+    return rows.first
+
+
+def get_applied_file_id(page) -> str:
+    """파일 이력 테이블에서 현재 적용 중인 행의 파일 ID(td.nth(3))를 반환합니다."""
+    row = find_applied_chart_file_row(page)
+    try:
+        return row.locator("td").nth(3).inner_text().strip()
+    except Exception:
+        return ""
 
 
 def click_applied_chart_file_row(page):
-    """파일 이력 목록에서 현재 적용 중인 행을 클릭해 데이터 뷰를 엽니다."""
-    print("[10] 현재 적용 중인 차트 파일 행을 클릭합니다.")
+    """체크박스 셀(td.nth(0)) 클릭으로 행 선택 → CSV 다운로드 버튼 활성화."""
+    print("[10] 현재 적용 중인 차트 파일 행을 선택합니다.")
 
-    # 이미 데이터 테이블이 보이면 클릭 불필요
-    data_tables = page.locator("table")
-    if data_tables.count() >= 2:
-        print("    (데이터 테이블 이미 표시 중 — 행 클릭 생략)")
-        return
+    csv_btn = page.locator("button.ui").filter(has_text="CSV 다운로드").first
+    try:
+        cls = csv_btn.get_attribute("class") or ""
+        if "disabled" not in cls:
+            print("    (이미 선택됨 — 행 클릭 생략)")
+            return
+    except Exception:
+        pass
 
-    row = _find_applied_row(page)
-    # tr 전체 클릭보다 번호 셀(두 번째 td) 클릭이 안정적
-    number_cell = row.locator("td").nth(1)
-    if wait_for_visible(number_cell, 2_000):
-        number_cell.click()
+    row = find_applied_chart_file_row(page)
+    checkbox_cell = row.locator("td").nth(0)
+    if wait_for_visible(checkbox_cell, 2_000):
+        checkbox_cell.click()
     else:
         row.click()
 
-    # 데이터 테이블(두 번째 table)이 나타날 때까지 대기
-    page.locator("table").nth(1).wait_for(state="visible", timeout=15_000)
-    safe_wait_for_load(page, "networkidle", 5_000)
+    # CSV 버튼 활성화 대기 (최대 5초)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            cls = csv_btn.get_attribute("class") or ""
+            if "disabled" not in cls:
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(300)
+
     step_pause(page)
 
 
-def set_chart_data_rows_per_page(page, count: int = 100):
-    """차트 데이터 테이블(파일 이력 아래)의 페이지당 행 수를 변경합니다."""
-    print(f"[11] 차트 데이터 {count}개씩 보기로 변경합니다.")
-    target_text = f"{count}개씩 보기"
-    # 파일 이력 테이블과 데이터 테이블 각각 tfoot listbox를 가짐 → 마지막(데이터) 사용
-    dropdowns = page.locator("tfoot [role='listbox']")
-    dropdown = dropdowns.last if dropdowns.count() >= 1 else None
-    if dropdown is None or not wait_for_visible(dropdown, 5_000):
-        print("    (행 수 드롭다운 없음 — 건너뜁니다.)")
-        return
-    current = dropdown.locator(".divider.text").first
-    if current.inner_text().strip() == target_text:
-        return
-    dropdown.scroll_into_view_if_needed()
-    step_pause(page)
-    dropdown.click()
-    step_pause(page)
-    option = page.locator("[role='option'] .text").filter(has_text=target_text).first
-    option.wait_for(state="visible", timeout=10_000)
-    option.click()
-    step_pause(page)
-    safe_wait_for_load(page, "networkidle", 5_000)
+def get_chart_data_rows_per_page_dropdown(page):
+    dropdown = page.locator("[role='listbox']").last
+    dropdown.wait_for(state="visible", timeout=15_000)
+    return dropdown
 
 
-def navigate_all_chart_data_pages(page) -> dict:
-    """차트 데이터 전 페이지를 순서대로 탐색합니다. 페이지 간 1초 대기 없음."""
-    print("[12] 차트 데이터 전 페이지 탐색을 시작합니다.")
+def set_chart_data_rows_per_page(page, rows_per_page):
+    print(f"[11] 차트 데이터 {rows_per_page}개씩 보기로 변경합니다.")
+    set_dropdown_value(
+        get_chart_data_rows_per_page_dropdown(page),
+        f"{rows_per_page}개씩 보기",
+        "차트 데이터 표시 개수",
+    )
+
+
+def get_chart_data_next_page_button(page):
+    return page.locator(
+        "[aria-label='Pagination Navigation'] a[type='nextItem']"
+    ).last
+
+
+def navigate_all_chart_data_pages(page):
+    print("[12] 차트 데이터 전체 페이지를 순회합니다.")
     start_ts = time.time()
-    page_num = 1
+    page_count = 1
 
     while True:
-        # 데이터 테이블 next 버튼 — 파일 이력과 데이터 테이블이 각각 페이지네이션을 가지므로 last 사용
-        next_btn = page.locator(
-            "[aria-label='Pagination Navigation'] a[type='nextItem']"
-        ).last
-        if not wait_for_visible(next_btn, 2_000):
+        next_button = get_chart_data_next_page_button(page)
+        if not wait_for_visible(next_button, 2_000):
             break
-        aria_disabled = (next_btn.get_attribute("aria-disabled") or "").lower()
-        cls = (next_btn.get_attribute("class") or "").lower()
-        if aria_disabled == "true" or "disabled" in cls:
+
+        aria_disabled = (next_button.get_attribute("aria-disabled") or "").lower()
+        class_name = (next_button.get_attribute("class") or "").lower()
+        if aria_disabled == "true" or "disabled" in class_name:
             break
-        next_btn.scroll_into_view_if_needed()
-        next_btn.click()
-        # step_pause 없음 — 네트워크 완료 + 첫 행 노출만 대기
+
+        next_button.scroll_into_view_if_needed()
+        step_pause(page)
+        next_button.click()
         safe_wait_for_load(page, "networkidle", 10_000)
         page.locator("table").last.locator("tbody tr").first.wait_for(
-            state="visible", timeout=10_000
+            state="visible",
+            timeout=10_000,
         )
-        page_num += 1
+        page_count += 1
+        step_pause(page)
 
     elapsed = round(time.time() - start_ts, 1)
-    print(f"    완료: {page_num}페이지, 소요시간 {elapsed}초")
+    print(f"    완료: {page_count}페이지, 소요시간 {elapsed}초")
     return {
-        "data_page_count": page_num,
+        "data_page_count": page_count,
         "data_elapsed_seconds": elapsed,
     }
+
+
+def _read_csv_and_lookup(csv_path: Path, purchase_code: str) -> dict:
+    """CSV 한 번 순회: 행·열 수 집계 + purchase_code → ShopTable_ID 탐색."""
+    row_count = col_count = 0
+    shop_table_id = ""
+    for enc in ("utf-8-sig", "utf-8", "euc-kr"):
+        try:
+            with open(csv_path, encoding=enc, newline="") as f:
+                reader = csv_mod.DictReader(f)
+                pc_cols = None
+                for i, row in enumerate(reader):
+                    if i == 0:
+                        col_count = len(row)
+                        pc_cols = [c for c in row.keys() if "PurchaseCode" in c]
+                    row_count = i + 1
+                    if purchase_code and not shop_table_id:
+                        for col in (pc_cols or []):
+                            if row.get(col, "").strip() == purchase_code.strip():
+                                shop_table_id = row.get("ShopTable_ID", "")
+                                print(f"    {col}='{purchase_code}' → ShopTable_ID={shop_table_id}")
+                                break
+            break
+        except UnicodeDecodeError:
+            continue
+        except Exception as exc:
+            print(f"    (CSV 읽기 오류: {exc})")
+            break
+    if purchase_code and not shop_table_id:
+        print(f"    (purchase_code '{purchase_code}' 미발견)")
+    return {"csv_row_count": row_count, "csv_col_count": col_count, "shop_table_id": shop_table_id}
+
+
+def _accept_dialog(dialog):
+    dialog.accept()
+
+
+def _do_download_csv(page, csv_path: Path):
+    """CSV 다운로드 버튼 클릭 → 확인 모달 처리 → 파일 저장."""
+    csv_btn = page.locator("button.ui").filter(has_text="CSV 다운로드").first
+    csv_btn.scroll_into_view_if_needed()
+    step_pause(page)
+    page.on("dialog", _accept_dialog)
+    try:
+        with page.expect_download(timeout=60_000) as dl_info:
+            csv_btn.click()
+            confirm_btn = page.locator("[role='dialog'] button").filter(
+                has_text="확인"
+            ).first
+            if wait_for_visible(confirm_btn, 5_000):
+                print("    (확인 모달 감지 — 확인 버튼 클릭)")
+                step_pause(page)
+                confirm_btn.click()
+    finally:
+        page.remove_listener("dialog", _accept_dialog)
+    dl_info.value.save_as(str(csv_path))
+    print(f"    저장: {csv_path.name}")
+
+
+def download_chart_csv(page, chart_name: str, applied_file_id: str) -> dict:
+    """파일 ID 기반 캐시 확인 → 필요 시 다운로드 → ShopTable_ID 탐색."""
+    print("[11] CSV 파일을 확인합니다.")
+    PAYMENT_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+
+    csv_filename = f"chart_{chart_name}_{applied_file_id}.csv"
+    csv_path = PAYMENT_DOCS_DIR / csv_filename
+
+    if csv_path.exists():
+        print(f"    (파일 ID {applied_file_id} 기저장 — 다운로드 스킵)")
+        print(f"    기존 파일 사용: {csv_filename}")
+    else:
+        # 같은 차트의 이전 버전 삭제
+        for old in PAYMENT_DOCS_DIR.glob(f"chart_{chart_name}_*.csv"):
+            old.unlink()
+            print(f"    (이전 버전 삭제: {old.name})")
+        # 행 선택 후 다운로드
+        click_applied_chart_file_row(page)
+        _do_download_csv(page, csv_path)
+
+    stats = _read_csv_and_lookup(csv_path, TEST_PURCHASE_CODE)
+    print(f"    행 수: {stats['csv_row_count']}, 열 수: {stats['csv_col_count']}")
+    return {**stats, "csv_file": csv_filename, "applied_file_id": applied_file_id}
 
 
 def run_chart_lookup(
@@ -421,15 +557,17 @@ def run_chart_lookup(
     )
     open_chart_page(page)
     snap_and_check_ui(page, "chart_list")
-    set_chart_rows_per_page(page, ROWS_PER_PAGE)
+    set_chart_list_rows_per_page(page, ROWS_PER_PAGE)
     snap_and_check_ui(page, "chart_list_100")
+
     summary = open_chart_detail(page, chart_name)
     if summary["lookup_status"] == "found":
         snap_and_check_ui(page, "chart_detail")
-        click_applied_chart_file_row(page)
-        set_chart_data_rows_per_page(page, 100)
-        nav = navigate_all_chart_data_pages(page)
-        summary.update(nav)
+        applied_file_id = get_applied_file_id(page)
+        print(f"[10-pre] 현재 적용 파일 ID: {applied_file_id}")
+        csv_summary = download_chart_csv(page, chart_name, applied_file_id)
+        summary.update(csv_summary)
+
     return summary
 
 
@@ -471,8 +609,11 @@ def save_artifacts(
             "chart_number",
             "applied_chart",
             "current_file",
-            "data_page_count",
-            "data_elapsed_seconds",
+            "applied_file_id",
+            "csv_file",
+            "csv_row_count",
+            "csv_col_count",
+            "shop_table_id",
         ]:
             summary_lines.append(f"{key}={result_summary.get(key, '')}")
     if error_message:
