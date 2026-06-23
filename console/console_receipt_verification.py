@@ -47,9 +47,20 @@ DEFAULT_OUTPUT = "dumps_console_receipt"
 DEFAULT_UUID = TEST_UUID
 POLL_WAIT_MS = 1_000
 
-RESULT_COLUMNS = [
-    "거래일시", "닉네임", "유저 UUID", "주문 ID",
-    "제품 ID", "Description", "구분", "스토어", "TBC", "금액", "상태",
+# (data-field, 화면 컬럼명) — dump console_20260623_121712.html 확인
+RECEIPT_FIELDS = [
+    ("index",              "번호"),
+    ("purchaseTimeMillis", "거래일시"),
+    ("nickname",           "닉네임"),
+    ("gamerId",            "유저 UUID"),
+    ("orderId",            "주문 ID"),
+    ("productId",          "제품 ID"),
+    ("description",        "Description"),
+    ("type",               "구분"),
+    ("platform",           "스토어"),
+    ("tbc",                "TBC"),
+    ("price",              "금액"),
+    ("status",             "상태"),
 ]
 
 
@@ -137,6 +148,39 @@ def read_total_amount(page):
     return total_match.group(1).strip() if total_match else ""
 
 
+def set_rows_per_page(page, count: int = 100):
+    print(f"[7-1] 페이지당 행 수를 {count}개로 변경합니다.")
+    trigger = page.locator(".MuiTablePagination-select[role='combobox']").first
+    if not wait_for_visible(trigger, 5_000):
+        print("    (페이지 크기 드롭다운 없음 — 건너뜁니다.)")
+        return
+    trigger.scroll_into_view_if_needed()
+    trigger.click()
+    step_pause(page)
+
+    listbox = page.locator("ul[role='listbox']").filter(has_text=f"{count}개씩")
+    listbox.wait_for(state="visible", timeout=10_000)
+    option = listbox.locator("li[role='option']", has_text=f"{count}개씩").first
+    option.wait_for(state="visible", timeout=5_000)
+    option.click()
+    safe_wait_for_load(page, "networkidle", 5_000)
+    step_pause(page)
+
+
+def _read_cell(row, field: str) -> str:
+    try:
+        inner = row.locator(f"[role='gridcell'][data-field='{field}'] div[title]").first
+        val = inner.get_attribute("title")
+        if val is not None:
+            return val.strip()
+    except Exception:
+        pass
+    try:
+        return row.locator(f"[role='gridcell'][data-field='{field}']").first.inner_text().strip()
+    except Exception:
+        return ""
+
+
 def collect_result(page, uuid_value, timeout_error):
     print("[7] 영수증 검증 결과를 수집합니다.")
 
@@ -155,6 +199,8 @@ def collect_result(page, uuid_value, timeout_error):
     if not wait_for_visible(row_locator.first, 10_000):
         raise timeout_error(f"영수증 검증 결과 행이 나타나지 않았습니다: {uuid_value}")
 
+    set_rows_per_page(page, 100)
+
     row_count = row_locator.count()
     total_amount = read_total_amount(page)
     print(f"    결과 {row_count}건, 총액: {total_amount}")
@@ -162,10 +208,10 @@ def collect_result(page, uuid_value, timeout_error):
     rows = []
     for i in range(row_count):
         row = row_locator.nth(i)
-        cells = row.locator("div[role='cell']")
-        cell_texts = [cells.nth(j).inner_text().strip() for j in range(cells.count())]
-        rows.append(cell_texts)
-        print(f"    [{i + 1}] {' | '.join(cell_texts)}")
+        row_data = {label: _read_cell(row, field) for field, label in RECEIPT_FIELDS}
+        rows.append(row_data)
+        summary = " | ".join(f"{l}={v}" for l, v in row_data.items())
+        print(f"    [{i + 1}] {summary}")
 
     return {
         "has_results": True,
@@ -200,7 +246,10 @@ def save_artifacts(page, out_dir, uuid_value, succeeded, result_summary=None, er
         summary_lines.append(f"row_count={result_summary.get('row_count', '')}")
         summary_lines.append(f"total_amount={result_summary.get('total_amount', '')}")
         for i, row in enumerate(result_summary.get("rows", []), start=1):
-            summary_lines.append(f"row_{i}={' | '.join(str(c) for c in row)}")
+            if isinstance(row, dict):
+                summary_lines.append(f"row_{i}={' | '.join(f'{k}={v}' for k, v in row.items())}")
+            else:
+                summary_lines.append(f"row_{i}={' | '.join(str(c) for c in row)}")
     if error_message:
         summary_lines.append(f"error={error_message}")
 
