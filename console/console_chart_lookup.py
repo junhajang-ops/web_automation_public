@@ -313,6 +313,79 @@ def open_chart_detail(page, chart_name):
     }
 
 
+def click_applied_chart_file_row(page):
+    """파일 이력 목록에서 현재 적용 중인 행(checkmark)을 클릭해 데이터 뷰를 엽니다."""
+    print("[10] 현재 적용 중인 차트 파일 행을 클릭합니다.")
+    row = page.locator("table tbody tr").filter(
+        has=page.locator("i.checkmark, i.check.circle, i.green.check")
+    ).first
+    if wait_for_visible(row, 3_000):
+        row.click()
+    else:
+        print("    (checkmark 행 미발견 — 첫 번째 행으로 fallback)")
+        page.locator("table tbody tr").first.click()
+    safe_wait_for_load(page, "networkidle", 5_000)
+    step_pause(page)
+
+
+def set_chart_data_rows_per_page(page, count: int = 100):
+    """차트 데이터 테이블(파일 이력 아래)의 페이지당 행 수를 변경합니다."""
+    print(f"[11] 차트 데이터 {count}개씩 보기로 변경합니다.")
+    target_text = f"{count}개씩 보기"
+    # 파일 이력 테이블과 데이터 테이블 각각 tfoot listbox를 가짐 → 마지막(데이터) 사용
+    dropdowns = page.locator("tfoot [role='listbox']")
+    dropdown = dropdowns.last if dropdowns.count() >= 1 else None
+    if dropdown is None or not wait_for_visible(dropdown, 5_000):
+        print("    (행 수 드롭다운 없음 — 건너뜁니다.)")
+        return
+    current = dropdown.locator(".divider.text").first
+    if current.inner_text().strip() == target_text:
+        return
+    dropdown.scroll_into_view_if_needed()
+    step_pause(page)
+    dropdown.click()
+    step_pause(page)
+    option = page.locator("[role='option'] .text").filter(has_text=target_text).first
+    option.wait_for(state="visible", timeout=10_000)
+    option.click()
+    step_pause(page)
+    safe_wait_for_load(page, "networkidle", 5_000)
+
+
+def navigate_all_chart_data_pages(page) -> dict:
+    """차트 데이터 전 페이지를 순서대로 탐색합니다. 페이지 간 1초 대기 없음."""
+    print("[12] 차트 데이터 전 페이지 탐색을 시작합니다.")
+    start_ts = time.time()
+    page_num = 1
+
+    while True:
+        # 데이터 테이블 next 버튼 — 파일 이력과 데이터 테이블이 각각 페이지네이션을 가지므로 last 사용
+        next_btn = page.locator(
+            "[aria-label='Pagination Navigation'] a[type='nextItem']"
+        ).last
+        if not wait_for_visible(next_btn, 2_000):
+            break
+        aria_disabled = (next_btn.get_attribute("aria-disabled") or "").lower()
+        cls = (next_btn.get_attribute("class") or "").lower()
+        if aria_disabled == "true" or "disabled" in cls:
+            break
+        next_btn.scroll_into_view_if_needed()
+        next_btn.click()
+        # step_pause 없음 — 네트워크 완료 + 첫 행 노출만 대기
+        safe_wait_for_load(page, "networkidle", 10_000)
+        page.locator("table").last.locator("tbody tr").first.wait_for(
+            state="visible", timeout=10_000
+        )
+        page_num += 1
+
+    elapsed = round(time.time() - start_ts, 1)
+    print(f"    완료: {page_num}페이지, 소요시간 {elapsed}초")
+    return {
+        "data_page_count": page_num,
+        "data_elapsed_seconds": elapsed,
+    }
+
+
 def run_chart_lookup(
     page,
     chart_name,
@@ -333,6 +406,10 @@ def run_chart_lookup(
     summary = open_chart_detail(page, chart_name)
     if summary["lookup_status"] == "found":
         snap_and_check_ui(page, "chart_detail")
+        click_applied_chart_file_row(page)
+        set_chart_data_rows_per_page(page, 100)
+        nav = navigate_all_chart_data_pages(page)
+        summary.update(nav)
     return summary
 
 
@@ -374,6 +451,8 @@ def save_artifacts(
             "chart_number",
             "applied_chart",
             "current_file",
+            "data_page_count",
+            "data_elapsed_seconds",
         ]:
             summary_lines.append(f"{key}={result_summary.get(key, '')}")
     if error_message:
@@ -391,7 +470,7 @@ def hold_browser_open(page, hold_seconds):
     if hold_seconds <= 0:
         return
 
-    print(f"[10] 현재 화면을 {hold_seconds}초 동안 유지합니다.")
+    print(f"[13] 현재 화면을 {hold_seconds}초 동안 유지합니다.")
     deadline = time.time() + hold_seconds
     while time.time() < deadline:
         page.wait_for_timeout(POLL_WAIT_MS)
