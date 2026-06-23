@@ -33,6 +33,7 @@ from console_user_search_test import (
     prepare_console_project,
     safe_wait_for_load,
     select_target_page,
+    snap_and_check_ui,
     step_pause,
     wait_for_visible,
 )
@@ -741,23 +742,27 @@ def run_shopdata_lookup(
     )
     open_game_info_menu(page)
     open_game_info_data_tab(page)
+    snap_and_check_ui(page, "gameinfo_data")
     fill_shopdata_uuid_filter(page, uuid_value)
     ensure_table_selected(page, table_name)
     click_shopdata_search_button(page)
 
     result_row = wait_for_shopdata_result_row(page, uuid_value, timeout_error)
     step_pause(page)
+    snap_and_check_ui(page, "shopdata_results")
     summary = collect_shopdata_result_summary(page, uuid_value)
     summary["first_inDate"] = get_row_cell_text(result_row, "inDate")
     summary["first_updatedAt"] = get_row_cell_text(result_row, "updatedAt")
     dialog = open_top_shopdata_detail(page, result_row, uuid_value, timeout_error)
     refresh_detail_popup_with_mouse_scroll(page, dialog)
+    snap_and_check_ui(page, "shopdata_detail_popup")
     purchase_line_number, purchase_count = resolve_purchase_line_and_count(
         page,
         dialog,
         purchase_code,
     )
     click_detail_edit_button(page, dialog)
+    snap_and_check_ui(page, "shopdata_detail_edit")
     edit_summary = edit_count_line_to_zero_in_edit_mode(
         page,
         dialog,
