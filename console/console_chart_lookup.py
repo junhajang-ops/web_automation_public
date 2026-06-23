@@ -7,7 +7,7 @@ Scope:
 - Select the target project
 - Open the chart page from the side menu
 - Change rows per page from 10 to 100
-- Scroll down until the exact chart link is visible
+- Search the exact chart link across paged list results
 - Click the chart link and verify that the chart detail page opens
 
 This script is intentionally read-only. It does not click any mutation action.
@@ -49,6 +49,7 @@ DEFAULT_CHART_NAME = TEST_CHART_NAME
 POLL_WAIT_MS = 1_000
 SCROLL_STEP_PX = 1_200
 MAX_SCROLL_ATTEMPTS = 20
+ROWS_PER_PAGE = 100
 
 
 def parse_args():
@@ -152,6 +153,41 @@ def build_chart_link_locator(page, chart_name):
     return page.locator("table tbody tr td a").filter(has_text=exact_name).first
 
 
+def count_chart_rows(page):
+    return page.locator("table tbody tr").count()
+
+
+def get_chart_next_page_button(page):
+    return page.locator(
+        "[aria-label='Pagination Navigation'] a[type='nextItem']"
+    ).first
+
+
+def is_chart_next_page_available(page):
+    next_button = get_chart_next_page_button(page)
+    if not wait_for_visible(next_button, 2_000):
+        return False
+
+    aria_disabled = (next_button.get_attribute("aria-disabled") or "").lower()
+    class_name = (next_button.get_attribute("class") or "").lower()
+    return aria_disabled != "true" and "disabled" not in class_name
+
+
+def go_to_next_chart_page(page, current_page_number):
+    next_button = get_chart_next_page_button(page)
+    next_button.wait_for(state="visible", timeout=15_000)
+    next_button.scroll_into_view_if_needed()
+    step_pause(page)
+    print(
+        f"[7] 현재 페이지에 없어서 차트 목록 {current_page_number + 1}페이지로 이동합니다."
+    )
+    next_button.click()
+    safe_wait_for_load(page, "domcontentloaded", 15_000)
+    safe_wait_for_load(page, "networkidle", 5_000)
+    page.locator("table tbody tr").first.wait_for(state="visible", timeout=15_000)
+    step_pause(page)
+
+
 def get_window_scroll_y(page):
     try:
         return int(page.evaluate("() => Math.round(window.scrollY)"))
@@ -159,8 +195,8 @@ def get_window_scroll_y(page):
         return -1
 
 
-def scroll_until_chart_visible(page, chart_name):
-    print(f"[6] 화면을 스크롤해 '{chart_name}' 차트 링크를 찾습니다.")
+def scroll_until_chart_visible(page, chart_name, page_number):
+    print(f"[6] 차트 목록 {page_number}페이지에서 '{chart_name}' 링크를 찾습니다.")
     chart_link = build_chart_link_locator(page, chart_name)
     if wait_for_visible(chart_link, 1_000):
         chart_link.scroll_into_view_if_needed()
@@ -185,17 +221,68 @@ def scroll_until_chart_visible(page, chart_name):
             break
         previous_scroll_y = current_scroll_y
 
-    raise RuntimeError(f"Exact chart link not found on screen: {chart_name}")
+    return None
+
+
+def find_chart_across_pages(page, chart_name):
+    page_number = 1
+
+    while True:
+        row_count = count_chart_rows(page)
+        chart_link = scroll_until_chart_visible(page, chart_name, page_number)
+        if chart_link is not None:
+            return {
+                "lookup_status": "found",
+                "page_number": page_number,
+                "row_count": row_count,
+                "chart_link": chart_link,
+            }
+
+        if row_count < ROWS_PER_PAGE:
+            print(
+                f"[7] 차트 목록 {page_number}페이지 행 수가 {row_count}개라 마지막 페이지로 판단했습니다. "
+                f"'{chart_name}' 차트가 없습니다."
+            )
+            return {
+                "lookup_status": "not_found",
+                "page_number": page_number,
+                "row_count": row_count,
+                "chart_link": None,
+            }
+
+        if not is_chart_next_page_available(page):
+            print(f"[7] 다음 페이지가 없어 '{chart_name}' 차트가 없습니다.")
+            return {
+                "lookup_status": "not_found",
+                "page_number": page_number,
+                "row_count": row_count,
+                "chart_link": None,
+            }
+
+        go_to_next_chart_page(page, page_number)
+        page_number += 1
 
 
 def open_chart_detail(page, chart_name):
-    chart_link = scroll_until_chart_visible(page, chart_name)
+    locate_result = find_chart_across_pages(page, chart_name)
+    if locate_result["lookup_status"] != "found":
+        return {
+            "chart_name": chart_name,
+            "lookup_status": "not_found",
+            "page_number": locate_result["page_number"],
+            "row_count": locate_result["row_count"],
+            "chart_number": "",
+            "applied_chart": "",
+            "current_file": "",
+        }
+
+    chart_link = locate_result["chart_link"]
     result_row = chart_link.locator("xpath=ancestor::tr[1]").first
     row_cells = result_row.locator("td")
     chart_number = row_cells.nth(1).inner_text().strip()
     applied_chart = row_cells.nth(3).inner_text().strip()
 
-    print(f"[7] '{chart_name}' 차트 링크를 클릭합니다.")
+    print(f"[8] '{chart_name}' 차트 링크를 클릭합니다.")
     chart_link.click()
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
@@ -212,11 +299,14 @@ def open_chart_detail(page, chart_name):
         current_file = current_file_locator.inner_text().strip()
 
     print(
-        "[8] 차트 상세 페이지 진입을 확인했습니다: "
+        "[9] 차트 상세 페이지 진입을 확인했습니다: "
         f"chart_number={chart_number}, applied_chart={applied_chart}"
     )
     return {
         "chart_name": chart_name,
+        "lookup_status": "found",
+        "page_number": locate_result["page_number"],
+        "row_count": locate_result["row_count"],
         "chart_number": chart_number,
         "applied_chart": applied_chart,
         "current_file": current_file,
@@ -238,10 +328,11 @@ def run_chart_lookup(
     )
     open_chart_page(page)
     snap_and_check_ui(page, "chart_list")
-    set_chart_rows_per_page(page, 100)
+    set_chart_rows_per_page(page, ROWS_PER_PAGE)
     snap_and_check_ui(page, "chart_list_100")
     summary = open_chart_detail(page, chart_name)
-    snap_and_check_ui(page, "chart_detail")
+    if summary["lookup_status"] == "found":
+        snap_and_check_ui(page, "chart_detail")
     return summary
 
 
@@ -276,7 +367,14 @@ def save_artifacts(
         f"title={page.title()}",
     ]
     if result_summary:
-        for key in ["chart_number", "applied_chart", "current_file"]:
+        for key in [
+            "lookup_status",
+            "page_number",
+            "row_count",
+            "chart_number",
+            "applied_chart",
+            "current_file",
+        ]:
             summary_lines.append(f"{key}={result_summary.get(key, '')}")
     if error_message:
         summary_lines.append(f"error={error_message}")
@@ -293,7 +391,7 @@ def hold_browser_open(page, hold_seconds):
     if hold_seconds <= 0:
         return
 
-    print(f"[9] 현재 화면을 {hold_seconds}초 동안 유지합니다.")
+    print(f"[10] 현재 화면을 {hold_seconds}초 동안 유지합니다.")
     deadline = time.time() + hold_seconds
     while time.time() < deadline:
         page.wait_for_timeout(POLL_WAIT_MS)
