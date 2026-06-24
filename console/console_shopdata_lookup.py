@@ -635,45 +635,6 @@ def resolve_purchase_line_and_count(page, dialog, purchase_code):
     return purchase_line_number, purchase_count
 
 
-def edit_count_line_to_zero(page, dialog, purchase_line_number):
-    print(
-        f"[14] 편집 모드에서 Count {purchase_line_number}번 줄을 0으로 변경하고 저장 없이 유지합니다."
-    )
-    count_lines = split_editor_lines(
-        read_ace_editor_value(count_editor),
-        "Count",
-    )
-    replacement_line = build_replacement_line(count_lines, purchase_line_number, 0)
-    replace_result = replace_ace_editor_line(
-        count_editor,
-        purchase_line_number,
-        replacement_line,
-    )
-    step_pause(page)
-    highlight_ace_editor_line(count_editor, purchase_line_number)
-    page.wait_for_timeout(HIGHLIGHT_WAIT_MS)
-
-    updated_lines = split_editor_lines(
-        read_ace_editor_value(count_editor),
-        "Count",
-    )
-    updated_value = parse_editor_line_value(
-        updated_lines,
-        purchase_line_number,
-        "Count",
-    )
-    if updated_value != 0:
-        raise RuntimeError(
-            f"Count {purchase_line_number}번 줄 수정 결과가 0이 아닙니다: {updated_value}"
-        )
-
-    return {
-        "count_line_before_edit": replace_result.get("before", "").strip(),
-        "count_line_after_edit": replace_result.get("after", "").strip(),
-        "edited_count_value": updated_value,
-    }
-
-
 def edit_count_line_to_zero_in_edit_mode(page, dialog, purchase_line_number):
     print(
         f"[14] 편집 모드에서 Count {purchase_line_number}번 줄을 0으로 변경하고 저장 없이 유지합니다."

@@ -117,10 +117,7 @@ def set_dropdown_value(dropdown, target_text, label):
 
     opened = False
     for _ in range(3):
-        try:
-            dropdown.click(force=True)
-        except Exception:
-            dropdown.evaluate("el => el.click()")
+        dropdown.click()
         step_pause(dropdown.page)
         expanded = (dropdown.get_attribute("aria-expanded") or "").lower()
         if expanded == "true":
@@ -137,10 +134,7 @@ def set_dropdown_value(dropdown, target_text, label):
     option.scroll_into_view_if_needed()
     step_pause(dropdown.page)
 
-    try:
-        option.click(force=True)
-    except Exception:
-        option.evaluate("el => el.click()")
+    option.click()
     step_pause(dropdown.page)
     safe_wait_for_load(dropdown.page, "networkidle", 5_000)
 
