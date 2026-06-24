@@ -494,7 +494,7 @@ def _print_verdict(ticket_id, parsed, verdict, warnings=None, custom_fields=None
     print(f" * 주문번호 : {order_id}")
     if custom_fields:
         for k, v in custom_fields.items():
-            print(f" {k} : {v}")
+            print(f" * {k} : {v}")
     print(f" 채널     : {channel_disp}")
     if state_disp:
         print(f" 상태     : {state_disp}")

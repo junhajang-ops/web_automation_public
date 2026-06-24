@@ -72,8 +72,22 @@ def _load_dotenv_once():
     if not ENV_PATH.exists():
         return
 
-    for raw_line in ENV_PATH.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
+    # 역슬래시(\) 로 끝나는 줄은 다음 줄과 연결 (긴 JSON 값의 줄바꿈 지원)
+    raw_lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
+    joined: list[str] = []
+    buf = ""
+    for raw_line in raw_lines:
+        if raw_line.endswith("\\"):
+            buf += raw_line[:-1]
+        else:
+            buf += raw_line
+            joined.append(buf)
+            buf = ""
+    if buf:
+        joined.append(buf)
+
+    for line in joined:
+        line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
 
