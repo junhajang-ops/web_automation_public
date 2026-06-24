@@ -77,6 +77,95 @@ _LOGIN_SKIP = ("/login", "/signin", "/oauth", "/logout", "about:blank")
 EXTRACT_JS = r"""
 () => {
   const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+  const isVisible = (el) => {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return (
+      style &&
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      rect.width > 0 &&
+      rect.height > 0
+    );
+  };
+
+  const findTicketInfoPanel = () => {
+    const headings = Array.from(document.querySelectorAll("body *")).filter(
+      el => clean(el.innerText) === "티켓 정보"
+    );
+    for (const heading of headings) {
+      let node = heading;
+      for (let depth = 0; depth < 6 && node; depth += 1) {
+        const text = clean(node.innerText);
+        if (text.includes("티켓 정보") && text.includes("추가 정보")) {
+          return node;
+        }
+        node = node.parentElement;
+      }
+    }
+    return null;
+  };
+
+  const collectCustomFields = () => {
+    const panel = findTicketInfoPanel();
+    if (!panel) {
+      return { pairs: [], map: {} };
+    }
+
+    const additionalTab = Array.from(panel.querySelectorAll("*")).find(
+      el => clean(el.innerText) === "추가 정보"
+    );
+    const panelRect = panel.getBoundingClientRect();
+    const minTop = additionalTab
+      ? additionalTab.getBoundingClientRect().bottom + 8
+      : panelRect.top;
+
+    const rows = new Map();
+    Array.from(panel.querySelectorAll("*")).forEach(el => {
+      if (!isVisible(el)) return;
+      const text = clean(el.innerText);
+      if (!text) return;
+
+      const rect = el.getBoundingClientRect();
+      if (rect.top < minTop || rect.left < panelRect.left || rect.right > panelRect.right + 1) {
+        return;
+      }
+
+      const childTextElements = Array.from(el.children).filter(
+        child => isVisible(child) && clean(child.innerText)
+      );
+      if (childTextElements.length) return;
+
+      const rowKey = String(Math.round(rect.top / 4) * 4);
+      if (!rows.has(rowKey)) rows.set(rowKey, []);
+      rows.get(rowKey).push({
+        x: rect.left,
+        text,
+      });
+    });
+
+    const pairs = [];
+    Array.from(rows.keys())
+      .sort((a, b) => Number(a) - Number(b))
+      .forEach(rowKey => {
+        const items = rows.get(rowKey)
+          .sort((a, b) => a.x - b.x)
+          .filter((item, index, arr) => index === 0 || item.text !== arr[index - 1].text);
+        if (items.length < 2) return;
+
+        const label = clean(items[0].text);
+        const value = clean(items.slice(1).map(item => item.text).join(" "));
+        if (!label || !value) return;
+        pairs.push({ label, value });
+      });
+
+    const map = {};
+    pairs.forEach(pair => {
+      map[pair.label] = pair.value;
+    });
+    return { pairs, map };
+  };
 
   // 1) 정의목록 dl > dt/dd  (cs 같은 폼이 자주 쓰는 구조)
   const definitionLists = [];
@@ -146,6 +235,8 @@ EXTRACT_JS = r"""
     if (m) labeledLines.push({ label: clean(m[1]), value: clean(m[2]) });
   });
 
+  const customFields = collectCustomFields();
+
   return {
     url: location.href,
     title: document.title,
@@ -153,7 +244,9 @@ EXTRACT_JS = r"""
     tables,
     formFields,
     labeledLines,
-    bodyText
+    bodyText,
+    customFields: customFields.pairs,
+    customFieldMap: customFields.map
   };
 }
 """
@@ -202,12 +295,22 @@ def dump_page(page):
 
     # ── 2) HTML · PNG 먼저 저장 (best-effort, 구조화 실패와 무관) ──────
     html_saved = False
-    try:
-        with open(f"{stem}.html", "w", encoding="utf-8") as f:
-            f.write(page.content())
-        html_saved = True
-    except Exception as e:
-        print(f"  (HTML 저장 실패: {e})")
+    for _html_attempt in range(3):
+        try:
+            html_content = page.content()
+            with open(f"{stem}.html", "w", encoding="utf-8") as f:
+                f.write(html_content)
+            html_saved = True
+            break
+        except Exception as e:
+            if _html_attempt < 2:
+                time.sleep(1.0)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5_000)
+                except Exception:
+                    pass
+            else:
+                print(f"  (HTML 저장 실패: {e})")
 
     try:
         page.screenshot(path=f"{stem}.png", full_page=True)
@@ -250,6 +353,10 @@ def dump_page(page):
     lines.append("===== 라벨:값 (텍스트 줄에서 추출) =====")
     for kv in data["labeledLines"]:
         lines.append(f"  {kv['label']} : {kv['value']}")
+    lines.append("")
+    lines.append("===== 우측 추가 정보(custom fields) =====")
+    for pair in data.get("customFields", []):
+        lines.append(f"  {pair['label']} : {pair['value']}")
     lines.append("")
     lines.append("===== 정의목록(dl) =====")
     for i, dl in enumerate(data["definitionLists"], 1):

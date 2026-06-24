@@ -43,9 +43,97 @@ from cs_parse import parse_ticket  # import-time 부작용 없음, 직접 import
 
 # ── EXTRACT_JS ────────────────────────────────────────────────────────────────
 # cs_field_dump.py 동일 상수. import 시 DUMP_DIR.mkdir() 부작용이 있어 복사 사용.
+from cs_parse import list_known_packages, resolve_brand_package
+
 EXTRACT_JS = r"""
 () => {
   const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+  const isVisible = (el) => {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return (
+      style &&
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      rect.width > 0 &&
+      rect.height > 0
+    );
+  };
+
+  const findTicketInfoPanel = () => {
+    const headings = Array.from(document.querySelectorAll("body *")).filter(
+      el => clean(el.innerText) === "티켓 정보"
+    );
+    for (const heading of headings) {
+      let node = heading;
+      for (let depth = 0; depth < 6 && node; depth += 1) {
+        const text = clean(node.innerText);
+        if (text.includes("티켓 정보") && text.includes("추가 정보")) {
+          return node;
+        }
+        node = node.parentElement;
+      }
+    }
+    return null;
+  };
+
+  const collectCustomFields = () => {
+    const panel = findTicketInfoPanel();
+    if (!panel) {
+      return { pairs: [], map: {} };
+    }
+
+    const additionalTab = Array.from(panel.querySelectorAll("*")).find(
+      el => clean(el.innerText) === "추가 정보"
+    );
+    const panelRect = panel.getBoundingClientRect();
+    const minTop = additionalTab
+      ? additionalTab.getBoundingClientRect().bottom + 8
+      : panelRect.top;
+
+    const rows = new Map();
+    Array.from(panel.querySelectorAll("*")).forEach(el => {
+      if (!isVisible(el)) return;
+      const text = clean(el.innerText);
+      if (!text) return;
+
+      const rect = el.getBoundingClientRect();
+      if (rect.top < minTop || rect.left < panelRect.left || rect.right > panelRect.right + 1) {
+        return;
+      }
+
+      const childTextElements = Array.from(el.children).filter(
+        child => isVisible(child) && clean(child.innerText)
+      );
+      if (childTextElements.length) return;
+
+      const rowKey = String(Math.round(rect.top / 4) * 4);
+      if (!rows.has(rowKey)) rows.set(rowKey, []);
+      rows.get(rowKey).push({ x: rect.left, text });
+    });
+
+    const pairs = [];
+    Array.from(rows.keys())
+      .sort((a, b) => Number(a) - Number(b))
+      .forEach(rowKey => {
+        const items = rows.get(rowKey)
+          .sort((a, b) => a.x - b.x)
+          .filter((item, index, arr) => index === 0 || item.text !== arr[index - 1].text);
+        if (items.length < 2) return;
+
+        const label = clean(items[0].text);
+        const value = clean(items.slice(1).map(item => item.text).join(" "));
+        if (!label || !value) return;
+        pairs.push({ label, value });
+      });
+
+    const map = {};
+    pairs.forEach(pair => {
+      map[pair.label] = pair.value;
+    });
+    return { pairs, map };
+  };
 
   const definitionLists = [];
   document.querySelectorAll("dl").forEach(dl => {
@@ -106,19 +194,18 @@ EXTRACT_JS = r"""
     if (m) labeledLines.push({ label: clean(m[1]), value: clean(m[2]) });
   });
 
+  const customFields = collectCustomFields();
+
   return { url: location.href, title: document.title,
-           definitionLists, tables, formFields, labeledLines, bodyText };
+           definitionLists, tables, formFields, labeledLines, bodyText,
+           customFields: customFields.pairs, customFieldMap: customFields.map };
 }
 """
 
 # ── 상수 ──────────────────────────────────────────────────────────────────────
 
-# 브랜드 → Play 패키지명 (CURRENT_STATE.md 6-A 기준, OPEN_ISSUES #2 미확정 항목 있음)
-BRAND_PACKAGE_MAP = {
-    "게임타이틀(ko)": "com.mycompany.myapp",
-    "Gametitle_Raid(en)": "com.mycompany.myapp",
-}
-_ALL_PACKAGES = list(dict.fromkeys(BRAND_PACKAGE_MAP.values()))  # 중복 제거
+# 패키지 목록은 cs_parse.py의 패키지-브랜드 규칙에서 불러옵니다.
+_ALL_PACKAGES = list_known_packages()
 
 SCOPES = ["https://www.googleapis.com/auth/androidpublisher"]
 TICKET_URL_RE = re.compile(r"/tickets/[^/]+/(\d+)")
@@ -127,6 +214,12 @@ _SIDEBAR_TICKET_RE = re.compile(r"^\s*(\d{3,8})\s*\|", re.MULTILINE)  # NNNNN | 
 BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / "pw_profile"
 REFUNDED_STATES = {"REFUNDED", "PARTIALLY_REFUNDED", "PENDING_REFUND", "CANCELED"}
+
+# 결제정보 가격 패턴: 통화기호+숫자 또는 숫자+통화기호 (라벨 무관, 값 셀 직접 감지)
+_PRICE_VAL_RE = re.compile(
+    r"[A-Z]{0,3}[$€£¥₩R]\s*[\d,\.]+|[$€£¥₩]\s*[\d,\.]+|[\d,\.]+\s*[$€£¥₩]",
+    re.IGNORECASE,
+)
 _SEP = "═" * 44
 
 _STATE_LABEL = {
@@ -378,54 +471,6 @@ def _find_display_ticket_num(data: dict) -> str | None:
     return None
 
 
-def _extract_custom_fields(data: dict) -> dict:
-    """고객 입력 결제정보(상품명·가격·수량) 원문 추출.
-
-    고객 자유 입력이라 파싱하지 않고 원문을 단일 필드로 반환.
-    - 합쳐진 행(라벨에 관련 키워드 2개 이상): 값 그대로 사용
-    - 개별 행(각 키워드가 별도 행): 찾은 순서대로 ' / ' 로 결합
-    반환: {"결제정보 (고객 입력)": "..."} 또는 {}
-    """
-    _KO = ("상품명", "가격", "수량")
-    _EN = ("product", "price", "quantity")
-
-    def _is_combined_label(label):
-        ll = label.lower()
-        return (sum(k in ll for k in _KO) >= 2 or
-                sum(k in ll for k in _EN) >= 2 or
-                (any(k in ll for k in _KO) and any(k in ll for k in _EN)))
-
-    # 1) 합쳐진 행 — 라벨 하나에 키워드 2개 이상 (한/영 모두)
-    for table in data.get("tables", []):
-        for row in table:
-            if len(row) >= 2 and _is_combined_label(row[0]):
-                v = row[1].strip()
-                if v:
-                    return {"결제정보 (고객 입력)": v}
-
-    # 2) 개별 행 — 상품명·가격·수량 각각 탐색 후 합산
-    _SLOTS = [
-        ("상품명", "product name", "item name", "결제 상품"),
-        ("가격", "price", "amount"),
-        ("수량", "quantity", "qty"),
-    ]
-    slots = {}
-    for table in data.get("tables", []):
-        for row in table:
-            if len(row) < 2:
-                continue
-            ll = row[0].lower()
-            for i, kws in enumerate(_SLOTS):
-                if i not in slots and any(k in ll for k in kws):
-                    v = row[1].strip()
-                    if v:
-                        slots[i] = v
-    if slots:
-        return {"결제정보 (고객 입력)": " / ".join(slots[i] for i in sorted(slots))}
-
-    return {}
-
-
 def _print_verdict(ticket_id, parsed, verdict, warnings=None, custom_fields=None):
     """PowerShell 패널에 verdict 출력."""
     brand = parsed.get("brand") or "(브랜드 없음)"
@@ -445,8 +490,8 @@ def _print_verdict(ticket_id, parsed, verdict, warnings=None, custom_fields=None
     if warnings:
         for w in warnings:
             print(f" [경고] {w}")
-    print(f" UUID     : {uuid_val}")
-    print(f" 주문번호 : {order_id}")
+    print(f" * UUID     : {uuid_val}")
+    print(f" * 주문번호 : {order_id}")
     if custom_fields:
         for k, v in custom_fields.items():
             print(f" {k} : {v}")
@@ -457,6 +502,16 @@ def _print_verdict(ticket_id, parsed, verdict, warnings=None, custom_fields=None
         print(f" {line}")
     print(f" 판정     : {verdict['verdict_label']}")
     print(_SEP)
+
+
+def _format_config_error(error_code: str):
+    if error_code.startswith("env_missing:"):
+        return f"환경변수 '{error_code.split(':', 1)[1]}'가 없거나 비어 있습니다."
+    if error_code.startswith("brand_not_configured:"):
+        return f"브랜드 '{error_code.split(':', 1)[1]}'가 CS_PACKAGE_BRAND_RULES에 없습니다."
+    if error_code.startswith("field_not_configured:"):
+        return f"브랜드 규칙에 '{error_code.split(':', 1)[1]}' 항목이 없습니다."
+    return error_code
 
 
 def _handle_ticket(page, ticket_id, service):
@@ -470,6 +525,7 @@ def _handle_ticket(page, ticket_id, service):
 
     parsed = parse_ticket(data)
     flags = parsed["flags"]
+    config_errors = parsed.get("config_errors") or []
     warnings = []
 
     if "brand_missing" in flags:
@@ -478,6 +534,18 @@ def _handle_ticket(page, ticket_id, service):
         warnings.append("UUID 없음")
 
     # 주문번호 없거나 형식 오류 → API 조회 생략
+    if config_errors:
+        print()
+        print(_SEP)
+        display_num = _find_display_ticket_num(data) or ticket_id
+        print(f" ?곗폆 {display_num}  |  釉뚮옖?? {parsed.get('brand') or '(釉뚮옖???놁쓬)'}")
+        print(_SEP)
+        for item in config_errors:
+            print(f" [오류] {_format_config_error(item)}")
+        print(" ?먯젙     : 환경변수 규칙 오류")
+        print(_SEP)
+        return
+
     if "order_missing" in flags or "order_invalid" in flags:
         reason = (
             "주문번호 없음" if "order_missing" in flags
@@ -490,23 +558,24 @@ def _handle_ticket(page, ticket_id, service):
         print(_SEP)
         for w in warnings:
             print(f" [경고] {w}")
-        print(f" UUID     : {parsed.get('uuid') or '(없음)'}")
-        print(f" 주문번호 : (없음)")
+        print(f" * UUID     : {parsed.get('uuid') or '(없음)'}")
+        print(f" * 주문번호 : (없음)")
         print(f" 판정     : 정보부족 — {reason}")
         print(_SEP)
         return
 
     # 패키지 결정
     brand = parsed.get("brand", "")
-    if brand and brand in BRAND_PACKAGE_MAP:
-        packages = [BRAND_PACKAGE_MAP[brand]]
+    package_name = parsed.get("app_package") or resolve_brand_package(brand)
+    if package_name:
+        packages = [package_name]
     elif brand:
-        warnings.append(f"브랜드 '{brand}' 패키지 매핑 없음 — 전체 패키지 시도")
+        warnings.append(f"브랜드 '{brand}' 패키지 규칙 없음 — 전체 패키지 시도")
         packages = _ALL_PACKAGES
     else:
         packages = _ALL_PACKAGES
 
-    custom_fields = _extract_custom_fields(data)
+    custom_fields = parsed.get("selected_custom_fields") or None
     display_num = _find_display_ticket_num(data) or ticket_id  # #NNNNN 또는 URL ID
     order_result, http_status, _ = _fetch_order(service, packages, parsed["order_id"])
     verdict = build_verdict(parsed, order_result, http_status)

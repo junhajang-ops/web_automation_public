@@ -249,6 +249,7 @@ def confirm_item_add_popup(page):
     confirm_btn.scroll_into_view_if_needed()
     step_pause(page)
     confirm_btn.click()
+    dialog.wait_for(state="hidden", timeout=10_000)
     # 팝업 닫힘 대기
     dialog.wait_for(state="hidden", timeout=10_000)
     step_pause(page)

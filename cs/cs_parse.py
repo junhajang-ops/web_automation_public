@@ -17,7 +17,13 @@ CLI:
 import re
 import sys
 import json
+import os
 from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+ROOT_DIR = BASE_DIR.parent
+ENV_PATH = ROOT_DIR / ".env"
+_DOTENV_LOADED = False
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -38,6 +44,289 @@ _ATTACH_EXT = re.compile(
     r"\.(png|jpg|jpeg|gif|pdf|mp4|zip|txt|webp|bmp|mov|avi)$",
     re.IGNORECASE,
 )
+
+_CUSTOM_FIELD_RULES_DEFAULT_ENV = "CS_CUSTOM_FIELD_RULES_DEFAULT"
+_CUSTOM_FIELD_RULES_BRAND_ENV = "CS_CUSTOM_FIELD_RULES_BY_BRAND"
+_PACKAGE_BRAND_RULES_ENV = "CS_PACKAGE_BRAND_RULES"
+_REQUIRED_PACKAGE_RULE_KEYS = ("uuid", "order_id", "order_meta", "order_time")
+_WARNED_ENV_NAMES = set()
+
+
+def _clean_text(value: str):
+    return re.sub(r"\s+", " ", (value or "")).strip()
+
+
+def _warn_env_once(name: str, message: str):
+    if name in _WARNED_ENV_NAMES:
+        return
+    _WARNED_ENV_NAMES.add(name)
+    print(f"[경고] {name}: {message}", file=sys.stderr)
+
+
+def _load_dotenv_once():
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    _DOTENV_LOADED = True
+
+    if not ENV_PATH.exists():
+        return
+
+    for raw_line in ENV_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or key in os.environ:
+            continue
+
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+
+        os.environ[key] = value
+
+
+def _load_json_env(name: str):
+    _load_dotenv_once()
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _warn_env_once(name, f"JSON 파싱 실패 ({exc})")
+        return {}
+    if not isinstance(parsed, dict):
+        _warn_env_once(name, "JSON object 형식이 아니어서 무시합니다.")
+        return {}
+    return parsed
+
+
+def _normalize_rule_map(raw) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+
+    normalized = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(value, str):
+            items = [_clean_text(value)] if _clean_text(value) else []
+        elif isinstance(value, list):
+            items = [
+                _clean_text(item)
+                for item in value
+                if isinstance(item, str) and _clean_text(item)
+            ]
+        else:
+            continue
+        if key == "order_item_line":
+            key = "order_meta"
+        normalized[key] = items
+    return normalized
+
+
+def _merge_rule_maps(base: dict, override: dict) -> dict:
+    merged = {key: list(value) for key, value in base.items()}
+    for key, value in override.items():
+        merged[key] = list(value)
+    return merged
+
+
+def _normalize_brand_key(brand: str):
+    return re.sub(r"[^0-9a-z]+", "_", (brand or "").lower()).strip("_")
+
+
+def _normalize_package_brand_rules(raw) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+
+    normalized = {}
+    for package_name, package_block in raw.items():
+        if not isinstance(package_name, str):
+            continue
+
+        if isinstance(package_block, dict) and isinstance(package_block.get("brands"), dict):
+            brand_map = package_block.get("brands", {})
+        elif isinstance(package_block, dict):
+            brand_map = package_block
+        else:
+            continue
+
+        normalized_brand_map = {}
+        for brand_name, rule_map in brand_map.items():
+            if not isinstance(brand_name, str):
+                continue
+            normalized_rules = _normalize_rule_map(rule_map)
+            if normalized_rules:
+                normalized_brand_map[brand_name] = normalized_rules
+
+        if normalized_brand_map:
+            normalized[package_name] = normalized_brand_map
+
+    return normalized
+
+
+def _merge_package_brand_rules(base: dict, override: dict) -> dict:
+    merged = {
+        package_name: {
+            brand_name: {key: list(values) for key, values in rule_map.items()}
+            for brand_name, rule_map in brand_map.items()
+        }
+        for package_name, brand_map in base.items()
+    }
+
+    for package_name, brand_map in override.items():
+        if package_name not in merged:
+            merged[package_name] = {}
+        for brand_name, rule_map in brand_map.items():
+            merged[package_name][brand_name] = {
+                key: list(values) for key, values in rule_map.items()
+            }
+
+    return merged
+
+
+def _load_package_brand_rules() -> dict:
+    return _normalize_package_brand_rules(_load_json_env(_PACKAGE_BRAND_RULES_ENV))
+
+
+def _resolve_brand_package_entry(brand: str):
+    package_brand_rules = _load_package_brand_rules()
+    if not brand:
+        return None, {}
+
+    normalized_brand = _normalize_brand_key(brand)
+    for package_name, brand_map in package_brand_rules.items():
+        if brand in brand_map:
+            return package_name, brand_map[brand]
+        for brand_name, rule_map in brand_map.items():
+            if _normalize_brand_key(brand_name) == normalized_brand:
+                return package_name, rule_map
+
+    return None, {}
+
+
+def _load_custom_field_rules(brand: str) -> dict:
+    rules = _normalize_rule_map(_load_json_env(_CUSTOM_FIELD_RULES_DEFAULT_ENV))
+
+    _package_name, package_brand_rules = _resolve_brand_package_entry(brand)
+    if package_brand_rules:
+        rules = _merge_rule_maps(rules, package_brand_rules)
+
+    by_brand = _load_json_env(_CUSTOM_FIELD_RULES_BRAND_ENV)
+    if isinstance(by_brand, dict):
+        candidates = []
+        if brand:
+            candidates.extend([brand, _normalize_brand_key(brand)])
+        for candidate in candidates:
+            if candidate in by_brand:
+                rules = _merge_rule_maps(
+                    rules,
+                    _normalize_rule_map(by_brand.get(candidate, {})),
+                )
+                break
+
+    return rules
+
+
+def _collect_config_errors(brand: str):
+    config_errors = []
+    package_brand_rules = _load_package_brand_rules()
+    if not package_brand_rules:
+        config_errors.append(f"env_missing:{_PACKAGE_BRAND_RULES_ENV}")
+        return None, {}, config_errors
+
+    if not brand:
+        return None, {}, config_errors
+
+    package_name, brand_rules = _resolve_brand_package_entry(brand)
+    if not package_name:
+        config_errors.append(f"brand_not_configured:{brand}")
+        return None, {}, config_errors
+
+    for key in _REQUIRED_PACKAGE_RULE_KEYS:
+        if not brand_rules.get(key):
+            config_errors.append(f"field_not_configured:{key}")
+
+    return package_name, brand_rules, config_errors
+
+
+def _normalize_custom_field_map(dump_json: dict) -> dict:
+    field_map = {}
+
+    raw_map = dump_json.get("customFieldMap")
+    if isinstance(raw_map, dict):
+        for label, value in raw_map.items():
+            if not isinstance(label, str):
+                continue
+            clean_label = _clean_text(label)
+            clean_value = _clean_text(str(value))
+            if clean_label and clean_value:
+                field_map[clean_label] = clean_value
+
+    if field_map:
+        return field_map
+
+    raw_pairs = dump_json.get("customFields")
+    if isinstance(raw_pairs, list):
+        for pair in raw_pairs:
+            if not isinstance(pair, dict):
+                continue
+            clean_label = _clean_text(pair.get("label", ""))
+            clean_value = _clean_text(pair.get("value", ""))
+            if clean_label and clean_value:
+                field_map[clean_label] = clean_value
+
+    return field_map
+
+
+def _resolve_custom_field(field_map: dict, aliases: list[str]):
+    if not field_map or not aliases:
+        return None
+
+    normalized_index = {
+        _clean_text(label).lower(): (label, value)
+        for label, value in field_map.items()
+    }
+
+    for alias in aliases:
+        if alias in field_map:
+            return {"label": alias, "value": field_map[alias]}
+
+    for alias in aliases:
+        matched = normalized_index.get(_clean_text(alias).lower())
+        if matched:
+            return {"label": matched[0], "value": matched[1]}
+
+    return None
+
+
+def _select_custom_field_claims(field_map: dict, brand: str):
+    rules = _load_custom_field_rules(brand)
+    resolved = {}
+    selected = {}
+
+    for key in ("uuid", "order_id", "order_time", "order_meta"):
+        matched = _resolve_custom_field(field_map, rules.get(key, []))
+        if not matched:
+            continue
+        resolved[key] = matched
+        selected[matched["label"]] = matched["value"]
+
+    return resolved, selected
+
+
+def resolve_brand_package(brand: str):
+    package_name, _rules = _resolve_brand_package_entry(brand)
+    return package_name
+
+
+def list_known_packages():
+    return list(_load_package_brand_rules().keys())
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -84,6 +373,7 @@ def parse_ticket(dump_json: dict) -> dict:
       flags          : 누락·형식불일치 신호 목록 (list[str])
     """
     flags = []
+    custom_field_map = _normalize_custom_field_map(dump_json)
 
     # ── 1) ticket_info_* formFields ─────────────────────────────────────
     brand = category = ticket_status = sender = None
@@ -111,8 +401,22 @@ def parse_ticket(dump_json: dict) -> dict:
     if not category:
         flags.append("category_missing")
 
+    app_package = None
+    config_errors = []
+    if brand:
+        app_package, _brand_rules, config_errors = _collect_config_errors(brand)
+    else:
+        _unused_package, _unused_rules, config_errors = _collect_config_errors("")
+
+    resolved_custom_fields, selected_custom_fields = _select_custom_field_claims(
+        custom_field_map,
+        brand or "",
+    )
+
     # ── 2) GPA 주문번호 후보 추출 ────────────────────────────────────────
-    order_id_raw = _find_gpa_raw(dump_json)
+    order_id_raw = None
+    if resolved_custom_fields.get("order_id"):
+        order_id_raw = resolved_custom_fields["order_id"]["value"]
 
     order_id = order_norm_status = None
     if order_id_raw:
@@ -123,7 +427,9 @@ def parse_ticket(dump_json: dict) -> dict:
         flags.append("order_missing")
 
     # ── 3) UUID 추출 ──────────────────────────────────────────────────────
-    uuid = _find_uuid(dump_json)
+    uuid = None
+    if resolved_custom_fields.get("uuid"):
+        uuid = resolved_custom_fields["uuid"]["value"].lower()
     if not uuid:
         flags.append("uuid_missing")
 
@@ -140,9 +446,13 @@ def parse_ticket(dump_json: dict) -> dict:
         "order_norm_status": order_norm_status,
         "uuid": uuid,
         "brand": brand,
+        "app_package": app_package,
         "category": category,
         "ticket_status": ticket_status,
         "sender": sender,
+        "custom_fields": custom_field_map,
+        "selected_custom_fields": selected_custom_fields,
+        "config_errors": config_errors,
         "body": body_msg,
         "attachments": attachments,
         "flags": flags,
@@ -154,8 +464,14 @@ def parse_ticket(dump_json: dict) -> dict:
 # ────────────────────────────────────────────────────────────────────────────
 
 def _find_gpa_raw(dump_json: dict):
-    """tables → bodyText 순으로 GPA 패턴 탐색. 원문 문자열 반환."""
-    # tables: 2열 행의 값 셀
+    """tables 값 셀(row[1])에서 GPA 패턴 탐색. 원문 문자열 반환.
+
+    인식 위치: tables 의 값 셀만. 라벨(row[0])·직원 답변·bodyText 전체 탐색 금지.
+    1차: GPA/GAP 접두사 포함 패턴
+    2차: 접두사 없이 17자리 숫자만 입력한 경우 (normalize_gpa_order 검증)
+    3차: 최초 문의 메시지 (고객이 본문에 직접 기재한 경우)
+    """
+    # 1) GPA/GAP 접두사 패턴
     for table in dump_json.get("tables", []):
         for row in table:
             if len(row) >= 2:
@@ -163,26 +479,34 @@ def _find_gpa_raw(dump_json: dict):
                 if m:
                     return m.group(0)
 
-    # bodyText 전체 탐색 (tables에 없으면)
-    m = _GPA_ANCHOR.search(dump_json.get("bodyText", ""))
-    if m:
-        return m.group(0)
+    # 2) 접두사 없이 17자리 숫자만 입력한 경우 — UUID와 구별 후 digit count 검증
+    for table in dump_json.get("tables", []):
+        for row in table:
+            if len(row) >= 2:
+                v = row[1].strip()
+                if v and not _UUID_RE.search(v):
+                    _, status = normalize_gpa_order(v)
+                    if status == "ok":
+                        return v
+
+    # 3) 최초 문의 메시지
+    first_msg = _extract_first_message(dump_json.get("bodyText", ""))
+    if first_msg:
+        m = _GPA_ANCHOR.search(first_msg)
+        if m:
+            return m.group(0)
 
     return None
 
 
 def _find_uuid(dump_json: dict):
-    """tables → bodyText 순으로 UUID 탐색. 소문자 정규화해 반환."""
+    """tables 값 셀(row[1])에서 UUID 탐색. 소문자 정규화해 반환."""
     for table in dump_json.get("tables", []):
         for row in table:
-            for cell in row:
-                m = _UUID_RE.search(cell)
+            if len(row) >= 2:
+                m = _UUID_RE.search(row[1])
                 if m:
                     return m.group(0).lower()
-
-    m = _UUID_RE.search(dump_json.get("bodyText", ""))
-    if m:
-        return m.group(0).lower()
 
     return None
 
