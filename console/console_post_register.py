@@ -9,9 +9,9 @@ Scope:
 - Fill title and content
 - Open the item-add popup
 - Select TEST_CHART_NAME in the chart dropdown
+- Select item by ShopTable_ID (looked up from payment_docs/ CSV)
 
-This script stays read-only up to chart selection.
-It does not complete final registration.
+Final registration (receiver input, submit) requires human approval.
 """
 
 import argparse
@@ -34,7 +34,8 @@ from console_user_search_test import (
     step_pause,
     wait_for_visible,
 )
-from test_config import TEST_CHART_NAME
+from console_chart_lookup import PAYMENT_DOCS_DIR, _read_csv_and_lookup
+from test_config import TEST_CHART_NAME, TEST_PURCHASE_CODE, TEST_UUID
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -155,6 +156,25 @@ def open_item_add_popup(page):
     step_pause(page)
 
 
+def load_shop_table_id(chart_name: str) -> str:
+    """payment_docs/ 에 저장된 CSV에서 TEST_PURCHASE_CODE → ShopTable_ID 반환."""
+    csvs = sorted(PAYMENT_DOCS_DIR.glob(f"chart_{chart_name}_*.csv"))
+    if not csvs:
+        raise RuntimeError(
+            f"payment_docs/ 에 '{chart_name}' CSV 없음 — console_chart_lookup.py 먼저 실행 필요"
+        )
+    csv_path = csvs[-1]
+    print(f"[CSV] {csv_path.name} 에서 ShopTable_ID 조회 중...")
+    result = _read_csv_and_lookup(csv_path, TEST_PURCHASE_CODE)
+    shop_table_id = result.get("shop_table_id", "")
+    if not shop_table_id:
+        raise RuntimeError(
+            f"CSV에서 purchase_code='{TEST_PURCHASE_CODE}'에 대응하는 ShopTable_ID를 찾지 못했습니다."
+        )
+    print(f"    ShopTable_ID: {shop_table_id}")
+    return shop_table_id
+
+
 def select_chart_in_item_popup(page, chart_name):
     print(f"[10] 아이템 추가 팝업 차트 드롭다운에서 '{chart_name}'을 선택합니다.")
     dialog = get_item_add_dialog(page)
@@ -183,6 +203,79 @@ def select_chart_in_item_popup(page, chart_name):
     return selected_text
 
 
+def select_item_in_popup(page, shop_table_id: str):
+    print(f"[11] 아이템 드롭다운에서 ShopTable_ID='{shop_table_id}' 선택합니다.")
+    dialog = get_item_add_dialog(page)
+    item_dropdown = dialog.locator("[name='item'][role='listbox']").first
+    item_dropdown.wait_for(state="visible", timeout=10_000)
+    item_dropdown.scroll_into_view_if_needed()
+    step_pause(page)
+    item_dropdown.click()
+    step_pause(page)
+
+    target_substr = f'"ShopTable_ID":"{shop_table_id}"'
+    option = dialog.locator("[role='option']").filter(has_text=target_substr).first
+    option.wait_for(state="visible", timeout=10_000)
+    option.scroll_into_view_if_needed()
+    step_pause(page)
+    option.click()
+    step_pause(page)
+
+    selected_text = item_dropdown.locator(".text, .divider.text").first.inner_text().strip()
+    print(f"    선택 결과: {selected_text[:80]}...")
+    if target_substr not in selected_text:
+        raise RuntimeError(
+            f"아이템 선택 결과에 ShopTable_ID='{shop_table_id}'가 없습니다. actual='{selected_text[:120]}'"
+        )
+    return selected_text
+
+
+def fill_item_count(page, count: int = 1):
+    print(f"[12] 수량 '{count}' 입력합니다.")
+    dialog = get_item_add_dialog(page)
+    count_input = dialog.locator("input[name='itemCount']").first
+    count_input.wait_for(state="visible", timeout=10_000)
+    count_input.scroll_into_view_if_needed()
+    step_pause(page)
+    count_input.fill(str(count))
+    step_pause(page)
+
+
+def confirm_item_add_popup(page):
+    print("[13] 아이템 추가 팝업 '확인' 버튼을 클릭합니다.")
+    dialog = get_item_add_dialog(page)
+    confirm_btn = dialog.locator("button.ui.medium.positive.button").first
+    confirm_btn.wait_for(state="visible", timeout=10_000)
+    confirm_btn.scroll_into_view_if_needed()
+    step_pause(page)
+    confirm_btn.click()
+    # 팝업 닫힘 대기
+    dialog.wait_for(state="hidden", timeout=10_000)
+    step_pause(page)
+
+
+def fill_receiver_uuid(page, uuid: str):
+    print(f"[14] 유저 번호/닉네임 란에 UUID 입력합니다: {uuid}")
+    dialog = get_post_register_dialog(page)
+    gamer_input = dialog.locator("input[name='gamer']").first
+    gamer_input.wait_for(state="visible", timeout=10_000)
+    gamer_input.scroll_into_view_if_needed()
+    step_pause(page)
+    gamer_input.fill(uuid)
+    step_pause(page)
+
+
+def click_receiver_register(page):
+    print("[15] 수신자 '등록' 버튼을 클릭합니다.")
+    dialog = get_post_register_dialog(page)
+    register_btn = dialog.locator("button.ui.primary.button").filter(has_text="등록").first
+    register_btn.wait_for(state="visible", timeout=10_000)
+    register_btn.scroll_into_view_if_needed()
+    step_pause(page)
+    register_btn.click()
+    step_pause(page)
+
+
 def run_post_register(page, chart_name, explicit_project_base, start_url, project_name):
     prepare_console_project(
         page=page,
@@ -208,7 +301,24 @@ def run_post_register(page, chart_name, explicit_project_base, start_url, projec
 
     selected = select_chart_in_item_popup(page, chart_name)
     snap_and_check_ui(page, "post_chart_selected")
-    return {"chart_selected": selected}
+
+    shop_table_id = load_shop_table_id(chart_name)
+    select_item_in_popup(page, shop_table_id)
+    snap_and_check_ui(page, "post_item_selected")
+
+    fill_item_count(page, count=1)
+    snap_and_check_ui(page, "post_item_count")
+
+    confirm_item_add_popup(page)
+    snap_and_check_ui(page, "post_item_confirmed")
+
+    fill_receiver_uuid(page, TEST_UUID)
+    snap_and_check_ui(page, "post_receiver_uuid")
+
+    click_receiver_register(page)
+    snap_and_check_ui(page, "post_receiver_registered")
+
+    return {"chart_selected": selected, "shop_table_id": shop_table_id}
 
 
 def save_artifacts(page, out_dir, succeeded, result_summary=None, error_message=""):
@@ -285,12 +395,12 @@ def main():
             )
             succeeded = True
 
-            print("\n=== 완료 (차트 선택까지) ===")
+            print("\n=== 완료 (아이템 선택까지) ===")
             for key, value in result_summary.items():
                 print(f"  {key}: {value}")
 
             if args.hold_seconds > 0:
-                print(f"[11] {args.hold_seconds}초 대기 후 종료합니다.")
+                print(f"[16] {args.hold_seconds}초 대기 후 종료합니다.")
                 page.wait_for_timeout(args.hold_seconds * 1_000)
 
         except Exception as exc:
