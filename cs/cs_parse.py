@@ -343,6 +343,37 @@ def list_known_packages():
     return list(_load_package_brand_rules().keys())
 
 
+def resolve_brand_gcp_log(brand: str):
+    """브랜드 → (gcp_project, gcp_log_name).
+
+    `CS_PACKAGE_BRAND_RULES`의 **패키지 레벨** `gcp_project`/`gcp_log_name`을 읽는다
+    (두 브랜드가 같은 패키지/프로젝트를 공유). 정규화 로직을 거치지 않고 raw에서 직접 찾는다.
+    없으면 (None, None).
+    """
+    raw = _load_json_env(_PACKAGE_BRAND_RULES_ENV)
+    if not isinstance(raw, dict) or not brand:
+        return None, None
+    normalized_brand = _normalize_brand_key(brand)
+    for _package_name, block in raw.items():
+        if not isinstance(block, dict):
+            continue
+        brands = block.get("brands") if isinstance(block.get("brands"), dict) else block
+        if not isinstance(brands, dict):
+            continue
+        matched = brand in brands or any(
+            isinstance(b, str) and _normalize_brand_key(b) == normalized_brand
+            for b in brands
+        )
+        if matched:
+            project = block.get("gcp_project")
+            log_name = block.get("gcp_log_name")
+            return (
+                project if isinstance(project, str) and project else None,
+                log_name if isinstance(log_name, str) and log_name else None,
+            )
+    return None, None
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 공개 함수 1: normalize_gpa_order
 # ────────────────────────────────────────────────────────────────────────────

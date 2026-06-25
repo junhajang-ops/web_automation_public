@@ -17,6 +17,7 @@ cs_copilot.py — cs 실시간 보조 co-pilot (읽기 전용 MVP)
 """
 
 import argparse
+import json
 import re
 import sys
 import time
@@ -43,7 +44,7 @@ from cs_parse import parse_ticket  # import-time 부작용 없음, 직접 import
 
 # ── EXTRACT_JS ────────────────────────────────────────────────────────────────
 # cs_field_dump.py 동일 상수. import 시 DUMP_DIR.mkdir() 부작용이 있어 복사 사용.
-from cs_parse import list_known_packages, resolve_brand_package
+from cs_parse import list_known_packages, resolve_brand_package, resolve_brand_gcp_log
 
 EXTRACT_JS = r"""
 () => {
@@ -207,7 +208,10 @@ EXTRACT_JS = r"""
 # 패키지 목록은 cs_parse.py의 패키지-브랜드 규칙에서 불러옵니다.
 _ALL_PACKAGES = list_known_packages()
 
-SCOPES = ["https://www.googleapis.com/auth/androidpublisher"]
+SCOPES = [
+    "https://www.googleapis.com/auth/androidpublisher",
+    "https://www.googleapis.com/auth/logging.read",
+]
 TICKET_URL_RE = re.compile(r"/tickets/[^/]+/(\d+)")
 _DISPLAY_TICKET_RE = re.compile(r"#(\d{3,8})\b")  # #NNNNN 형식
 _SIDEBAR_TICKET_RE = re.compile(r"^\s*(\d{3,8})\s*\|", re.MULTILINE)  # NNNNN | label 형식 (사이드바)
@@ -514,7 +518,57 @@ def _format_config_error(error_code: str):
     return error_code
 
 
-def _handle_ticket(page, ticket_id, service):
+def fetch_recent_shop_click_log(logging_service, project, log_name, uuid):
+    """해당 유저(uuid)의 **가장 직전** `SUB_CATEGORY=log_shop_click` 로그 1건 조회.
+
+    읽기 전용(`entries.list`). 반환: (entry_dict | None, error | None).
+    """
+    if not (project and log_name and uuid):
+        return None, "project/log_name/uuid 부족"
+    log_path = f"projects/{project}/logs/{log_name}"
+    filt = (
+        f'logName="{log_path}" '
+        f'AND jsonPayload._user_id="{uuid}" '
+        f'AND jsonPayload.SUB_CATEGORY="log_shop_click"'
+    )
+    body = {
+        "resourceNames": [f"projects/{project}"],
+        "filter": filt,
+        "orderBy": "timestamp desc",
+        "pageSize": 1,
+    }
+    try:
+        resp = logging_service.entries().list(body=body).execute()
+    except HttpError as e:
+        status = getattr(getattr(e, "resp", None), "status", "?")
+        return None, f"HTTP {status}"
+    except Exception as e:  # noqa: BLE001 — 조회 실패는 안내만 하고 계속
+        return None, str(e)
+    entries = resp.get("entries", [])
+    if not entries:
+        return None, "해당 유저의 log_shop_click 로그 없음"
+    return entries[0], None
+
+
+def _print_shop_click_log(entry, error):
+    print(_SEP)
+    print(" [GCP Logging] 직전 log_shop_click (정상 결제 → 게임 로그 확인)")
+    if error or not entry:
+        print(f"   조회 실패/없음: {error or '결과 없음'}")
+        print(_SEP)
+        return
+    payload = entry.get("jsonPayload", {}) or {}
+    print(f"   상품(shop_click_id) : {payload.get('shop_click_id', '-')}")
+    print(f"   카테고리            : {payload.get('shop_click_category', '-')}")
+    print(f"   가격(click_price)   : {payload.get('shop_click_price', '-')}")
+    print(f"   서버                : {payload.get('_server_code', '-')} / {payload.get('_server_type', '-')}")
+    print(f"   로그 시각           : {entry.get('timestamp', '-')}")
+    print("   --- 원문 jsonPayload ---")
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(_SEP)
+
+
+def _handle_ticket(page, ticket_id, service, logging_service=None):
     """티켓 상세 처리: 추출 → 파싱 → API 조회 → verdict 출력."""
     print("\n[티켓 감지] 분석 중...")
 
@@ -582,6 +636,22 @@ def _handle_ticket(page, ticket_id, service):
     _print_verdict(display_num, parsed, verdict, warnings=warnings or None,
                    custom_fields=custom_fields or None)
 
+    # 정상 결제(환불 아님) + 구글 확인 → 해당 유저의 직전 log_shop_click 로그 조회·출력
+    if (
+        logging_service is not None
+        and verdict.get("channel") == "google"
+        and not verdict.get("is_refunded")
+    ):
+        uuid = parsed.get("uuid")
+        project, log_name = resolve_brand_gcp_log(brand)
+        if not uuid:
+            print(" [GCP Logging] UUID 없음 — log_shop_click 조회 생략")
+        elif not (project and log_name):
+            print(f" [GCP Logging] 브랜드 '{brand}' GCP 프로젝트/로그 규칙 없음 — 조회 생략")
+        else:
+            entry, err = fetch_recent_shop_click_log(logging_service, project, log_name, uuid)
+            _print_shop_click_log(entry, err)
+
 
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 
@@ -609,6 +679,7 @@ def main():
             str(key_path), scopes=SCOPES
         )
         service = build("androidpublisher", "v3", credentials=creds, cache_discovery=False)
+        logging_service = build("logging", "v2", credentials=creds, cache_discovery=False)
         print(f"[인증] OK — {getattr(creds, 'service_account_email', '(확인불가)')}")
     except Exception as e:
         print(f"[오류] Google API 인증 실패: {e}")
@@ -736,7 +807,7 @@ def main():
                         continue
                     last_ticket[pid] = tid
                     try:
-                        _handle_ticket(page, tid, service)
+                        _handle_ticket(page, tid, service, logging_service)
                     except Exception as e:
                         print(f"[오류] 티켓 #{tid} 처리 실패: {e}")
         except KeyboardInterrupt:
