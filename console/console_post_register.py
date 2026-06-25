@@ -16,7 +16,6 @@ Final registration (receiver input, submit) requires human approval.
 
 import argparse
 import datetime
-import re
 import sys
 from pathlib import Path
 
@@ -185,9 +184,9 @@ def select_chart_in_item_popup(page, chart_name):
     dropdown.click()
     step_pause(page)
 
-    option = dialog.locator("[role='option']").filter(
-        has_text=re.compile(rf"^{re.escape(chart_name)}$")
-    ).first
+    option = find_exact_text_match(dialog.locator("[role='option']"), chart_name)
+    if option is None:
+        raise RuntimeError(f"차트 드롭다운에서 정확히 '{chart_name}'와 일치하는 항목을 찾지 못했습니다.")
     option.wait_for(state="visible", timeout=5_000)
     option.scroll_into_view_if_needed()
     step_pause(page)
@@ -201,6 +200,18 @@ def select_chart_in_item_popup(page, chart_name):
             f"차트 드롭다운 선택 결과가 기대값과 다릅니다: expected='{chart_name}', actual='{selected_text}'"
         )
     return selected_text
+
+
+def find_exact_text_match(items, target_text):
+    count = items.count()
+    for idx in range(count):
+        item = items.nth(idx)
+        try:
+            if item.inner_text().strip() == target_text:
+                return item
+        except Exception:
+            continue
+    return None
 
 
 def select_item_in_popup(page, shop_table_id: str):

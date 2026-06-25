@@ -191,7 +191,7 @@ def ensure_table_selected(page, table_name):
     print(f"[8] 테이블 드롭다운을 열고 '{table_name}'를 입력합니다.")
     dropdown = get_table_dropdown(page)
     current_text = dropdown.locator(".divider.text, .divider.default.text").first
-    if table_name in current_text.inner_text().strip():
+    if current_text.inner_text().strip() == table_name:
         return
 
     dropdown, search_input = open_table_dropdown(page)
@@ -199,17 +199,16 @@ def ensure_table_selected(page, table_name):
     search_input.fill(table_name)
     step_pause(page)
 
-    option = dropdown.locator("[role='option']").filter(has_text=table_name).first
-    if wait_for_visible(option, 5_000):
-        option.scroll_into_view_if_needed()
-        option.click()
-    else:
-        search_input.press("Enter")
+    # 정확 일치 옵션만 선택 — 부분 매칭 시 'GachaData'가 'EventGachaData'를 오선택하는 문제 방지.
+    option = dropdown.get_by_role("option", name=table_name, exact=True).first
+    option.wait_for(state="visible", timeout=5_000)
+    option.scroll_into_view_if_needed()
+    option.click()
     step_pause(page)
 
     deadline = time.time() + 10
     while time.time() < deadline:
-        if table_name in current_text.inner_text().strip():
+        if current_text.inner_text().strip() == table_name:
             return
         page.wait_for_timeout(POLL_WAIT_MS)
 

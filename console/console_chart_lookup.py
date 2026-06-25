@@ -19,7 +19,6 @@ This script is intentionally read-only. It does not click any mutation action.
 import argparse
 import csv as csv_mod
 import datetime
-import re
 import sys
 import time
 from pathlib import Path
@@ -127,9 +126,12 @@ def set_dropdown_value(dropdown, target_text, label):
     if not opened:
         raise RuntimeError(f"{label} 드롭다운을 열지 못했습니다.")
 
-    option = dropdown.locator(".menu [role='option']").filter(
-        has_text=re.compile(rf"^{re.escape(target_text)}$")
-    ).first
+    option = find_exact_text_match(
+        dropdown.locator(".menu [role='option']"),
+        target_text,
+    )
+    if option is None:
+        raise RuntimeError(f"{label} 옵션에서 정확히 '{target_text}'와 일치하는 항목을 찾지 못했습니다.")
     option.wait_for(state="visible", timeout=10_000)
     option.scroll_into_view_if_needed()
     step_pause(dropdown.page)
@@ -183,9 +185,20 @@ def set_chart_list_rows_per_page(page, rows_per_page):
     )
 
 
+def find_exact_text_match(items, target_text):
+    count = items.count()
+    for idx in range(count):
+        item = items.nth(idx)
+        try:
+            if item.inner_text().strip() == target_text:
+                return item
+        except Exception:
+            continue
+    return None
+
+
 def build_chart_link_locator(page, chart_name):
-    exact_name = re.compile(rf"^{re.escape(chart_name)}$")
-    return page.locator("table tbody tr td a").filter(has_text=exact_name).first
+    return find_exact_text_match(page.locator("table tbody tr td a"), chart_name)
 
 
 def count_chart_rows(page):
