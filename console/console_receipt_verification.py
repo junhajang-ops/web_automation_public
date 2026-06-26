@@ -25,6 +25,7 @@ from console_user_search_test import (
     DEFAULT_PROJECT_NAME,
     DEFAULT_START_URL,
     click_login_if_needed,
+    find_exact_text_match,
     load_playwright,
     prepare_console_project,
     safe_wait_for_load,
@@ -122,6 +123,42 @@ def open_receipt_verification_menu(page):
     step_pause(page)
 
 
+def _read_visible_role_signature(page):
+    return page.evaluate(
+        """() => [...new Set(
+            [...document.querySelectorAll('[role]')]
+              .map(el => el.getAttribute('role'))
+              .filter(Boolean)
+        )].sort().join('|')"""
+    )
+
+
+def wait_for_receipt_page_render_stable(page, timeout_ms: int = 6_000, stable_rounds: int = 2):
+    print("[4-1] 영수증 검증 페이지 렌더가 안정될 때까지 기다립니다.")
+    page.locator("input#searchValue").first.wait_for(state="visible", timeout=15_000)
+
+    deadline = time.time() + (timeout_ms / 1000.0)
+    previous_signature = ""
+    stable_count = 0
+
+    while time.time() < deadline:
+        current_signature = _read_visible_role_signature(page)
+        if current_signature and current_signature == previous_signature:
+            stable_count += 1
+        else:
+            previous_signature = current_signature
+            stable_count = 1 if current_signature else 0
+
+        if stable_count >= stable_rounds:
+            step_pause(page)
+            return
+
+        page.wait_for_timeout(POLL_WAIT_MS)
+
+    print("    (렌더 역할 구성이 완전히 고정되기 전 타임아웃되어 최신 상태로 진행합니다.)")
+    step_pause(page)
+
+
 def fill_uuid_search(page, uuid_value):
     print(f"[5] UUID 입력창(name='searchValue')에 값을 입력합니다: {uuid_value}")
     uuid_input = page.locator("input#searchValue").first
@@ -152,21 +189,39 @@ def read_total_amount(page):
 
 def set_rows_per_page(page, count: int = 100):
     print(f"[7-1] 페이지당 행 수를 {count}개로 변경합니다.")
+    target_text = f"{count}개씩 보기"
     trigger = page.locator(".MuiTablePagination-select[role='combobox']").first
     if not wait_for_visible(trigger, 5_000):
         print("    (페이지 크기 드롭다운 없음 — 건너뜁니다.)")
+        return
+    current_text = trigger.inner_text().strip()
+    if current_text == target_text:
+        print("    (already selected)")
+        step_pause(page)
         return
     trigger.scroll_into_view_if_needed()
     trigger.click()
     step_pause(page)
 
-    listbox = page.locator("ul[role='listbox']").filter(has_text=f"{count}개씩")
+    listbox = page.locator("ul[role='listbox']").first
     listbox.wait_for(state="visible", timeout=10_000)
-    option = listbox.locator("li[role='option']", has_text=f"{count}개씩").first
+    option = find_exact_text_match(listbox.locator("li[role='option']"), target_text)
+    if option is None:
+        raise RuntimeError(f"Could not find exact rows-per-page option: {target_text}")
     option.wait_for(state="visible", timeout=5_000)
     option.click()
     safe_wait_for_load(page, "networkidle", 5_000)
-    step_pause(page)
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if trigger.inner_text().strip() == target_text:
+            step_pause(page)
+            return
+        page.wait_for_timeout(POLL_WAIT_MS)
+
+    raise RuntimeError(
+        f"Rows-per-page selection did not apply: expected='{target_text}', actual='{trigger.inner_text().strip()}'"
+    )
 
 
 def _read_cell(row, field: str) -> str:
@@ -379,6 +434,7 @@ def run_receipt_verification(
         project_name=project_name,
     )
     open_receipt_verification_menu(page)
+    wait_for_receipt_page_render_stable(page)
     snap_and_check_ui(page, "receipt_verification")
     fill_uuid_search(page, uuid_value)
     click_search_button(page)

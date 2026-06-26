@@ -17,6 +17,7 @@ Final registration (receiver input, submit) requires human approval.
 import argparse
 import datetime
 import sys
+import time
 from pathlib import Path
 
 from console_user_search_test import (
@@ -214,6 +215,44 @@ def find_exact_text_match(items, target_text):
     return None
 
 
+def ensure_receiver_list_rows_per_page(page, rows_per_page: int = 100):
+    dialog = get_post_register_dialog(page)
+    target_text = f"{rows_per_page}개씩 보기"
+    limit_dd = dialog.locator("[role='listbox']").filter(has_text="개씩").first
+    limit_dd.wait_for(state="visible", timeout=10_000)
+    current_text = limit_dd.locator(".text, .divider.text").first.inner_text().strip()
+    if current_text == target_text:
+        return
+
+    print(f"[15-page] 수신자 목록을 {target_text} 보기로 전환합니다.")
+    limit_dd.scroll_into_view_if_needed()
+    step_pause(page)
+    limit_dd.click()
+    step_pause(page)
+
+    option = find_exact_text_match(dialog.locator("[role='option']"), target_text)
+    if option is None:
+        raise RuntimeError(f"수신자 목록 개수 옵션에서 정확히 '{target_text}'와 일치하는 항목을 찾지 못했습니다.")
+    option.wait_for(state="visible", timeout=10_000)
+    option.scroll_into_view_if_needed()
+    step_pause(page)
+    option.click()
+    step_pause(page)
+
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        selected_text = limit_dd.locator(".text, .divider.text").first.inner_text().strip()
+        if selected_text == target_text:
+            return
+        page.wait_for_timeout(1_000)
+
+    selected_text = limit_dd.locator(".text, .divider.text").first.inner_text().strip()
+    if selected_text != target_text:
+        raise RuntimeError(
+            f"수신자 목록 개수 전환 결과가 기대와 다릅니다: expected='{target_text}', actual='{selected_text}'"
+        )
+
+
 def select_item_in_popup(page, shop_table_id: str):
     print(f"[11] 아이템 드롭다운에서 ShopTable_ID='{shop_table_id}' 선택합니다.")
     dialog = get_item_add_dialog(page)
@@ -288,6 +327,41 @@ def click_receiver_register(page):
     step_pause(page)
 
 
+def wait_for_receiver_registered(page, uuid: str, timeout_ms: int = 15_000):
+    dialog = get_post_register_dialog(page)
+    gamer_input = dialog.locator("input[name='gamer']").first
+    gamer_input.wait_for(state="visible", timeout=10_000)
+
+    deadline = time.time() + (timeout_ms / 1000.0)
+    input_cleared = False
+    while time.time() < deadline:
+        current_value = gamer_input.input_value().strip()
+        if not current_value:
+            input_cleared = True
+
+        try:
+            dialog_text = dialog.inner_text()
+        except Exception:
+            dialog_text = ""
+
+        if uuid in dialog_text:
+            print(f"    수신자 반영 확인: {uuid}")
+            step_pause(page)
+            return
+
+        page.wait_for_timeout(300)
+
+    if not input_cleared:
+        raise RuntimeError(f"수신자 UUID 입력란이 비워지지 않았습니다: {uuid}")
+    raise RuntimeError(f"수신자 UUID가 목록에 반영되지 않았습니다: {uuid}")
+
+
+def register_receiver_uuid_and_wait(page, uuid: str, timeout_ms: int = 15_000):
+    fill_receiver_uuid(page, uuid)
+    click_receiver_register(page)
+    wait_for_receiver_registered(page, uuid, timeout_ms=timeout_ms)
+
+
 def run_post_register(page, chart_name, explicit_project_base, start_url, project_name):
     prepare_console_project(
         page=page,
@@ -328,6 +402,7 @@ def run_post_register(page, chart_name, explicit_project_base, start_url, projec
     snap_and_check_ui(page, "post_receiver_uuid")
 
     click_receiver_register(page)
+    wait_for_receiver_registered(page, TEST_UUID)
     snap_and_check_ui(page, "post_receiver_registered")
 
     return {"chart_selected": selected, "shop_table_id": shop_table_id}

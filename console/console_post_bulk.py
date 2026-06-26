@@ -2,10 +2,10 @@
 """
 console_post_bulk.py — 우편 일괄 발송 스크립트
 
-payment_docs/post_bulk*.csv 의 각 행마다 우편 등록 팝업을 통해
-제목·내용·아이템·수신자를 입력하고 발송합니다.
+payment_docs/post_bulk*.csv 의 행을 (posttitle, postbody, chart category, item, value)
+기준으로 묶어, 동일 조합이면 수신자만 반복 등록 후 한 번에 발송합니다.
 
-CSV 필수 열: posttitle, postbody, chart category, item, uuid
+CSV 필수 열: posttitle, postbody, chart category, item, value, uuid
 
 실행:
   python console_post_bulk.py
@@ -27,16 +27,16 @@ from console_user_search_test import (
     step_pause,
 )
 from console_post_register import (
-    click_receiver_register,
     confirm_item_add_popup,
+    ensure_receiver_list_rows_per_page,
     fill_item_count,
-    fill_receiver_uuid,
     fill_title_and_content,
     get_item_add_dialog,
     get_post_register_dialog,
     open_item_add_popup,
     open_post_page,
     open_post_register_popup,
+    register_receiver_uuid_and_wait,
     select_chart_in_item_popup,
     select_expiry_7days,
 )
@@ -76,6 +76,40 @@ def load_bulk_csv() -> list:
         raise RuntimeError(f"CSV 열 누락: {missing}")
     print(f"    총 {len(rows)}행 로드됨.")
     return rows, csv_path
+
+
+def group_rows(rows: list) -> list:
+    """동일한 (posttitle, postbody, chart category, item, value) 조합을 하나의 발송 건으로 묶는다.
+
+    Returns: [{"posttitle":..., "postbody":..., "chart category":...,
+               "item":..., "value":..., "uuids": [uuid, ...]}, ...]
+    원본 CSV 순서를 유지하며, 같은 조합이 흩어져 있어도 첫 등장 위치 기준으로 모은다.
+    """
+    order = []   # 조합 첫 등장 순서
+    groups = {}  # key → group dict
+    for row in rows:
+        key = (
+            row["posttitle"],
+            row["postbody"],
+            row["chart category"],
+            row["item"],
+            row["value"],
+        )
+        if key not in groups:
+            order.append(key)
+            groups[key] = {
+                "posttitle": row["posttitle"],
+                "postbody": row["postbody"],
+                "chart category": row["chart category"],
+                "item": row["item"],
+                "value": row["value"],
+                "uuids": [],
+            }
+        groups[key]["uuids"].append(row["uuid"])
+    result = [groups[k] for k in order]
+    merged = sum(len(g["uuids"]) for g in result)
+    print(f"    {len(rows)}행 → {len(result)}건으로 묶음 (수신자 합계 {merged}명).")
+    return result
 
 
 # ── 아이템 선택 (bulk 전용: chart category + item 값으로 매칭) ─────────────────
@@ -144,19 +178,22 @@ def confirm_post_send(page):
     step_pause(page)
 
 
-# ── 행 단위 우편 발송 ─────────────────────────────────────────────────────────
+# ── 그룹 단위 우편 발송 ───────────────────────────────────────────────────────
 
-def send_one_row(page, row_num: int, total: int, row: dict):
-    """CSV 한 행에 대해 우편 등록 전 과정을 수행."""
-    posttitle = row["posttitle"]
-    postbody = row["postbody"]
-    chart_category = row["chart category"]
-    item_value = row["item"]
-    item_count = int(row["value"])
-    uuid = row["uuid"]
+def send_one_group(page, group_num: int, total: int, group: dict) -> list:
+    """동일 아이템·수량 그룹에 대해 팝업·아이템은 1회 등록, 수신자만 반복 추가 후 발송.
+
+    Returns: 등록 실패한 uuid 목록 (성공 uuid가 1명이라도 있으면 발송까지 진행).
+    """
+    posttitle = group["posttitle"]
+    postbody = group["postbody"]
+    chart_category = group["chart category"]
+    item_value = group["item"]
+    item_count = int(group["value"])
+    uuids = group["uuids"]
 
     print(f"\n{'─' * 55}")
-    print(f" 행 {row_num}/{total}  |  {uuid[:8]}...  |  {chart_category}/{item_value} x{item_count}")
+    print(f" 건 {group_num}/{total}  |  {chart_category}/{item_value} x{item_count}  |  수신자 {len(uuids)}명")
     print(f"{'─' * 55}")
 
     open_post_register_popup(page)
@@ -167,11 +204,28 @@ def send_one_row(page, row_num: int, total: int, row: dict):
     select_bulk_item_in_popup(page, chart_category, item_value)
     fill_item_count(page, count=item_count)
     confirm_item_add_popup(page)
-    fill_receiver_uuid(page, uuid)
-    click_receiver_register(page)
-    confirm_post_send(page)
 
-    print(f" ✓ 행 {row_num} 완료")
+    for index, uuid in enumerate(uuids):
+        if index == 10 and len(uuids) > 10:
+            ensure_receiver_list_rows_per_page(page, rows_per_page=100)
+
+        register_receiver_uuid_and_wait(page, uuid)
+
+    # 발송 전 전원 등록 확인 — 다이얼로그 텍스트에 각 UUID가 모두 있는지 검사
+    print("[15-check] 수신자 등록 최종 확인 중...")
+    dialog = get_post_register_dialog(page)
+    dialog_text = dialog.inner_text()
+    missing = [uuid for uuid in uuids if uuid not in dialog_text]
+    if missing:
+        raise RuntimeError(
+            f"수신자 등록 불일치 — 발송 중단. 미등록 UUID({len(missing)}명):\n"
+            + "\n".join(f"  {u}" for u in missing)
+        )
+
+    print(f"    전원 확인 완료 ({len(uuids)}명)")
+    confirm_post_send(page)
+    print(f" ✓ 건 {group_num} 완료  ({len(uuids)}명)")
+    return []
 
 
 # ── 전체 루프 ─────────────────────────────────────────────────────────────────
@@ -185,26 +239,30 @@ def run_post_bulk(page, rows, explicit_project_base, start_url, project_name):
     )
     open_post_page(page)
 
+    groups = group_rows(rows)
     ok_count = 0
-    fail_rows = []
+    fail_groups = []
 
-    for i, row in enumerate(rows, 1):
+    for i, group in enumerate(groups, 1):
         try:
-            send_one_row(page, i, len(rows), row)
+            failed_uuids = send_one_group(page, i, len(groups), group)
             ok_count += 1
+            if failed_uuids:
+                fail_groups.append({
+                    "group": i,
+                    "error": "수신자 일부 실패",
+                    "failed_uuids": failed_uuids,
+                })
         except Exception as exc:
-            print(f"\n[오류] 행 {i} 실패: {exc}")
-            fail_rows.append({"row": i, "uuid": row.get("uuid", ""), "error": str(exc)})
-            # 팝업이 열려있으면 ESC로 닫기 시도
-            try:
-                page.keyboard.press("Escape")
-                step_pause(page)
-                page.keyboard.press("Escape")
-                step_pause(page)
-            except Exception:
-                pass
+            print(f"\n[오류] 건 {i} 실패: {exc}")
+            fail_groups.append({
+                "group": i,
+                "error": str(exc),
+                "failed_uuids": group.get("uuids", []),
+            })
+            raise
 
-    return {"ok": ok_count, "fail": len(fail_rows), "fail_rows": fail_rows}
+    return {"ok": ok_count, "fail": len(fail_groups), "fail_groups": fail_groups}
 
 
 # ── 아티팩트 저장 ──────────────────────────────────────────────────────────────
@@ -227,8 +285,9 @@ def save_artifacts(page, out_dir, result):
         f"ok={result['ok']}",
         f"fail={result['fail']}",
     ]
-    for fr in result.get("fail_rows", []):
-        lines.append(f"fail_row={fr['row']}  uuid={fr['uuid']}  error={fr['error']}")
+    for fg in result.get("fail_groups", []):
+        uuids_str = ",".join(fg.get("failed_uuids", []))
+        lines.append(f"fail_group={fg['group']}  error={fg['error']}  uuids={uuids_str}")
 
     try:
         Path(f"{stem}.txt").write_text("\n".join(lines), encoding="utf-8")
@@ -267,41 +326,47 @@ def main():
 
     result = {"ok": 0, "fail": 0, "fail_rows": []}
 
-    with sync_playwright() as playwright:
-        context = playwright.chromium.launch_persistent_context(
-            user_data_dir=str(profile_dir),
-            headless=False,
-            no_viewport=True,
-            args=["--start-maximized"],
+    pw = sync_playwright().start()
+    context = pw.chromium.launch_persistent_context(
+        user_data_dir=str(profile_dir),
+        headless=False,
+        no_viewport=True,
+        args=["--start-maximized"],
+    )
+    try:
+        page = context.pages[0] if context.pages else context.new_page()
+        page = select_target_page(context, page)
+        result = run_post_bulk(
+            page=page,
+            rows=rows,
+            explicit_project_base=args.project_base,
+            start_url=args.start_url,
+            project_name=args.project_name,
         )
+
+        print(f"\n=== 완료: 성공 {result['ok']}건 / 실패 {result['fail']}건 ===")
+        for fg in result.get("fail_groups", []):
+            print(f"  실패 건 {fg['group']}: {fg['error']}  uuids={fg.get('failed_uuids', [])}")
+
+        if args.hold_seconds > 0:
+            print(f"{args.hold_seconds}초 대기 후 종료합니다.")
+            page.wait_for_timeout(args.hold_seconds * 1_000)
+
         try:
-            page = context.pages[0] if context.pages else context.new_page()
-            page = select_target_page(context, page)
-            result = run_post_bulk(
-                page=page,
-                rows=rows,
-                explicit_project_base=args.project_base,
-                start_url=args.start_url,
-                project_name=args.project_name,
-            )
-
-            print(f"\n=== 완료: 성공 {result['ok']}건 / 실패 {result['fail']}건 ===")
-            for fr in result["fail_rows"]:
-                print(f"  실패 행 {fr['row']}: {fr['error']}")
-
-            if args.hold_seconds > 0:
-                print(f"{args.hold_seconds}초 대기 후 종료합니다.")
-                page.wait_for_timeout(args.hold_seconds * 1_000)
-
+            save_artifacts(page, out_dir, result)
         except Exception as exc:
-            print(f"\n[오류] {exc}")
-        finally:
-            try:
-                page = select_target_page(context, page)
-                save_artifacts(page, out_dir, result)
-            except Exception as exc:
-                print(f"  (아티팩트 저장 중 오류: {exc})")
-            context.close()
+            print(f"  (아티팩트 저장 중 오류: {exc})")
+        context.close()
+        pw.stop()
+
+    except Exception as exc:
+        print(f"\n[오류] {exc}")
+        print("브라우저를 열어둡니다. 확인 후 Enter 를 눌러 아티팩트 저장 후 종료합니다.")
+        input()
+        try:
+            save_artifacts(page, out_dir, result)
+        except Exception as save_exc:
+            print(f"  (아티팩트 저장 중 오류: {save_exc})")
 
 
 if __name__ == "__main__":
