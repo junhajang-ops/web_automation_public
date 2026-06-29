@@ -17,6 +17,7 @@ This script is intentionally read-only. It does not click any mutation action.
 import argparse
 import csv
 import datetime
+import os
 import re
 import sys
 import time
@@ -46,6 +47,13 @@ except AttributeError:
 
 
 BASE_DIR = Path(__file__).resolve().parent
+
+# cs 공용 GCP helper (build_logging_service, fetch_pvp_match_logs)
+_CS_DIR = BASE_DIR.parent / "cs"
+if str(_CS_DIR) not in sys.path:
+    sys.path.insert(0, str(_CS_DIR))
+from cs_gcp_logging import build_logging_service, fetch_pvp_match_logs  # noqa: E402
+
 DEFAULT_OUTPUT = "dumps_console_leaderboard"
 LEADERBOARD_OUT_DIR = PAYMENT_DOCS_DIR / "leaderboard"
 SEARCH_KEYWORD = "PvPRank"
@@ -59,6 +67,7 @@ UUID_RE = re.compile(
     re.I,
 )
 BOARD_NAME_RE = re.compile(rf"{SEARCH_KEYWORD}_[A-Za-z0-9_]+")
+ACCOUNT_NEW_HOURS = 240  # 계정 생성 후 240시간(10일) 이내 → 신규
 LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS = [
     r"button: 영어 FALLBACK\|type=button$",
     r"button: 한국어\|type=button$",
@@ -77,6 +86,18 @@ def parse_args():
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
     parser.add_argument("--project-name", default=DEFAULT_PROJECT_NAME)
     parser.add_argument("--hold-seconds", type=int, default=DEFAULT_HOLD_SECONDS)
+    parser.add_argument(
+        "--key", default="",
+        help="GCP 서비스계정 JSON 키 경로 (pvp_match 로그 조회용, 생략 시 GCP 조회 건너뜀)",
+    )
+    parser.add_argument(
+        "--gcp-project", default=os.environ.get("GCP_PROJECT", ""),
+        help="GCP 프로젝트 ID (env GCP_PROJECT 또는 직접 지정)",
+    )
+    parser.add_argument(
+        "--gcp-log", default=os.environ.get("GCP_LOG_NAME", ""),
+        help="GCP 로그 이름 (env GCP_LOG_NAME 또는 직접 지정)",
+    )
     return parser.parse_args()
 
 
@@ -389,6 +410,81 @@ def _extract_rank_from_row(row) -> int | None:
     return None
 
 
+def get_week_start_utc() -> datetime.datetime:
+    """이번 주 월요일 05:00 KST (UTC+9) → UTC naive datetime."""
+    KST = datetime.timezone(datetime.timedelta(hours=9))
+    now_kst = datetime.datetime.now(KST)
+    days_since_monday = now_kst.weekday()  # 월=0, 일=6
+    monday_kst = (now_kst - datetime.timedelta(days=days_since_monday)).replace(
+        hour=5, minute=0, second=0, microsecond=0
+    )
+    if now_kst < monday_kst:  # 아직 이번 주 월요일 05:00 KST가 안 됐으면 지난주 사용
+        monday_kst -= datetime.timedelta(weeks=1)
+    return monday_kst.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def query_pvp_stats(logging_service, project, log_name, uuid, week_start_utc, now_utc) -> dict:
+    """GCP log_pvp_match 조회 → account_type / max_pvp_ticket 반환."""
+    since_iso = week_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    until_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    entries, err = fetch_pvp_match_logs(logging_service, project, log_name, uuid, since_iso, until_iso)
+
+    if err and not entries:
+        return {"account_type": f"조회실패({err})", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": 0}
+    if not entries:
+        return {"account_type": "로그없음", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": 0}
+
+    # _create_account_date: 유저마다 동일 — 첫 로그에서 읽기
+    create_date_str = ""
+    for entry in entries:
+        val = (entry.get("jsonPayload") or {}).get("_create_account_date", "")
+        if val:
+            create_date_str = val
+            break
+
+    account_type = "기존 유저"
+    if create_date_str:
+        try:
+            create_dt = datetime.datetime.fromisoformat(create_date_str.replace("Z", ""))
+            hours_diff = (now_utc - create_dt).total_seconds() / 3600
+            account_type = "계정 신규 생성" if hours_diff <= ACCOUNT_NEW_HOURS else "기존 유저"
+        except Exception:
+            account_type = "날짜파싱실패"
+    else:
+        account_type = "create_date없음"
+
+    max_ticket = None
+    for entry in entries:
+        val = (entry.get("jsonPayload") or {}).get("pvp_match_ticket_after_val")
+        if val is not None:
+            try:
+                v = int(val)
+                if max_ticket is None or v > max_ticket:
+                    max_ticket = v
+            except (TypeError, ValueError):
+                pass
+
+    return {
+        "account_type": account_type,
+        "max_pvp_ticket": "" if max_ticket is None else max_ticket,
+        "create_account_date": create_date_str,
+        "pvp_log_count": len(entries),
+    }
+
+
+def enrich_board_with_gcp(board_rows, logging_service, project, log_name, week_start_utc, now_utc):
+    """board_rows 각 행에 GCP pvp_match 통계를 in-place로 추가."""
+    if not logging_service or not project or not log_name:
+        for row in board_rows:
+            row.update({"account_type": "GCP미설정", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": ""})
+        return
+    print(f"    [GCP] {len(board_rows)}명 pvp_match 로그 조회 중 "
+          f"(기간: {week_start_utc.strftime('%m/%d %H:%MUTC')} ~ 현재)...")
+    for row in board_rows:
+        stats = query_pvp_stats(logging_service, project, log_name, row["uuid"], week_start_utc, now_utc)
+        row.update(stats)
+
+
 def extract_top_ranks(page, board_name: str) -> list:
     print(f"[9] '{board_name}' 상세에서 {MAX_RANK}위 이내(공동순위 전원) 데이터를 읽습니다.")
     wait_for_leaderboard_rank_rows(page)
@@ -472,13 +568,24 @@ def extract_top_ranks(page, board_name: str) -> list:
     return results
 
 
-def run(page, explicit_project_base, start_url, project_name) -> list:
+def run(
+    page,
+    explicit_project_base,
+    start_url,
+    project_name,
+    logging_service=None,
+    gcp_project="",
+    gcp_log="",
+) -> list:
     prepare_console_project(
         page=page,
         explicit_project_base=explicit_project_base,
         start_url=start_url,
         project_name=project_name,
     )
+
+    now_utc = datetime.datetime.utcnow()
+    week_start_utc = get_week_start_utc()
 
     open_leaderboard_list_and_search(page)
     board_names = collect_visible_board_names(page)
@@ -497,10 +604,22 @@ def run(page, explicit_project_base, start_url, project_name) -> list:
         enter_leaderboard_detail(page, board_name)
         set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
         board_rows = extract_top_ranks(page, board_name)
-        print(f"\n  {'순위':>4}  {'UUID':<36}  닉네임")
-        print(f"  {'─'*4}  {'─'*36}  {'─'*20}")
+
+        # 각 보드 추출 직후 GCP pvp_match 로그로 계정 상태 보강
+        enrich_board_with_gcp(board_rows, logging_service, gcp_project, gcp_log, week_start_utc, now_utc)
+
+        # 보드별 통합 출력
+        sep = "─"
+        print(f"\n  ══ {board_name} ══")
+        print(f"  {'순위':>4}  {'UUID':<36}  {'닉네임':<20}  {'계정상태':<12}  {'최고티켓':>6}  {'로그수':>5}")
+        print(f"  {sep*4}  {sep*36}  {sep*20}  {sep*12}  {sep*6}  {sep*5}")
         for r in board_rows:
-            print(f"  {r['rank']:>4}위  {r['uuid']}  {r['nickname']}")
+            print(
+                f"  {r['rank']:>4}위  {r['uuid']}  {r['nickname']:<20}  "
+                f"{r.get('account_type', ''):<12}  "
+                f"{str(r.get('max_pvp_ticket', '')):>6}  "
+                f"{str(r.get('pvp_log_count', '')):>5}"
+            )
         all_rows.extend(board_rows)
 
     step_and_verify_ui(page, "leaderboard_complete")
@@ -510,14 +629,15 @@ def run(page, explicit_project_base, start_url, project_name) -> list:
 def save_csv(rows: list, out_dir: Path) -> Path:
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = out_dir / f"leaderboard_pvprank_{ts}.csv"
+    base_fields = ["leaderboard", "rank", "uuid", "nickname"]
+    gcp_fields = ["account_type", "max_pvp_ticket", "create_account_date", "pvp_log_count"]
+    has_gcp = any(row.get("account_type") for row in rows)
+    fieldnames = base_fields + (gcp_fields if has_gcp else [])
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as file_obj:
-        writer = csv.DictWriter(
-            file_obj,
-            fieldnames=["leaderboard", "rank", "uuid", "nickname"],
-        )
+        writer = csv.DictWriter(file_obj, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
-    print(f"\nCSV 저장: {csv_path.name} ({len(rows)}행)")
+    print(f"\nCSV 저장: {csv_path.name} ({len(rows)}행, GCP컬럼={'포함' if has_gcp else '없음'})")
     return csv_path
 
 
@@ -555,6 +675,12 @@ def main():
     LEADERBOARD_OUT_DIR.mkdir(parents=True, exist_ok=True)
     init_dump_dir(out_dir)
 
+    logging_service = None
+    if args.key:
+        logging_service = build_logging_service(args.key)
+        if logging_service is None:
+            print("[경고] GCP 서비스계정 로드 실패. pvp_match 로그 조회 없이 진행합니다.")
+
     print("=" * 55)
     print(" Leaderboard PvPRank extractor")
     print("=" * 55)
@@ -562,6 +688,8 @@ def main():
     print(f"출력     : {out_dir.name}")
     print(f"CSV 저장 : {LEADERBOARD_OUT_DIR}")
     print(f"덤프     : {out_dir} (30일 초과 자동 삭제)")
+    gcp_ready = logging_service and args.gcp_project and args.gcp_log
+    print(f"GCP 조회 : {'활성 (' + args.gcp_project + ' / ' + args.gcp_log + ')' if gcp_ready else '비활성 (--key / --gcp-project / --gcp-log 미지정)'}")
 
     succeeded = False
     all_rows = []
@@ -583,6 +711,9 @@ def main():
                 explicit_project_base=args.project_base,
                 start_url=args.start_url,
                 project_name=args.project_name,
+                logging_service=logging_service,
+                gcp_project=args.gcp_project,
+                gcp_log=args.gcp_log,
             )
             save_csv(all_rows, LEADERBOARD_OUT_DIR)
 
