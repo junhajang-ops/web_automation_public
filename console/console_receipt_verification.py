@@ -19,6 +19,7 @@ import sys
 import time
 from pathlib import Path
 
+from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui
 from console_user_search_test import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
@@ -30,8 +31,6 @@ from console_user_search_test import (
     prepare_console_project,
     safe_wait_for_load,
     select_target_page,
-    snap_and_check_ui,
-    step_pause,
     wait_for_visible,
 )
 from test_config import TEST_UUID
@@ -115,12 +114,12 @@ def open_receipt_verification_menu(page):
     receipt_link = page.locator("a", has_text="영수증 검증").first
     receipt_link.wait_for(state="visible", timeout=15_000)
     receipt_link.scroll_into_view_if_needed()
+    record_step_dump(page, "receipt_nav_pre")
     receipt_link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
     receipt_link.wait_for(state="visible", timeout=15_000)
-    step_pause(page)
 
 
 def _read_visible_role_signature(page):
@@ -150,13 +149,11 @@ def wait_for_receipt_page_render_stable(page, timeout_ms: int = 6_000, stable_ro
             stable_count = 1 if current_signature else 0
 
         if stable_count >= stable_rounds:
-            step_pause(page)
             return
 
         page.wait_for_timeout(POLL_WAIT_MS)
 
     print("    (렌더 역할 구성이 완전히 고정되기 전 타임아웃되어 최신 상태로 진행합니다.)")
-    step_pause(page)
 
 
 def fill_uuid_search(page, uuid_value):
@@ -164,9 +161,9 @@ def fill_uuid_search(page, uuid_value):
     uuid_input = page.locator("input#searchValue").first
     uuid_input.wait_for(state="visible", timeout=15_000)
     uuid_input.scroll_into_view_if_needed()
+    record_step_dump(page, "receipt_uuid_input_pre")
     uuid_input.fill("")
     uuid_input.fill(uuid_value)
-    step_pause(page)
 
 
 def click_search_button(page):
@@ -174,9 +171,9 @@ def click_search_button(page):
     search_button = page.locator("button", has_text="검색").first
     search_button.wait_for(state="visible", timeout=15_000)
     search_button.scroll_into_view_if_needed()
+    record_step_dump(page, "receipt_search_submit_pre")
     search_button.click()
     safe_wait_for_load(page, "networkidle", 5_000)
-    step_pause(page)
 
 
 def read_total_amount(page):
@@ -197,11 +194,10 @@ def set_rows_per_page(page, count: int = 100):
     current_text = trigger.inner_text().strip()
     if current_text == target_text:
         print("    (already selected)")
-        step_pause(page)
         return
     trigger.scroll_into_view_if_needed()
+    record_step_dump(page, "receipt_rows_dd_pre")
     trigger.click()
-    step_pause(page)
 
     listbox = page.locator("ul[role='listbox']").first
     listbox.wait_for(state="visible", timeout=10_000)
@@ -209,13 +205,13 @@ def set_rows_per_page(page, count: int = 100):
     if option is None:
         raise RuntimeError(f"Could not find exact rows-per-page option: {target_text}")
     option.wait_for(state="visible", timeout=5_000)
+    record_step_dump(page, "receipt_rows_option_pre")
     option.click()
     safe_wait_for_load(page, "networkidle", 5_000)
 
     deadline = time.time() + 10
     while time.time() < deadline:
         if trigger.inner_text().strip() == target_text:
-            step_pause(page)
             return
         page.wait_for_timeout(POLL_WAIT_MS)
 
@@ -435,10 +431,9 @@ def run_receipt_verification(
     )
     open_receipt_verification_menu(page)
     wait_for_receipt_page_render_stable(page)
-    snap_and_check_ui(page, "receipt_verification")
     fill_uuid_search(page, uuid_value)
     click_search_button(page)
-    snap_and_check_ui(page, "receipt_results")
+    step_and_verify_ui(page, "receipt_results")
     return collect_result(page, uuid_value, timeout_error)
 
 
@@ -449,6 +444,7 @@ def main():
     profile_dir = BASE_DIR / args.profile
     out_dir = BASE_DIR / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
+    init_dump_dir(out_dir)
 
     print("=" * 60)
     print(" Console 영수증 검증 UUID search smoke test")

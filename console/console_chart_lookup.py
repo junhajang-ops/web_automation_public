@@ -23,6 +23,7 @@ import sys
 import time
 from pathlib import Path
 
+from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui
 from console_user_search_test import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
@@ -33,8 +34,6 @@ from console_user_search_test import (
     prepare_console_project,
     safe_wait_for_load,
     select_target_page,
-    snap_and_check_ui,
-    step_pause,
     wait_for_visible,
 )
 from test_config import TEST_CHART_NAME, TEST_PURCHASE_CODE
@@ -102,22 +101,23 @@ def parse_args():
     return parser.parse_args()
 
 
-def set_dropdown_value(dropdown, target_text, label):
+def set_dropdown_value(dropdown, target_text, label, verify_prefix=""):
     current_text_locator = dropdown.locator(".divider.text, .divider.default.text").first
     current_text = current_text_locator.inner_text().strip()
     print(f"    현재값: '{current_text}'")
     if current_text == target_text:
         print("    (이미 설정되어 있어 건너뜁니다.)")
-        step_pause(dropdown.page)
         return
 
     dropdown.scroll_into_view_if_needed()
-    step_pause(dropdown.page)
 
     opened = False
     for _ in range(3):
+        record_step_dump(
+            dropdown.page,
+            f"{verify_prefix}_dd_pre" if verify_prefix else "dd_pre",
+        )
         dropdown.click()
-        step_pause(dropdown.page)
         expanded = (dropdown.get_attribute("aria-expanded") or "").lower()
         if expanded == "true":
             opened = True
@@ -134,10 +134,12 @@ def set_dropdown_value(dropdown, target_text, label):
         raise RuntimeError(f"{label} 옵션에서 정확히 '{target_text}'와 일치하는 항목을 찾지 못했습니다.")
     option.wait_for(state="visible", timeout=10_000)
     option.scroll_into_view_if_needed()
-    step_pause(dropdown.page)
 
+    record_step_dump(
+        dropdown.page,
+        f"{verify_prefix}_option_pre" if verify_prefix else "option_pre",
+    )
     option.click()
-    step_pause(dropdown.page)
     safe_wait_for_load(dropdown.page, "networkidle", 5_000)
 
     deadline = time.time() + 10
@@ -146,7 +148,6 @@ def set_dropdown_value(dropdown, target_text, label):
         last_seen = current_text_locator.inner_text().strip()
         if last_seen == target_text:
             print(f"    전환 완료: '{last_seen}'")
-            step_pause(dropdown.page)
             return
         dropdown.page.wait_for_timeout(POLL_WAIT_MS)
 
@@ -161,13 +162,12 @@ def open_chart_page(page):
     chart_link = page.locator("a#baseChart, a[href*='/baseChart']").first
     chart_link.wait_for(state="visible", timeout=15_000)
     chart_link.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "chart_nav_pre")
     chart_link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
     page.locator("table tbody tr").first.wait_for(state="visible", timeout=15_000)
-    step_pause(page)
 
 
 def get_chart_list_rows_per_page_dropdown(page):
@@ -182,6 +182,7 @@ def set_chart_list_rows_per_page(page, rows_per_page):
         get_chart_list_rows_per_page_dropdown(page),
         f"{rows_per_page}개씩 보기",
         "차트 목록 표시 개수",
+        verify_prefix="chart_list_rows",
     )
 
 
@@ -225,13 +226,12 @@ def go_to_next_chart_page(page, current_page_number):
     next_button = get_chart_next_page_button(page)
     next_button.wait_for(state="visible", timeout=15_000)
     next_button.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "chart_next_pre")
     print(f"[7] 현재 페이지에 없어서 차트 목록 {current_page_number + 1}페이지로 이동합니다.")
     next_button.click()
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
     page.locator("table tbody tr").first.wait_for(state="visible", timeout=15_000)
-    step_pause(page)
 
 
 def get_window_scroll_y(page):
@@ -246,7 +246,6 @@ def scroll_until_chart_visible(page, chart_name, page_number):
     chart_link = build_chart_link_locator(page, chart_name)
     if wait_for_visible(chart_link, 1_000):
         chart_link.scroll_into_view_if_needed()
-        step_pause(page)
         return chart_link
 
     previous_scroll_y = get_window_scroll_y(page)
@@ -255,11 +254,10 @@ def scroll_until_chart_visible(page, chart_name, page_number):
             page.locator("table").first.hover()
         except Exception:
             pass
+        record_step_dump(page, "chart_scroll_pre")
         page.mouse.wheel(0, SCROLL_STEP_PX)
-        step_pause(page)
         if wait_for_visible(chart_link, 1_000):
             chart_link.scroll_into_view_if_needed()
-            step_pause(page)
             return chart_link
 
         current_scroll_y = get_window_scroll_y(page)
@@ -329,6 +327,7 @@ def open_chart_detail(page, chart_name):
     applied_chart = row_cells.nth(3).inner_text().strip()
 
     print(f"[8] '{chart_name}' 차트 링크를 클릭합니다.")
+    record_step_dump(page, "chart_detail_link_pre")
     chart_link.click()
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
@@ -337,7 +336,6 @@ def open_chart_detail(page, chart_name):
         timeout=15_000,
     )
     page.get_by_text("현재 적용 차트 파일").wait_for(state="visible", timeout=15_000)
-    step_pause(page)
 
     current_file = ""
     current_file_locator = page.locator("text=/Myapp_.*\\.xlsx/").first
@@ -394,8 +392,10 @@ def click_applied_chart_file_row(page):
     row = find_applied_chart_file_row(page)
     checkbox_cell = row.locator("td").nth(0)
     if wait_for_visible(checkbox_cell, 2_000):
+        record_step_dump(page, "chart_file_select_pre")
         checkbox_cell.click()
     else:
+        record_step_dump(page, "chart_file_select_pre")
         row.click()
 
     # CSV 버튼 활성화 대기 (최대 5초)
@@ -409,7 +409,6 @@ def click_applied_chart_file_row(page):
             pass
         page.wait_for_timeout(300)
 
-    step_pause(page)
 
 
 def get_chart_data_rows_per_page_dropdown(page):
@@ -424,6 +423,7 @@ def set_chart_data_rows_per_page(page, rows_per_page):
         get_chart_data_rows_per_page_dropdown(page),
         f"{rows_per_page}개씩 보기",
         "차트 데이터 표시 개수",
+        verify_prefix="chart_data_rows",
     )
 
 
@@ -449,7 +449,7 @@ def navigate_all_chart_data_pages(page):
             break
 
         next_button.scroll_into_view_if_needed()
-        step_pause(page)
+        record_step_dump(page, "chart_data_next_pre")
         next_button.click()
         safe_wait_for_load(page, "networkidle", 10_000)
         page.locator("table").last.locator("tbody tr").first.wait_for(
@@ -457,7 +457,6 @@ def navigate_all_chart_data_pages(page):
             timeout=10_000,
         )
         page_count += 1
-        step_pause(page)
 
     elapsed = round(time.time() - start_ts, 1)
     print(f"    완료: {page_count}페이지, 소요시간 {elapsed}초")
@@ -506,7 +505,7 @@ def _do_download_csv(page, csv_path: Path):
     """CSV 다운로드 버튼 클릭 → 확인 모달 처리 → 파일 저장."""
     csv_btn = page.locator("button.ui").filter(has_text="CSV 다운로드").first
     csv_btn.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "csv_download_pre")
     page.on("dialog", _accept_dialog)
     try:
         with page.expect_download(timeout=60_000) as dl_info:
@@ -516,7 +515,7 @@ def _do_download_csv(page, csv_path: Path):
             ).first
             if wait_for_visible(confirm_btn, 5_000):
                 print("    (확인 모달 감지 — 확인 버튼 클릭)")
-                step_pause(page)
+                record_step_dump(page, "csv_confirm_pre")
                 confirm_btn.click()
     finally:
         page.remove_listener("dialog", _accept_dialog)
@@ -563,17 +562,17 @@ def run_chart_lookup(
         project_name=project_name,
     )
     open_chart_page(page)
-    snap_and_check_ui(page, "chart_list")
     set_chart_list_rows_per_page(page, ROWS_PER_PAGE)
-    snap_and_check_ui(page, "chart_list_100")
 
     summary = open_chart_detail(page, chart_name)
     if summary["lookup_status"] == "found":
-        snap_and_check_ui(page, "chart_detail")
         applied_file_id = get_applied_file_id(page)
         print(f"[10-pre] 현재 적용 파일 ID: {applied_file_id}")
         csv_summary = download_chart_csv(page, chart_name, applied_file_id)
         summary.update(csv_summary)
+        step_and_verify_ui(page, "chart_lookup_complete")
+    else:
+        step_and_verify_ui(page, "chart_lookup_not_found")
 
     return summary
 
@@ -651,6 +650,7 @@ def main():
     profile_dir = BASE_DIR / args.profile
     out_dir = BASE_DIR / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
+    init_dump_dir(out_dir)
 
     print("=" * 60)
     print(" Console chart lookup smoke test")

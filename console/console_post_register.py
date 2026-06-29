@@ -20,6 +20,7 @@ import sys
 import time
 from pathlib import Path
 
+from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui
 from console_user_search_test import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
@@ -30,8 +31,6 @@ from console_user_search_test import (
     prepare_console_project,
     safe_wait_for_load,
     select_target_page,
-    snap_and_check_ui,
-    step_pause,
     wait_for_visible,
 )
 from console_chart_lookup import PAYMENT_DOCS_DIR, _read_csv_and_lookup
@@ -81,13 +80,12 @@ def open_post_page(page):
     post_link = page.locator("a#basePost, a[href*='/basePost']").first
     post_link.wait_for(state="visible", timeout=15_000)
     post_link.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "post_nav_pre")
     post_link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
     page.locator("table tbody tr").first.wait_for(state="visible", timeout=15_000)
-    step_pause(page)
 
 
 def open_post_register_popup(page):
@@ -95,12 +93,11 @@ def open_post_register_popup(page):
     button = page.locator("button.ui.button").filter(has_text="우편 등록").first
     button.wait_for(state="visible", timeout=15_000)
     button.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "post_popup_pre")
     button.click()
 
     dialog = get_post_register_dialog(page)
     dialog.wait_for(state="visible", timeout=15_000)
-    step_pause(page)
 
 
 def select_expiry_7days(page):
@@ -112,9 +109,8 @@ def select_expiry_7days(page):
 
     radio_box.wait_for(state="visible", timeout=10_000)
     radio_box.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "expiry_pre")
     radio_box.click()
-    step_pause(page)
 
     is_checked = (hidden_radio.get_attribute("checked") is not None) or (
         "checked" in ((radio_box.get_attribute("class") or "").lower())
@@ -131,16 +127,14 @@ def fill_title_and_content(page, title, content):
     print(f"[7] 제목 입력: '{title}'")
     title_input.wait_for(state="visible", timeout=10_000)
     title_input.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "title_pre_fill")
     title_input.fill(title)
-    step_pause(page)
 
     print(f"[8] 내용 입력: '{content}'")
     content_area.wait_for(state="visible", timeout=10_000)
     content_area.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "content_pre_fill")
     content_area.fill(content)
-    step_pause(page)
 
 
 def open_item_add_popup(page):
@@ -148,12 +142,11 @@ def open_item_add_popup(page):
     button = page.locator("button.ui.basic.button").filter(has_text="아이템 등록").first
     button.wait_for(state="visible", timeout=15_000)
     button.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "item_popup_pre")
     button.click()
 
     dialog = get_item_add_dialog(page)
     dialog.wait_for(state="visible", timeout=15_000)
-    step_pause(page)
 
 
 def load_shop_table_id(chart_name: str) -> str:
@@ -181,18 +174,16 @@ def select_chart_in_item_popup(page, chart_name):
     dropdown = dialog.locator("[role='listbox']").first
     dropdown.wait_for(state="visible", timeout=10_000)
     dropdown.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "chart_dd_pre")
     dropdown.click()
-    step_pause(page)
 
     option = find_exact_text_match(dialog.locator("[role='option']"), chart_name)
     if option is None:
         raise RuntimeError(f"차트 드롭다운에서 정확히 '{chart_name}'와 일치하는 항목을 찾지 못했습니다.")
     option.wait_for(state="visible", timeout=5_000)
     option.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "chart_option_pre")
     option.click()
-    step_pause(page)
 
     selected_text = dropdown.locator(".text, .divider.text").first.inner_text().strip()
     print(f"    선택 결과: '{selected_text}'")
@@ -226,18 +217,16 @@ def ensure_receiver_list_rows_per_page(page, rows_per_page: int = 100):
 
     print(f"[15-page] 수신자 목록을 {target_text} 보기로 전환합니다.")
     limit_dd.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "rcvr_rows_dd_pre")
     limit_dd.click()
-    step_pause(page)
 
     option = find_exact_text_match(dialog.locator("[role='option']"), target_text)
     if option is None:
         raise RuntimeError(f"수신자 목록 개수 옵션에서 정확히 '{target_text}'와 일치하는 항목을 찾지 못했습니다.")
     option.wait_for(state="visible", timeout=10_000)
     option.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "rcvr_rows_option_pre")
     option.click()
-    step_pause(page)
 
     deadline = time.time() + 10
     while time.time() < deadline:
@@ -259,17 +248,15 @@ def select_item_in_popup(page, shop_table_id: str):
     item_dropdown = dialog.locator("[name='item'][role='listbox']").first
     item_dropdown.wait_for(state="visible", timeout=10_000)
     item_dropdown.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "item_dd_pre")
     item_dropdown.click()
-    step_pause(page)
 
     target_substr = f'"ShopTable_ID":"{shop_table_id}"'
     option = dialog.locator("[role='option']").filter(has_text=target_substr).first
     option.wait_for(state="visible", timeout=10_000)
     option.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "item_option_pre")
     option.click()
-    step_pause(page)
 
     selected_text = item_dropdown.locator(".text, .divider.text").first.inner_text().strip()
     print(f"    선택 결과: {selected_text[:80]}...")
@@ -286,9 +273,8 @@ def fill_item_count(page, count: int = 1):
     count_input = dialog.locator("input[name='itemCount']").first
     count_input.wait_for(state="visible", timeout=10_000)
     count_input.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "count_pre_fill")
     count_input.fill(str(count))
-    step_pause(page)
 
 
 def confirm_item_add_popup(page):
@@ -297,12 +283,11 @@ def confirm_item_add_popup(page):
     confirm_btn = dialog.locator("button.ui.medium.positive.button").first
     confirm_btn.wait_for(state="visible", timeout=10_000)
     confirm_btn.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "item_confirm_pre")
     confirm_btn.click()
     dialog.wait_for(state="hidden", timeout=10_000)
     # 팝업 닫힘 대기
     dialog.wait_for(state="hidden", timeout=10_000)
-    step_pause(page)
 
 
 def fill_receiver_uuid(page, uuid: str):
@@ -311,9 +296,8 @@ def fill_receiver_uuid(page, uuid: str):
     gamer_input = dialog.locator("input[name='gamer']").first
     gamer_input.wait_for(state="visible", timeout=10_000)
     gamer_input.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "receiver_pre_fill")
     gamer_input.fill(uuid)
-    step_pause(page)
 
 
 def click_receiver_register(page):
@@ -322,9 +306,8 @@ def click_receiver_register(page):
     register_btn = dialog.locator("button.ui.primary.button").filter(has_text="등록").first
     register_btn.wait_for(state="visible", timeout=10_000)
     register_btn.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "receiver_register_pre")
     register_btn.click()
-    step_pause(page)
 
 
 def wait_for_receiver_registered(page, uuid: str, timeout_ms: int = 15_000):
@@ -346,7 +329,6 @@ def wait_for_receiver_registered(page, uuid: str, timeout_ms: int = 15_000):
 
         if uuid in dialog_text:
             print(f"    수신자 반영 확인: {uuid}")
-            step_pause(page)
             return
 
         page.wait_for_timeout(300)
@@ -371,39 +353,29 @@ def run_post_register(page, chart_name, explicit_project_base, start_url, projec
     )
 
     open_post_page(page)
-    snap_and_check_ui(page, "post_list")
 
     open_post_register_popup(page)
-    snap_and_check_ui(page, "post_register_popup")
 
     select_expiry_7days(page)
-    snap_and_check_ui(page, "post_expiry_7days")
 
     fill_title_and_content(page, POST_TITLE, POST_CONTENT)
-    snap_and_check_ui(page, "post_title_content")
 
     open_item_add_popup(page)
-    snap_and_check_ui(page, "post_item_add_popup")
 
     selected = select_chart_in_item_popup(page, chart_name)
-    snap_and_check_ui(page, "post_chart_selected")
 
     shop_table_id = load_shop_table_id(chart_name)
     select_item_in_popup(page, shop_table_id)
-    snap_and_check_ui(page, "post_item_selected")
 
     fill_item_count(page, count=1)
-    snap_and_check_ui(page, "post_item_count")
 
     confirm_item_add_popup(page)
-    snap_and_check_ui(page, "post_item_confirmed")
 
     fill_receiver_uuid(page, TEST_UUID)
-    snap_and_check_ui(page, "post_receiver_uuid")
 
     click_receiver_register(page)
     wait_for_receiver_registered(page, TEST_UUID)
-    snap_and_check_ui(page, "post_receiver_registered")
+    step_and_verify_ui(page, "post_receiver_registered")
 
     return {"chart_selected": selected, "shop_table_id": shop_table_id}
 
@@ -448,6 +420,7 @@ def main():
     profile_dir = BASE_DIR / args.profile
     out_dir = BASE_DIR / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
+    init_dump_dir(out_dir)
 
     print("=" * 60)
     print(" Console console post-register helper")

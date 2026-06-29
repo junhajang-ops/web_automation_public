@@ -33,11 +33,10 @@ from console_user_search_test import (
     prepare_console_project,
     safe_wait_for_load,
     select_target_page,
-    snap_and_check_ui,
-    step_pause,
     wait_for_visible,
 )
 from console_chart_lookup import PAYMENT_DOCS_DIR
+from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -47,7 +46,7 @@ except AttributeError:
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_OUTPUT = "dumps_console"
+DEFAULT_OUTPUT = "dumps_console_leaderboard"
 LEADERBOARD_OUT_DIR = PAYMENT_DOCS_DIR / "leaderboard"
 SEARCH_KEYWORD = "PvPRank"
 MAX_RANK = 30
@@ -61,20 +60,6 @@ UUID_RE = re.compile(
 )
 BOARD_NAME_RE = re.compile(rf"{SEARCH_KEYWORD}_[A-Za-z0-9_]+")
 
-_step_seq = [0]
-
-
-def step_and_verify_ui(page, name: str = "") -> None:
-    """단계 대기 + UI 변경 감지를 통합한 공용 스텝 함수.
-
-    모든 클릭·입력·스크롤 단계 후 이 함수를 호출한다.
-    name을 지정하면 해당 태그로 fingerprint를 저장·비교하고,
-    생략하면 순번(step_000, step_001 …) 태그를 자동 부여한다.
-    """
-    step_pause(page)
-    tag = name if name else f"step_{_step_seq[0]:03d}"
-    _step_seq[0] += 1
-    snap_and_check_ui(page, name=tag)
 
 
 def parse_args():
@@ -93,7 +78,7 @@ def open_leaderboard_page(page):
     link = page.locator("a#baseRank, a[href*='/baseRank']").first
     link.wait_for(state="visible", timeout=15_000)
     link.scroll_into_view_if_needed()
-    step_and_verify_ui(page)
+    record_step_dump(page, "leaderboard_nav_pre")
     link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
@@ -102,24 +87,22 @@ def open_leaderboard_page(page):
         state="visible",
         timeout=15_000,
     )
-    step_and_verify_ui(page, name="leaderboard_page")
 
 
 def search_pvp_rank(page):
     print(f"[5] 검색창에 '{SEARCH_KEYWORD}'를 입력하고 검색합니다.")
     search_input = page.locator("input[name='leaderboardName']").first
     search_input.wait_for(state="visible", timeout=10_000)
+    record_step_dump(page, "leaderboard_search_input_pre")
     search_input.fill("")
     search_input.fill(SEARCH_KEYWORD)
-    step_and_verify_ui(page)
 
     search_button = page.get_by_role("button", name="검색", exact=True).first
     search_button.wait_for(state="visible", timeout=10_000)
     search_button.scroll_into_view_if_needed()
-    step_and_verify_ui(page)
+    record_step_dump(page, "leaderboard_search_submit_pre")
     search_button.click()
     safe_wait_for_load(page, "networkidle", 10_000)
-    step_and_verify_ui(page, name="leaderboard_search_pvprank")
 
 
 def get_data_rows(page):
@@ -155,23 +138,21 @@ def get_rows_per_page_dropdown(page):
     return visible_dropdowns[-1]
 
 
-def set_rows_per_page(page, target: int, label: str):
+def set_rows_per_page(page, target: int, label: str, verify_prefix: str = ""):
     target_text = f"{target}개씩 보기"
     print(f"    {label}: {target_text}로 변경합니다.")
     dropdown = get_rows_per_page_dropdown(page)
     current_text = dropdown.inner_text().strip()
     if current_text == target_text:
         print("    이미 설정되어 있습니다.")
-        step_and_verify_ui(page)
         return
 
     dropdown.scroll_into_view_if_needed()
-    step_and_verify_ui(page)
 
     opened = False
     for _ in range(3):
+        record_step_dump(page, name=f"{verify_prefix}_dropdown_pre" if verify_prefix else "rows_dropdown_pre")
         dropdown.click()
-        step_and_verify_ui(page)
         expanded = (dropdown.get_attribute("aria-expanded") or "").lower()
         if expanded == "true":
             opened = True
@@ -183,10 +164,9 @@ def set_rows_per_page(page, target: int, label: str):
     option = page.get_by_role("option", name=target_text, exact=True).first
     option.wait_for(state="visible", timeout=10_000)
     option.scroll_into_view_if_needed()
-    step_and_verify_ui(page)
+    record_step_dump(page, name=f"{verify_prefix}_option_pre" if verify_prefix else "rows_option_pre")
     option.click()
     safe_wait_for_load(page, "networkidle", 5_000)
-    step_and_verify_ui(page)
 
     deadline = time.time() + 10
     while time.time() < deadline:
@@ -202,12 +182,25 @@ def set_rows_per_page(page, target: int, label: str):
 
 def collect_visible_board_names(page) -> list:
     print("[6] 현재 목록 페이지에서 PvPRank_* 리더보드 이름을 수집합니다.")
-    body_text = page.locator("body").inner_text()
-    matches = BOARD_NAME_RE.findall(body_text)
+    wait_for_data_rows(page)
+    rows = get_data_rows(page)
+    count = rows.count()
 
     board_names = []
     seen = set()
-    for name in matches:
+    for index in range(count):
+        try:
+            row_text = rows.nth(index).inner_text().strip()
+        except Exception:
+            continue
+        if not row_text:
+            continue
+
+        match = BOARD_NAME_RE.search(row_text)
+        if match is None:
+            continue
+
+        name = match.group(0)
         if name in seen:
             continue
         board_names.append(name)
@@ -221,8 +214,7 @@ def open_leaderboard_list_and_search(page):
     open_leaderboard_page(page)
     search_pvp_rank(page)
     print(f"[7] 목록을 {LIST_ROWS_PER_PAGE}개씩 보기로 맞춥니다.")
-    set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수")
-    step_and_verify_ui(page, name="leaderboard_list_100pg")
+    set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows")
 
 
 def _click_board_from_list(page, board_name: str):
@@ -230,12 +222,12 @@ def _click_board_from_list(page, board_name: str):
     row = rows.filter(has_text=board_name).first
     if wait_for_visible(row, 2_000):
         row.scroll_into_view_if_needed()
-        step_and_verify_ui(page)
-
         exact_label = find_exact_text_match(row.get_by_text(board_name, exact=True), board_name)
         if exact_label is not None and wait_for_visible(exact_label, 1_000):
+            record_step_dump(page, f"leaderboard_open_{board_name}_pre")
             exact_label.click()
         else:
+            record_step_dump(page, f"leaderboard_open_{board_name}_pre")
             row.click()
         return
 
@@ -244,7 +236,7 @@ def _click_board_from_list(page, board_name: str):
         raise RuntimeError(f"목록에서 '{board_name}'를 찾지 못했습니다.")
 
     exact_text.scroll_into_view_if_needed()
-    step_and_verify_ui(page)
+    record_step_dump(page, f"leaderboard_open_{board_name}_pre")
     exact_text.click()
 
 
@@ -259,10 +251,8 @@ def enter_leaderboard_detail(page, board_name: str):
     deadline = time.time() + 15
     while time.time() < deadline:
         if wait_for_visible(title, 1_000):
-            step_and_verify_ui(page, name=f"leaderboard_detail_{board_name}")
             return
         if page.url != before_url and wait_for_visible(get_data_rows(page).first, 1_000):
-            step_and_verify_ui(page, name=f"leaderboard_detail_{board_name}")
             return
         page.wait_for_timeout(POLL_WAIT_MS)
 
@@ -331,6 +321,7 @@ def _scroll_leaderboard_grid_once(page):
         return False
 
     page.mouse.move(box["x"] + (box["width"] / 2), box["y"] + (box["height"] / 2))
+    record_step_dump(page, "leaderboard_scroll_pre")
     page.mouse.wheel(0, GRID_SCROLL_STEP_PX)
     page.wait_for_timeout(POLL_WAIT_MS)
     return True
@@ -369,10 +360,24 @@ def _extract_nickname_from_cells(cells: list, uuid_value: str, fallback_text: st
     return ""
 
 
+def _read_row_field_text(row, field_names) -> str:
+    for field_name in field_names:
+        try:
+            cell = row.locator(f"[data-field='{field_name}']").first
+            value = cell.get_attribute("title")
+            if value:
+                return value.strip()
+            text = cell.inner_text().strip()
+            if text:
+                return text
+        except Exception:
+            continue
+    return ""
+
+
 def extract_top_ranks(page, board_name: str) -> list:
     print(f"[9] '{board_name}' 상세에서 상위 {MAX_RANK}위 데이터를 읽습니다.")
     wait_for_leaderboard_rank_rows(page)
-    step_and_verify_ui(page, name=f"leaderboard_ranks_{board_name}")
 
     results_by_rank = {}
     seen_ranks = set()
@@ -387,23 +392,20 @@ def extract_top_ranks(page, board_name: str) -> list:
             row = rows.nth(index)
 
             # 순위: data-rowindex (0-based) → 1-based
-            rowindex_attr = row.get_attribute("data-rowindex")
-            if rowindex_attr is None:
+            rank_text = _read_row_field_text(row, ["rank", "index"])
+            if not rank_text or not re.fullmatch(r"\d+", rank_text):
                 continue
-            rank = int(rowindex_attr) + 1
+            rank = int(rank_text)
 
             if rank < 1 or rank > MAX_RANK:
                 continue
             if rank in seen_ranks:
                 continue
 
-            try:
-                uuid_value = row.locator("[data-field='uuid']").first.inner_text().strip()
-                nickname = row.locator("[data-field='nickname']").first.inner_text().strip()
-            except Exception:
-                continue
+            uuid_value = _read_row_field_text(row, ["uuid", "gamerId"])
+            nickname = _read_row_field_text(row, ["nickname"])
 
-            if not uuid_value:
+            if not uuid_value or not nickname:
                 continue
 
             results_by_rank[rank] = {
@@ -470,8 +472,7 @@ def run(page, explicit_project_base, start_url, project_name) -> list:
             open_leaderboard_list_and_search(page)
 
         enter_leaderboard_detail(page, board_name)
-        set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수")
-        step_and_verify_ui(page, name=f"leaderboard_detail_{board_name}_50pg")
+        set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
         board_rows = extract_top_ranks(page, board_name)
         print(f"\n  {'순위':>4}  {'UUID':<36}  닉네임")
         print(f"  {'─'*4}  {'─'*36}  {'─'*20}")
@@ -479,6 +480,7 @@ def run(page, explicit_project_base, start_url, project_name) -> list:
             print(f"  {r['rank']:>4}위  {r['uuid']}  {r['nickname']}")
         all_rows.extend(board_rows)
 
+    step_and_verify_ui(page, "leaderboard_complete")
     return all_rows
 
 
@@ -528,6 +530,7 @@ def main():
     out_dir = BASE_DIR / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
     LEADERBOARD_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    init_dump_dir(out_dir)
 
     print("=" * 55)
     print(" Leaderboard PvPRank extractor")
@@ -535,6 +538,7 @@ def main():
     print(f"프로필   : {profile_dir.name}")
     print(f"출력     : {out_dir.name}")
     print(f"CSV 저장 : {LEADERBOARD_OUT_DIR}")
+    print(f"덤프     : {out_dir} (30일 초과 자동 삭제)")
 
     succeeded = False
     all_rows = []

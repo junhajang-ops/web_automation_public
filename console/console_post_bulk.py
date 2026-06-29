@@ -24,8 +24,8 @@ from console_user_search_test import (
     load_playwright,
     prepare_console_project,
     select_target_page,
-    step_pause,
 )
+from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui
 from console_post_register import (
     confirm_item_add_popup,
     ensure_receiver_list_rows_per_page,
@@ -127,9 +127,8 @@ def select_bulk_item_in_popup(page, chart_category: str, item_value: str):
     item_dropdown = dialog.locator("[name='item'][role='listbox']").first
     item_dropdown.wait_for(state="visible", timeout=10_000)
     item_dropdown.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "bulk_item_dd_pre")
     item_dropdown.click()
-    step_pause(page)
 
     # JSON 값 형식이 문자열("2000") 또는 숫자(2000) 모두 대응
     substrs = [
@@ -151,9 +150,8 @@ def select_bulk_item_in_popup(page, chart_category: str, item_value: str):
 
     option.wait_for(state="visible", timeout=10_000)
     option.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "bulk_item_option_pre")
     option.click()
-    step_pause(page)
 
     selected_text = item_dropdown.locator(".text, .divider.text").first.inner_text().strip()
     print(f"    선택 결과: {selected_text[:100]}...")
@@ -171,11 +169,10 @@ def confirm_post_send(page):
     confirm_btn = dialog.locator("button.ui.medium.positive.button").first
     confirm_btn.wait_for(state="visible", timeout=10_000)
     confirm_btn.scroll_into_view_if_needed()
-    step_pause(page)
+    record_step_dump(page, "bulk_send_confirm_pre")
     confirm_btn.click()
 
     dialog.wait_for(state="hidden", timeout=15_000)
-    step_pause(page)
 
 
 # ── 그룹 단위 우편 발송 ───────────────────────────────────────────────────────
@@ -262,6 +259,7 @@ def run_post_bulk(page, rows, explicit_project_base, start_url, project_name):
             })
             raise
 
+    step_and_verify_ui(page, "post_bulk_complete")
     return {"ok": ok_count, "fail": len(fail_groups), "fail_groups": fail_groups}
 
 
@@ -316,6 +314,7 @@ def main():
     profile_dir = BASE_DIR / args.profile
     out_dir = BASE_DIR / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
+    init_dump_dir(out_dir)
 
     print("=" * 55)
     print(" Console console post bulk sender")
