@@ -47,7 +47,7 @@ from cs_parse import parse_ticket  # import-time 부작용 없음, 직접 import
 # ── EXTRACT_JS ────────────────────────────────────────────────────────────────
 # cs_field_dump.py 동일 상수. import 시 DUMP_DIR.mkdir() 부작용이 있어 복사 사용.
 from cs_parse import list_known_packages, resolve_brand_package, resolve_brand_gcp_log
-from cs_gcp_logging import fetch_recent_shop_click_log
+from cs_gcp_logging import build_logging_service, fetch_recent_shop_click_log
 
 EXTRACT_JS = r"""
 () => {
@@ -589,7 +589,7 @@ class ConsoleJudgeWorker:
             from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
             from playwright.sync_api import sync_playwright as console_sync_playwright
 
-            from console_payment_error import build_logging_service, judge_nonpayment
+            from console_payment_error import judge_nonpayment
             from console_user_search_test import (
                 DEFAULT_PROFILE as CONSOLE_PROFILE_NAME,
                 DEFAULT_PROJECT_NAME as CONSOLE_PROJECT_NAME,

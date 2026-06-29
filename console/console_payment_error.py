@@ -61,7 +61,7 @@ from console_shopdata_lookup import (
     wait_for_shopdata_result_row,
 )
 from cs_parse import resolve_brand_gcp_log
-from cs_gcp_logging import fetch_recent_shop_click_log
+from cs_gcp_logging import build_logging_service, fetch_recent_shop_click_log
 from test_config import TEST_TABLE_NAME, TEST_UUID
 
 DEFAULT_OUTPUT = "dumps_console_payment_error"
@@ -69,7 +69,6 @@ DEFAULT_UUID = TEST_UUID
 DEFAULT_TABLE_NAME = TEST_TABLE_NAME
 DEFAULT_BRAND = "Gametitle_Raid(en)"
 PURCHASE_CODE_NULL = "PurchaseCodeNull"
-LOGGING_SCOPE = "https://www.googleapis.com/auth/logging.read"
 # subprocess 호출자(cs co-pilot)가 결과를 회수할 때 쓰는 마커.
 # cs_copilot.py 의 PAYMENT_ERROR_JSON_MARKER 와 반드시 같아야 한다.
 PAYMENT_ERROR_JSON_MARKER = "===PAYMENT_ERROR_JSON==="
@@ -97,22 +96,6 @@ def _select_target_row(rows, order_id):
             if (row.get(ROW_ORDER_ID) or "").strip() == target:
                 return row
     return rows[0] if rows else None
-
-
-def build_logging_service(key_path):
-    """GCP Cloud Logging v2 service(읽기 전용 scope). 실패 시 None."""
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-    except ImportError:
-        return None
-    try:
-        creds = service_account.Credentials.from_service_account_file(
-            str(key_path), scopes=[LOGGING_SCOPE]
-        )
-        return build("logging", "v2", credentials=creds, cache_discovery=False)
-    except Exception:
-        return None
 
 
 def resolve_product_via_gcp(logging_service, brand, uuid_value):
