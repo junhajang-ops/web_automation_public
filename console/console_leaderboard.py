@@ -84,31 +84,19 @@ def parse_args():
     parser.add_argument("--out", default=DEFAULT_OUTPUT)
     parser.add_argument("--project-base", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
-    parser.add_argument(
-        "--project-name",
-        default=os.environ.get("LEADERBOARD_PROJECTNAME", DEFAULT_PROJECT_NAME),
-        help="콘솔 콘솔 프로젝트명 (env LEADERBOARD_PROJECTNAME 또는 직접 지정)",
-    )
+    parser.add_argument("--project-name", default=DEFAULT_PROJECT_NAME)
     parser.add_argument("--hold-seconds", type=int, default=DEFAULT_HOLD_SECONDS)
-    parser.add_argument(
-        "--key",
-        default=os.environ.get("GOOGLE_KEY_FILE", ""),
-        help="GCP 서비스계정 JSON 키 경로 (env GOOGLE_KEY_FILE 또는 직접 지정)",
-    )
-    parser.add_argument(
-        "--gcp-project",
-        default=os.environ.get("GCP_PROJECT", ""),
-        help="GCP 프로젝트 ID (env GCP_PROJECT 또는 직접 지정)",
-    )
-    parser.add_argument(
-        "--gcp-log",
-        default=os.environ.get("LOGNAME", os.environ.get("GCP_LOG_NAME", "")),
-        help="GCP 로그 이름 (env LOGNAME 또는 직접 지정)",
-    )
+    parser.add_argument("--key", default="", help="GCP 서비스계정 JSON 키 경로 (직접 지정)")
+    parser.add_argument("--gcp-project", default="", help="GCP 프로젝트 ID (직접 지정)")
+    parser.add_argument("--gcp-log", default="", help="GCP 로그 이름 (직접 지정)")
     parser.add_argument(
         "--gametitle",
         action="store_true",
-        help="gametitle 프로젝트 env 일괄 적용 (GOOGLE_KEY_FILE / LOGNAME / GCP_PROJECT / LEADERBOARD_PROJECTNAME)",
+        help=(
+            "gametitle 프로젝트 env 일괄 적용 "
+            "(GOOGLE_KEY_FILE / GCP_PROJECT / LOGNAME / LEADERBOARD_PROJECTNAME). "
+            "누락 시 실행 전 오류."
+        ),
     )
     return parser.parse_args()
 
