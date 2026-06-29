@@ -59,6 +59,13 @@ UUID_RE = re.compile(
     re.I,
 )
 BOARD_NAME_RE = re.compile(rf"{SEARCH_KEYWORD}_[A-Za-z0-9_]+")
+LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS = [
+    r"button: 영어 FALLBACK\|type=button$",
+    r"button: 한국어\|type=button$",
+    r"role: tabpanel$",
+    r"structural_text: label:보상 우편 제목(?: \(deprecated\))?$",
+    r"structural_text: tab:(영어 FALLBACK|한국어)$",
+]
 
 
 
@@ -78,7 +85,16 @@ def open_leaderboard_page(page, nav_context: str = "initial"):
     link = page.locator("a#baseRank, a[href*='/baseRank']").first
     link.wait_for(state="visible", timeout=15_000)
     link.scroll_into_view_if_needed()
-    record_step_dump(page, f"leaderboard_nav_{nav_context}_pre")
+    ignore_patterns = (
+        LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS
+        if nav_context == "return"
+        else None
+    )
+    record_step_dump(
+        page,
+        f"leaderboard_nav_{nav_context}_pre",
+        ignore_patterns=ignore_patterns,
+    )
     link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
