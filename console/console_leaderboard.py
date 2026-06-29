@@ -69,11 +69,11 @@ UUID_RE = re.compile(
 BOARD_NAME_RE = re.compile(rf"{SEARCH_KEYWORD}_[A-Za-z0-9_]+")
 ACCOUNT_NEW_HOURS = 240  # 계정 생성 후 240시간(10일) 이내 → 신규
 LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS = [
-    r"button: 영어 FALLBACK\|type=button$",
+    r"button: .*FALLBACK\|type=button$",
     r"button: 한국어\|type=button$",
     r"role: tabpanel$",
     r"structural_text: label:보상 우편 제목(?: \(deprecated\))?$",
-    r"structural_text: tab:(영어 FALLBACK|한국어)$",
+    r"structural_text: tab:(?:.*FALLBACK|한국어)$",
 ]
 
 
@@ -411,15 +411,22 @@ def _extract_rank_from_row(row) -> int | None:
 
 
 def get_week_start_utc() -> datetime.datetime:
-    """이번 주 월요일 05:00 KST (UTC+9) → UTC naive datetime."""
+    """이번 주 월요일 05:00 KST → UTC naive datetime.
+
+    월요일 00:00~04:59 KST는 시즌 전환 시간대 → RuntimeError.
+    그 외(월 05:00 ~ 일 23:59)는 해당 주 월요일 05:00 KST를 반환.
+    """
     KST = datetime.timezone(datetime.timedelta(hours=9))
     now_kst = datetime.datetime.now(KST)
-    days_since_monday = now_kst.weekday()  # 월=0, 일=6
+    if now_kst.weekday() == 0 and now_kst.hour < 5:
+        raise RuntimeError(
+            f"월요일 00:00~04:59 KST는 시즌 전환 시간대입니다. "
+            f"현재 시각: {now_kst.strftime('%H:%M')} KST — 05:00 이후 재시도해 주세요."
+        )
+    days_since_monday = now_kst.weekday()
     monday_kst = (now_kst - datetime.timedelta(days=days_since_monday)).replace(
         hour=5, minute=0, second=0, microsecond=0
     )
-    if now_kst < monday_kst:  # 아직 이번 주 월요일 05:00 KST가 안 됐으면 지난주 사용
-        monday_kst -= datetime.timedelta(weeks=1)
     return monday_kst.astimezone(datetime.timezone.utc).replace(tzinfo=None)
 
 
@@ -430,7 +437,19 @@ def query_pvp_stats(logging_service, project, log_name, uuid, week_start_utc, no
     entries, err = fetch_pvp_match_logs(logging_service, project, log_name, uuid, since_iso, until_iso)
 
     if err and not entries:
-        return {"account_type": f"조회실패({err})", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": 0}
+        return {
+            "account_type": f"조회실패({err})",
+            "max_pvp_ticket": "",
+            "create_account_date": "",
+            "pvp_log_count": "",
+        }
+    if err:
+        return {
+            "account_type": f"부분실패({err})",
+            "max_pvp_ticket": "",
+            "create_account_date": "",
+            "pvp_log_count": "",
+        }
     if not entries:
         return {"account_type": "로그없음", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": 0}
 
