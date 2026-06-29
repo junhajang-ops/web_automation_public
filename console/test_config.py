@@ -13,12 +13,30 @@ from pathlib import Path
 def _load_env_file(env_path):
     if not env_path.exists():
         return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
+    # 역슬래시(\)로 끝나는 줄은 다음 줄과 연결 (긴 JSON 값의 줄바꿈 지원 — cs_parse와 동일)
+    raw_lines = env_path.read_text(encoding="utf-8").splitlines()
+    joined = []
+    buf = ""
+    for raw_line in raw_lines:
+        if raw_line.endswith("\\"):
+            buf += raw_line[:-1]
+        else:
+            buf += raw_line
+            joined.append(buf)
+            buf = ""
+    if buf:
+        joined.append(buf)
+
+    for line in joined:
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip())
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
 
 
 _load_env_file(Path(__file__).resolve().parent.parent / ".env")

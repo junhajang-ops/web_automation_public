@@ -73,12 +73,12 @@ def parse_args():
     return parser.parse_args()
 
 
-def open_leaderboard_page(page):
+def open_leaderboard_page(page, nav_context: str = "initial"):
     print("[4] 사이드 메뉴에서 '리더보드' 페이지로 이동합니다.")
     link = page.locator("a#baseRank, a[href*='/baseRank']").first
     link.wait_for(state="visible", timeout=15_000)
     link.scroll_into_view_if_needed()
-    record_step_dump(page, "leaderboard_nav_pre")
+    record_step_dump(page, f"leaderboard_nav_{nav_context}_pre")
     link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
@@ -116,26 +116,32 @@ def wait_for_data_rows(page, timeout_ms: int = 15_000):
 
 
 def get_rows_per_page_dropdown(page):
-    dropdowns = page.locator("[aria-haspopup='listbox']")
-    count = dropdowns.count()
+    selectors = [
+        ".MuiTablePagination-select[role='combobox']",
+        "[role='combobox']",
+        "[aria-haspopup='listbox']",
+    ]
+
     visible_dropdowns = []
-
-    for index in range(count):
-        dropdown = dropdowns.nth(index)
-        try:
-            if not dropdown.is_visible():
+    for selector in selectors:
+        dropdowns = page.locator(selector)
+        count = dropdowns.count()
+        for index in range(count):
+            dropdown = dropdowns.nth(index)
+            try:
+                if not dropdown.is_visible():
+                    continue
+                text = dropdown.inner_text().strip()
+            except Exception:
                 continue
-            text = dropdown.inner_text().strip()
-        except Exception:
-            continue
-        if "보기" not in text:
-            continue
-        visible_dropdowns.append(dropdown)
+            if text == "100개씩 보기":
+                return dropdown
+            if text.endswith("개씩 보기") or "보기" in text:
+                visible_dropdowns.append((selector, dropdown))
+        if visible_dropdowns:
+            return visible_dropdowns[-1][1]
 
-    if not visible_dropdowns:
-        raise RuntimeError("표시 개수 드롭다운을 찾지 못했습니다.")
-
-    return visible_dropdowns[-1]
+    raise RuntimeError("표시 개수 드롭다운을 찾지 못했습니다.")
 
 
 def set_rows_per_page(page, target: int, label: str, verify_prefix: str = ""):
@@ -211,7 +217,7 @@ def collect_visible_board_names(page) -> list:
 
 
 def open_leaderboard_list_and_search(page):
-    open_leaderboard_page(page)
+    open_leaderboard_page(page, nav_context="initial")
     search_pvp_rank(page)
     print(f"[7] 목록을 {LIST_ROWS_PER_PAGE}개씩 보기로 맞춥니다.")
     set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows")
@@ -469,7 +475,10 @@ def run(page, explicit_project_base, start_url, project_name) -> list:
     for index, board_name in enumerate(board_names):
         if index > 0:
             print("[7-retry] 다음 리더보드를 위해 목록 화면을 다시 엽니다.")
-            open_leaderboard_list_and_search(page)
+            open_leaderboard_page(page, nav_context="return")
+            search_pvp_rank(page)
+            print(f"[7] 목록을 {LIST_ROWS_PER_PAGE}개씩 보기로 맞춥니다.")
+            set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows")
 
         enter_leaderboard_detail(page, board_name)
         set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")

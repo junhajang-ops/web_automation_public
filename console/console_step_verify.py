@@ -19,6 +19,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_STEP_WAIT_MS = 1_000
 STEP_WAIT_ENV_KEYS = ("CONSOLE_STEP_WAIT_MS", "STEP_WAIT_MS")
+FINGERPRINT_SCHEMA_VERSION = 2
 
 _step_seq = [0]
 _dump_counter = [0]
@@ -176,14 +177,24 @@ def _load_last_fingerprint(name: str) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        loaded = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+    if not isinstance(loaded, dict):
+        return {}
+    if loaded.get("__schema_version") != FINGERPRINT_SCHEMA_VERSION:
+        return {}
+    fingerprint = loaded.get("fingerprint", {})
+    return fingerprint if isinstance(fingerprint, dict) else {}
 
 
 def _save_fingerprint(name: str, fp: dict) -> None:
     path = _get_fp_dir() / f"{name}_last.json"
-    path.write_text(json.dumps(fp, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = {
+        "__schema_version": FINGERPRINT_SCHEMA_VERSION,
+        "fingerprint": fp,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _diff_fingerprints(prev: dict, curr: dict) -> list[str]:
