@@ -84,19 +84,31 @@ def parse_args():
     parser.add_argument("--out", default=DEFAULT_OUTPUT)
     parser.add_argument("--project-base", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
-    parser.add_argument("--project-name", default=DEFAULT_PROJECT_NAME)
+    parser.add_argument(
+        "--project-name",
+        default=os.environ.get("LEADERBOARD_PROJECTNAME", DEFAULT_PROJECT_NAME),
+        help="콘솔 콘솔 프로젝트명 (env LEADERBOARD_PROJECTNAME 또는 직접 지정)",
+    )
     parser.add_argument("--hold-seconds", type=int, default=DEFAULT_HOLD_SECONDS)
     parser.add_argument(
-        "--key", default="",
-        help="GCP 서비스계정 JSON 키 경로 (pvp_match 로그 조회용, 생략 시 GCP 조회 건너뜀)",
+        "--key",
+        default=os.environ.get("GOOGLE_KEY_FILE", ""),
+        help="GCP 서비스계정 JSON 키 경로 (env GOOGLE_KEY_FILE 또는 직접 지정)",
     )
     parser.add_argument(
-        "--gcp-project", default=os.environ.get("GCP_PROJECT", ""),
+        "--gcp-project",
+        default=os.environ.get("GCP_PROJECT", ""),
         help="GCP 프로젝트 ID (env GCP_PROJECT 또는 직접 지정)",
     )
     parser.add_argument(
-        "--gcp-log", default=os.environ.get("GCP_LOG_NAME", ""),
-        help="GCP 로그 이름 (env GCP_LOG_NAME 또는 직접 지정)",
+        "--gcp-log",
+        default=os.environ.get("LOGNAME", os.environ.get("GCP_LOG_NAME", "")),
+        help="GCP 로그 이름 (env LOGNAME 또는 직접 지정)",
+    )
+    parser.add_argument(
+        "--gametitle",
+        action="store_true",
+        help="gametitle 프로젝트 env 일괄 적용 (GOOGLE_KEY_FILE / LOGNAME / GCP_PROJECT / LEADERBOARD_PROJECTNAME)",
     )
     return parser.parse_args()
 
@@ -693,6 +705,20 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     LEADERBOARD_OUT_DIR.mkdir(parents=True, exist_ok=True)
     init_dump_dir(out_dir)
+
+    # --gametitle: env 값 명시 적용 + 필수 env 누락 시 즉시 종료
+    if args.gametitle:
+        args.key = args.key or os.environ.get("GOOGLE_KEY_FILE", "")
+        args.gcp_log = args.gcp_log or os.environ.get("LOGNAME", "")
+        args.gcp_project = args.gcp_project or os.environ.get("GCP_PROJECT", "")
+        args.project_name = args.project_name or os.environ.get("LEADERBOARD_PROJECTNAME", "")
+        missing = [name for name, val in [
+            ("GOOGLE_KEY_FILE", args.key),
+            ("LOGNAME", args.gcp_log),
+            ("GCP_PROJECT", args.gcp_project),
+        ] if not val]
+        if missing:
+            raise SystemExit(f"[오류] --gametitle 모드: 다음 env가 비어 있습니다 — {', '.join(missing)}")
 
     logging_service = None
     if args.key:
