@@ -284,11 +284,12 @@ def _row_cells(row_el) -> list:
 
 
 def get_leaderboard_rank_grid(page):
+    # 페이지에 DataGrid가 2개 존재: 보상 구조(rank/rewardItems) + 플레이어 순위(uuid/nickname)
+    # uuid·nickname 필드가 있는 두 번째 그리드를 정확히 잡는다.
     return (
         page.locator("div.MuiDataGrid-root")
-        .filter(has=page.locator("[data-field='rank']"))
+        .filter(has=page.locator("[data-field='uuid']"))
         .filter(has=page.locator("[data-field='nickname']"))
-        .filter(has=page.locator("[data-field='gamerId']"))
         .first
     )
 
@@ -384,22 +385,27 @@ def extract_top_ranks(page, board_name: str) -> list:
 
         for index in range(count):
             row = rows.nth(index)
-            text = row.inner_text().strip()
-            if not text:
-                continue
 
-            cells = _row_cells(row)
-            uuid_value = _extract_uuid_from_cells(cells, text)
-            rank = _extract_rank_from_cells(cells, text)
-
-            if not uuid_value or rank is None:
+            # 순위: data-rowindex (0-based) → 1-based
+            rowindex_attr = row.get_attribute("data-rowindex")
+            if rowindex_attr is None:
                 continue
+            rank = int(rowindex_attr) + 1
+
             if rank < 1 or rank > MAX_RANK:
                 continue
             if rank in seen_ranks:
                 continue
 
-            nickname = _extract_nickname_from_cells(cells, uuid_value, text)
+            try:
+                uuid_value = row.locator("[data-field='uuid']").first.inner_text().strip()
+                nickname = row.locator("[data-field='nickname']").first.inner_text().strip()
+            except Exception:
+                continue
+
+            if not uuid_value:
+                continue
+
             results_by_rank[rank] = {
                 "leaderboard": board_name,
                 "rank": rank,
