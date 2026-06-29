@@ -19,6 +19,7 @@ cs_copilot.py — cs 실시간 보조 co-pilot (읽기 전용 MVP)
 import argparse
 import json
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -218,6 +219,12 @@ _SIDEBAR_TICKET_RE = re.compile(r"^\s*(\d{3,8})\s*\|", re.MULTILINE)  # NNNNN | 
 BASE_DIR = Path(__file__).resolve().parent
 PROFILE_DIR = BASE_DIR / "pw_profile"
 REFUNDED_STATES = {"REFUNDED", "PARTIALLY_REFUNDED", "PENDING_REFUND", "CANCELED"}
+
+# 콘솔 미지급 판정 스크립트(subprocess 연계) — 영수증 조회 시 자동 호출.
+# co-pilot(cs 브라우저)과 콘솔 콘솔(pw_profile_console, 별도 로그인)은
+# 서로 다른 브라우저 세션이라 같은 프로세스로 묶지 않고 별도 프로세스로 띄운다.
+CONSOLE_PAYMENT_ERROR_SCRIPT = BASE_DIR.parent / "console" / "console_payment_error.py"
+PAYMENT_ERROR_JSON_MARKER = "===PAYMENT_ERROR_JSON==="  # console_payment_error.py 와 동일해야 함
 
 # 결제정보 가격 패턴: 통화기호+숫자 또는 숫자+통화기호 (라벨 무관, 값 셀 직접 감지)
 _PRICE_VAL_RE = re.compile(
@@ -568,7 +575,72 @@ def _print_shop_click_log(entry, error):
     print(_SEP)
 
 
-def _handle_ticket(page, ticket_id, service, logging_service=None):
+def run_console_payment_error(parsed, key_path):
+    """콘솔 미지급 판정 스크립트를 별도 프로세스로 호출하고 결과(dict)를 회수.
+
+    co-pilot(cs 브라우저)과 콘솔 콘솔(pw_profile_console, 별도 로그인)은
+    서로 다른 브라우저 세션이라 subprocess 로 분리 실행한다. 읽기 전용.
+    반환: (result_dict | None, error | None)
+    """
+    uuid = parsed.get("uuid")
+    brand = parsed.get("brand")
+    order_id = parsed.get("order_id")
+    if not uuid:
+        return None, "UUID 없음 — 콘솔 판정 생략"
+    if not CONSOLE_PAYMENT_ERROR_SCRIPT.exists():
+        return None, f"스크립트 없음: {CONSOLE_PAYMENT_ERROR_SCRIPT}"
+
+    cmd = [
+        sys.executable, "-u", str(CONSOLE_PAYMENT_ERROR_SCRIPT),
+        "--uuid", uuid, "--emit-json", "--hold-seconds", "0",
+    ]
+    if brand:
+        cmd += ["--brand", brand]
+    if order_id:
+        cmd += ["--order-id", order_id]
+    if key_path:
+        cmd += ["--key", str(key_path)]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", cwd=str(CONSOLE_PAYMENT_ERROR_SCRIPT.parent),
+        )
+    except Exception as e:  # noqa: BLE001 — 실행 실패는 안내만 하고 계속
+        return None, f"subprocess 실행 실패: {e}"
+
+    out = proc.stdout or ""
+    idx = out.rfind(PAYMENT_ERROR_JSON_MARKER)
+    if idx == -1:
+        return None, f"결과 JSON 마커 없음 (exit={proc.returncode})"
+    tail = out[idx + len(PAYMENT_ERROR_JSON_MARKER):].strip().splitlines()
+    if not tail:
+        return None, "결과 JSON 비어있음"
+    try:
+        return json.loads(tail[0]), None
+    except Exception as e:  # noqa: BLE001
+        return None, f"결과 JSON 파싱 실패: {e}"
+
+
+def _print_payment_error(result, error):
+    print(_SEP)
+    print(" [콘솔 미지급 판정] 영수증검증 + ShopData (읽기 전용)")
+    if error or not result:
+        print(f"   판정 실패/생략: {error or '결과 없음'}")
+        print(_SEP)
+        return
+    print(f"   판정       : {result.get('verdict')}")
+    print(f"   상품코드   : {result.get('product_code') or '(미특정)'} (source={result.get('product_source')})")
+    sd = result.get("shopdata")
+    if sd:
+        print(f"   ShopData   : line={sd.get('purchase_line_number')} "
+              f"count={sd.get('purchase_count')} judgment={sd.get('count_judgment')}")
+    for note in result.get("notes", []) or []:
+        print(f"   - {note}")
+    print(_SEP)
+
+
+def _handle_ticket(page, ticket_id, service, logging_service=None, key_path=None):
     """티켓 상세 처리: 추출 → 파싱 → API 조회 → verdict 출력."""
     print("\n[티켓 감지] 분석 중...")
 
@@ -651,6 +723,15 @@ def _handle_ticket(page, ticket_id, service, logging_service=None):
         else:
             entry, err = fetch_recent_shop_click_log(logging_service, project, log_name, uuid)
             _print_shop_click_log(entry, err)
+
+    # 영수증(주문) 조회됨 → 콘솔 미지급 판정 자동 호출 (subprocess, 별도 콘솔 세션)
+    if verdict.get("channel") == "google":
+        if not parsed.get("uuid"):
+            print(" [콘솔 미지급 판정] UUID 없음 — 생략")
+        else:
+            print(" [콘솔 미지급 판정] 콘솔 콘솔 조회 중... (별도 창, 잠시 대기)")
+            pe_result, pe_err = run_console_payment_error(parsed, key_path)
+            _print_payment_error(pe_result, pe_err)
 
 
 # ── 메인 ──────────────────────────────────────────────────────────────────────
@@ -807,7 +888,7 @@ def main():
                         continue
                     last_ticket[pid] = tid
                     try:
-                        _handle_ticket(page, tid, service, logging_service)
+                        _handle_ticket(page, tid, service, logging_service, key_path)
                     except Exception as e:
                         print(f"[오류] 티켓 #{tid} 처리 실패: {e}")
         except KeyboardInterrupt:

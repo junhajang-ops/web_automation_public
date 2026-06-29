@@ -21,6 +21,7 @@ console_payment_error.py — 미지급(결제오류) 판정 (설계서 3-B)
 
 import argparse
 import datetime
+import json
 import sys
 import time
 from pathlib import Path
@@ -69,6 +70,9 @@ DEFAULT_TABLE_NAME = TEST_TABLE_NAME
 DEFAULT_BRAND = "Gametitle_Raid(en)"
 PURCHASE_CODE_NULL = "PurchaseCodeNull"
 LOGGING_SCOPE = "https://www.googleapis.com/auth/logging.read"
+# subprocess 호출자(cs co-pilot)가 결과를 회수할 때 쓰는 마커.
+# cs_copilot.py 의 PAYMENT_ERROR_JSON_MARKER 와 반드시 같아야 한다.
+PAYMENT_ERROR_JSON_MARKER = "===PAYMENT_ERROR_JSON==="
 
 # 영수증검증 결과 row 의 키는 한글 라벨(RECEIPT_FIELDS 의 두번째 값)
 ROW_DESCRIPTION = "Description"
@@ -265,6 +269,24 @@ def print_result(result):
     print(_SEP)
 
 
+def emit_json_result(result, succeeded, error_message):
+    """subprocess 호출자(co-pilot)가 회수하도록 결과 요약을 JSON 한 줄로 출력.
+
+    PII가 많은 receipt.rows 는 제외하고 판정 핵심만 담는다.
+    """
+    payload = {
+        "success": succeeded,
+        "verdict": (result or {}).get("verdict"),
+        "product_code": (result or {}).get("product_code"),
+        "product_source": (result or {}).get("product_source"),
+        "shopdata": (result or {}).get("shopdata"),
+        "notes": (result or {}).get("notes", []),
+        "error": error_message or None,
+    }
+    print(PAYMENT_ERROR_JSON_MARKER)
+    print(json.dumps(payload, ensure_ascii=False))
+
+
 def save_artifacts(page, out_dir, uuid_value, succeeded, result=None, error_message=""):
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     stem = out_dir / f"console_payment_error_{ts}"
@@ -317,6 +339,8 @@ def parse_args():
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
     parser.add_argument("--project-name", default=DEFAULT_PROJECT_NAME)
     parser.add_argument("--hold-seconds", type=int, default=DEFAULT_HOLD_SECONDS)
+    parser.add_argument("--emit-json", action="store_true",
+                        help="결과 요약을 stdout에 JSON 한 줄로 출력(co-pilot subprocess 연계용)")
     return parser.parse_args()
 
 
@@ -377,6 +401,9 @@ def main():
                 save_artifacts(page, out_dir, args.uuid, succeeded, result, error_message)
             finally:
                 context.close()
+
+    if args.emit_json:
+        emit_json_result(result, succeeded, error_message)
 
     if not succeeded:
         sys.exit(1)
