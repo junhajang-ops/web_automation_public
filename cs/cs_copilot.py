@@ -18,9 +18,10 @@ cs_copilot.py — cs 실시간 보조 co-pilot (읽기 전용 MVP)
 
 import argparse
 import json
+import queue
 import re
-import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -46,6 +47,7 @@ from cs_parse import parse_ticket  # import-time 부작용 없음, 직접 import
 # ── EXTRACT_JS ────────────────────────────────────────────────────────────────
 # cs_field_dump.py 동일 상수. import 시 DUMP_DIR.mkdir() 부작용이 있어 복사 사용.
 from cs_parse import list_known_packages, resolve_brand_package, resolve_brand_gcp_log
+from cs_gcp_logging import fetch_recent_shop_click_log
 
 EXTRACT_JS = r"""
 () => {
@@ -217,14 +219,12 @@ TICKET_URL_RE = re.compile(r"/tickets/[^/]+/(\d+)")
 _DISPLAY_TICKET_RE = re.compile(r"#(\d{3,8})\b")  # #NNNNN 형식
 _SIDEBAR_TICKET_RE = re.compile(r"^\s*(\d{3,8})\s*\|", re.MULTILINE)  # NNNNN | label 형식 (사이드바)
 BASE_DIR = Path(__file__).resolve().parent
+CONSOLE_DIR = BASE_DIR.parent / "console"
+if str(CONSOLE_DIR) not in sys.path:
+    sys.path.insert(0, str(CONSOLE_DIR))
+
 PROFILE_DIR = BASE_DIR / "pw_profile"
 REFUNDED_STATES = {"REFUNDED", "PARTIALLY_REFUNDED", "PENDING_REFUND", "CANCELED"}
-
-# 콘솔 미지급 판정 스크립트(subprocess 연계) — 영수증 조회 시 자동 호출.
-# co-pilot(cs 브라우저)과 콘솔 콘솔(pw_profile_console, 별도 로그인)은
-# 서로 다른 브라우저 세션이라 같은 프로세스로 묶지 않고 별도 프로세스로 띄운다.
-CONSOLE_PAYMENT_ERROR_SCRIPT = BASE_DIR.parent / "console" / "console_payment_error.py"
-PAYMENT_ERROR_JSON_MARKER = "===PAYMENT_ERROR_JSON==="  # console_payment_error.py 와 동일해야 함
 
 # 결제정보 가격 패턴: 통화기호+숫자 또는 숫자+통화기호 (라벨 무관, 값 셀 직접 감지)
 _PRICE_VAL_RE = re.compile(
@@ -525,38 +525,6 @@ def _format_config_error(error_code: str):
     return error_code
 
 
-def fetch_recent_shop_click_log(logging_service, project, log_name, uuid):
-    """해당 유저(uuid)의 **가장 직전** `SUB_CATEGORY=log_shop_click` 로그 1건 조회.
-
-    읽기 전용(`entries.list`). 반환: (entry_dict | None, error | None).
-    """
-    if not (project and log_name and uuid):
-        return None, "project/log_name/uuid 부족"
-    log_path = f"projects/{project}/logs/{log_name}"
-    filt = (
-        f'logName="{log_path}" '
-        f'AND jsonPayload._user_id="{uuid}" '
-        f'AND jsonPayload.SUB_CATEGORY="log_shop_click"'
-    )
-    body = {
-        "resourceNames": [f"projects/{project}"],
-        "filter": filt,
-        "orderBy": "timestamp desc",
-        "pageSize": 1,
-    }
-    try:
-        resp = logging_service.entries().list(body=body).execute()
-    except HttpError as e:
-        status = getattr(getattr(e, "resp", None), "status", "?")
-        return None, f"HTTP {status}"
-    except Exception as e:  # noqa: BLE001 — 조회 실패는 안내만 하고 계속
-        return None, str(e)
-    entries = resp.get("entries", [])
-    if not entries:
-        return None, "해당 유저의 log_shop_click 로그 없음"
-    return entries[0], None
-
-
 def _print_shop_click_log(entry, error):
     print(_SEP)
     print(" [GCP Logging] 직전 log_shop_click (정상 결제 → 게임 로그 확인)")
@@ -575,58 +543,127 @@ def _print_shop_click_log(entry, error):
     print(_SEP)
 
 
-def run_console_payment_error(parsed, key_path):
-    """콘솔 미지급 판정 스크립트를 별도 프로세스로 호출하고 결과(dict)를 회수.
+class ConsoleJudgeWorker:
+    """콘솔 미지급 판정을 별도 worker thread에서 처리한다."""
 
-    co-pilot(cs 브라우저)과 콘솔 콘솔(pw_profile_console, 별도 로그인)은
-    서로 다른 브라우저 세션이라 subprocess 로 분리 실행한다. 읽기 전용.
-    반환: (result_dict | None, error | None)
-    """
-    uuid = parsed.get("uuid")
-    brand = parsed.get("brand")
-    order_id = parsed.get("order_id")
-    if not uuid:
-        return None, "UUID 없음 — 콘솔 판정 생략"
-    if not CONSOLE_PAYMENT_ERROR_SCRIPT.exists():
-        return None, f"스크립트 없음: {CONSOLE_PAYMENT_ERROR_SCRIPT}"
-
-    cmd = [
-        sys.executable, "-u", str(CONSOLE_PAYMENT_ERROR_SCRIPT),
-        "--uuid", uuid, "--emit-json", "--hold-seconds", "0",
-    ]
-    if brand:
-        cmd += ["--brand", brand]
-    if order_id:
-        cmd += ["--order-id", order_id]
-    if key_path:
-        cmd += ["--key", str(key_path)]
-
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True,
-            encoding="utf-8", cwd=str(CONSOLE_PAYMENT_ERROR_SCRIPT.parent),
+    def __init__(self, key_path: Path):
+        self.key_path = key_path
+        self._tasks: queue.Queue = queue.Queue()
+        self._results: queue.Queue = queue.Queue()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._worker_main,
+            name="console-judge-worker",
+            daemon=True,
         )
-    except Exception as e:  # noqa: BLE001 — 실행 실패는 안내만 하고 계속
-        return None, f"subprocess 실행 실패: {e}"
 
-    out = proc.stdout or ""
-    idx = out.rfind(PAYMENT_ERROR_JSON_MARKER)
-    if idx == -1:
-        return None, f"결과 JSON 마커 없음 (exit={proc.returncode})"
-    tail = out[idx + len(PAYMENT_ERROR_JSON_MARKER):].strip().splitlines()
-    if not tail:
-        return None, "결과 JSON 비어있음"
-    try:
-        return json.loads(tail[0]), None
-    except Exception as e:  # noqa: BLE001
-        return None, f"결과 JSON 파싱 실패: {e}"
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._tasks.put(None)
+        self._thread.join(timeout=10)
+
+    def submit(self, ticket_id: str, parsed: dict) -> None:
+        self._tasks.put(
+            {
+                "ticket_id": ticket_id,
+                "uuid": parsed.get("uuid"),
+                "brand": parsed.get("brand"),
+                "order_id": parsed.get("order_id"),
+            }
+        )
+
+    def drain_results(self) -> list[dict]:
+        items = []
+        while True:
+            try:
+                items.append(self._results.get_nowait())
+            except queue.Empty:
+                break
+        return items
+
+    def _worker_main(self) -> None:
+        try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+            from playwright.sync_api import sync_playwright as console_sync_playwright
+
+            from console_payment_error import build_logging_service, judge_nonpayment
+            from console_user_search_test import (
+                DEFAULT_PROFILE as CONSOLE_PROFILE_NAME,
+                DEFAULT_PROJECT_NAME as CONSOLE_PROJECT_NAME,
+                DEFAULT_START_URL as CONSOLE_START_URL,
+                select_target_page as select_console_target_page,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._results.put(
+                {
+                    "ticket_id": None,
+                    "result": None,
+                    "error": f"console worker 초기화 실패: {exc}",
+                }
+            )
+            return
+
+        console_profile_dir = CONSOLE_DIR / CONSOLE_PROFILE_NAME
+        logging_service = build_logging_service(self.key_path) if self.key_path else None
+
+        with console_sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(console_profile_dir),
+                headless=False,
+                no_viewport=True,
+                args=["--start-maximized"],
+            )
+            try:
+                while not self._stop_event.is_set():
+                    task = self._tasks.get()
+                    if task is None:
+                        break
+
+                    ticket_id = task["ticket_id"]
+                    try:
+                        page = context.pages[0] if context.pages else context.new_page()
+                        page = select_console_target_page(context, page)
+                        result = judge_nonpayment(
+                            page,
+                            task["uuid"],
+                            task["brand"],
+                            order_id=task["order_id"] or None,
+                            logging_service=logging_service,
+                            start_url=CONSOLE_START_URL,
+                            project_name=CONSOLE_PROJECT_NAME,
+                            timeout_error=PlaywrightTimeoutError,
+                        )
+                        self._results.put(
+                            {
+                                "ticket_id": ticket_id,
+                                "result": result,
+                                "error": None,
+                            }
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        self._results.put(
+                            {
+                                "ticket_id": ticket_id,
+                                "result": None,
+                                "error": str(exc),
+                            }
+                        )
+            finally:
+                context.close()
 
 
-def _print_payment_error(result, error):
+def _print_payment_error(ticket_id, result, error):
     print(_SEP)
-    print(" [콘솔 미지급 판정] 영수증검증 + ShopData (읽기 전용)")
-    if error or not result:
-        print(f"   판정 실패/생략: {error or '결과 없음'}")
+    print(f" [콘솔 미지급 판정] 티켓 {ticket_id} — 영수증검증 + ShopData (읽기 전용)")
+    if error:
+        print(f"   판정 실패: {error}")
+        print(_SEP)
+        return
+    if not result:
+        print("   판정 결과 없음")
         print(_SEP)
         return
     print(f"   판정       : {result.get('verdict')}")
@@ -640,7 +677,7 @@ def _print_payment_error(result, error):
     print(_SEP)
 
 
-def _handle_ticket(page, ticket_id, service, logging_service=None, key_path=None):
+def _handle_ticket(page, ticket_id, service, logging_service=None, console_worker=None, console_jobs=None):
     """티켓 상세 처리: 추출 → 파싱 → API 조회 → verdict 출력."""
     print("\n[티켓 감지] 분석 중...")
 
@@ -724,14 +761,24 @@ def _handle_ticket(page, ticket_id, service, logging_service=None, key_path=None
             entry, err = fetch_recent_shop_click_log(logging_service, project, log_name, uuid)
             _print_shop_click_log(entry, err)
 
-    # 영수증(주문) 조회됨 → 콘솔 미지급 판정 자동 호출 (subprocess, 별도 콘솔 세션)
+    # 영수증(주문) 조회됨 → 콘솔 미지급 판정 작업을 console worker에 비동기 등록
     if verdict.get("channel") == "google":
         if not parsed.get("uuid"):
             print(" [콘솔 미지급 판정] UUID 없음 — 생략")
+        elif verdict.get("is_refunded"):
+            print(" [콘솔 미지급 판정] 환불/취소 상태 — 생략")
+        elif console_worker is None or console_jobs is None:
+            print(" [콘솔 미지급 판정] worker 없음 — 생략")
+        elif ticket_id in console_jobs:
+            print(" [콘솔 미지급 판정] 이미 진행 중 — 중복 등록 생략")
         else:
-            print(" [콘솔 미지급 판정] 콘솔 콘솔 조회 중... (별도 창, 잠시 대기)")
-            pe_result, pe_err = run_console_payment_error(parsed, key_path)
-            _print_payment_error(pe_result, pe_err)
+            console_jobs[ticket_id] = {
+                "uuid": parsed.get("uuid"),
+                "brand": parsed.get("brand"),
+                "order_id": parsed.get("order_id"),
+            }
+            console_worker.submit(ticket_id, parsed)
+            print(" [콘솔 미지급 판정] 콘솔 worker에 등록했습니다. 결과는 준비되면 이어서 출력합니다.")
 
 
 # ── 메인 ──────────────────────────────────────────────────────────────────────
@@ -770,6 +817,9 @@ def main():
     pending = {}     # page_id -> ticket_id (Playwright 스레드에서 기록)
     page_map = {}    # page_id -> page object
     last_ticket = {} # page_id -> 마지막 처리 ticket_id
+    console_jobs = {}  # ticket_id -> 간단 메타
+    console_worker = ConsoleJudgeWorker(key_path)
+    console_worker.start()
 
     def _register_page(page):
         pid = id(page)
@@ -856,6 +906,16 @@ def main():
                 else:
                     time.sleep(0.5)  # 열린 탭이 없을 때만 fallback
 
+                for console_result in console_worker.drain_results():
+                    result_ticket_id = console_result.get("ticket_id")
+                    _print_payment_error(
+                        result_ticket_id or "(unknown)",
+                        console_result.get("result"),
+                        console_result.get("error"),
+                    )
+                    if result_ticket_id in console_jobs:
+                        console_jobs.pop(result_ticket_id, None)
+
                 # ── 1) 이벤트 기반 감지 (framenavigated) ─────────────────
                 to_handle = {}
                 for pid in list(pending.keys()):
@@ -888,16 +948,26 @@ def main():
                         continue
                     last_ticket[pid] = tid
                     try:
-                        _handle_ticket(page, tid, service, logging_service, key_path)
+                        _handle_ticket(
+                            page,
+                            tid,
+                            service,
+                            logging_service,
+                            console_worker=console_worker,
+                            console_jobs=console_jobs,
+                        )
                     except Exception as e:
                         print(f"[오류] 티켓 #{tid} 처리 실패: {e}")
         except KeyboardInterrupt:
             print("\n[종료] co-pilot을 종료합니다.")
         finally:
             try:
-                context.close()
-            except Exception:
-                pass
+                console_worker.stop()
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":

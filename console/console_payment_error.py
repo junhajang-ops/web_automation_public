@@ -61,7 +61,7 @@ from console_shopdata_lookup import (
     wait_for_shopdata_result_row,
 )
 from cs_parse import resolve_brand_gcp_log
-from cs_copilot import fetch_recent_shop_click_log
+from cs_gcp_logging import fetch_recent_shop_click_log
 from test_config import TEST_TABLE_NAME, TEST_UUID
 
 DEFAULT_OUTPUT = "dumps_console_payment_error"

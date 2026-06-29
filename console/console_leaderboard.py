@@ -8,7 +8,7 @@ Scope:
 - Open the leaderboard page from the side menu
 - Search visible PvPRank_* leaderboards
 - Open each leaderboard from the on-screen list
-- Read top 30 ranks from the detail table
+- Read every player within rank <= 30 from the detail table (ties included)
 - Save CSV and debug artifacts
 
 This script is intentionally read-only. It does not click any mutation action.
@@ -343,29 +343,6 @@ def _extract_uuid_from_cells(cells: list, fallback_text: str) -> str:
     return match.group(0) if match else ""
 
 
-def _extract_rank_from_cells(cells: list, fallback_text: str):
-    for cell in cells:
-        if re.fullmatch(r"\d+", cell):
-            return int(cell)
-
-    match = re.match(r"^(\d+)\b", fallback_text)
-    return int(match.group(1)) if match else None
-
-
-def _extract_nickname_from_cells(cells: list, uuid_value: str, fallback_text: str) -> str:
-    for index, cell in enumerate(cells):
-        if cell == uuid_value and index + 1 < len(cells):
-            return cells[index + 1].strip()
-
-    if uuid_value:
-        uuid_match = UUID_RE.search(fallback_text)
-        if uuid_match:
-            after_uuid = fallback_text[uuid_match.end():].strip()
-            if after_uuid:
-                return after_uuid.split("\t")[0].strip()
-    return ""
-
-
 def _read_row_field_text(row, field_names) -> str:
     for field_name in field_names:
         try:
@@ -381,15 +358,32 @@ def _read_row_field_text(row, field_names) -> str:
     return ""
 
 
+def _extract_rank_from_row(row) -> int | None:
+    # 1차: 순위 셀(data-field='rank'/'index')의 실제 값.
+    #   공동순위(동점)는 이 값이 같은 숫자로 반복 표시되므로(예: 3위 4명 → "3" 4행),
+    #   행 위치(data-rowindex)가 아니라 이 실제 순위값으로 판정해야 한다.
+    rank_text = _read_row_field_text(row, ["rank", "index"])
+    if rank_text and re.fullmatch(r"\d+", rank_text):
+        return int(rank_text)
+    # 2차: MuiDataGrid 행의 data-rowindex (0-based → 1-based) fallback.
+    #   순위 셀을 못 읽을 때만 사용 — 공동순위 구분은 불가.
+    rowindex_str = (row.get_attribute("data-rowindex") or "").strip()
+    if rowindex_str.isdigit():
+        return int(rowindex_str) + 1
+    return None
+
+
 def extract_top_ranks(page, board_name: str) -> list:
-    print(f"[9] '{board_name}' 상세에서 상위 {MAX_RANK}위 데이터를 읽습니다.")
+    print(f"[9] '{board_name}' 상세에서 {MAX_RANK}위 이내(공동순위 전원) 데이터를 읽습니다.")
     wait_for_leaderboard_rank_rows(page)
 
-    results_by_rank = {}
-    seen_ranks = set()
+    # 공동순위(동점)가 있으면 같은 순위에 여러 명이 있으므로, 순위가 아니라
+    # uuid 를 키로 중복 제거한다. rank <= MAX_RANK 인 행은 인원 수와 무관하게 모두 수집.
+    results_by_uuid = {}
     idle_rounds = 0
+    saw_beyond_max = False
 
-    while len(results_by_rank) < MAX_RANK:
+    while True:
         rows = get_leaderboard_rank_rows(page)
         count = rows.count()
         added_this_round = 0
@@ -397,15 +391,11 @@ def extract_top_ranks(page, board_name: str) -> list:
         for index in range(count):
             row = rows.nth(index)
 
-            # 순위: data-rowindex (0-based) → 1-based
-            rank_text = _read_row_field_text(row, ["rank", "index"])
-            if not rank_text or not re.fullmatch(r"\d+", rank_text):
+            rank = _extract_rank_from_row(row)
+            if rank is None or rank < 1:
                 continue
-            rank = int(rank_text)
-
-            if rank < 1 or rank > MAX_RANK:
-                continue
-            if rank in seen_ranks:
+            if rank > MAX_RANK:
+                saw_beyond_max = True  # 30위 초과가 보임 = 30위 이내는 모두 로드됨
                 continue
 
             uuid_value = _read_row_field_text(row, ["uuid", "gamerId"])
@@ -413,27 +403,29 @@ def extract_top_ranks(page, board_name: str) -> list:
 
             if not uuid_value or not nickname:
                 continue
+            if uuid_value in results_by_uuid:
+                continue
 
-            results_by_rank[rank] = {
+            results_by_uuid[uuid_value] = {
                 "leaderboard": board_name,
                 "rank": rank,
                 "uuid": uuid_value,
                 "nickname": nickname,
             }
-            seen_ranks.add(rank)
             added_this_round += 1
-
-            if len(results_by_rank) >= MAX_RANK:
-                break
-
-        before_state = _get_leaderboard_grid_scroll_state(page)
-        if before_state is None:
-            break
 
         if added_this_round == 0:
             idle_rounds += 1
         else:
             idle_rounds = 0
+
+        # 30위 초과 행을 본 순간 30위 이내는 전부 로드된 것 → 더 스크롤하지 않음
+        if saw_beyond_max:
+            break
+
+        before_state = _get_leaderboard_grid_scroll_state(page)
+        if before_state is None:
+            break
 
         reached_bottom = (
             before_state["scrollTop"] + before_state["clientHeight"]
@@ -452,9 +444,15 @@ def extract_top_ranks(page, board_name: str) -> list:
         ):
             idle_rounds += 1
 
-    results = list(results_by_rank.values())
-    results.sort(key=lambda row: row["rank"])
-    print(f"    {len(results)}개 순위 추출 완료.")
+        # 스크롤도 멈추고 새 행도 없으면 종료(무한 루프 방지)
+        if idle_rounds >= 2:
+            break
+
+    # 같은 순위(공동순위)는 닉네임으로 보조 정렬해 출력 순서를 안정화
+    results = list(results_by_uuid.values())
+    results.sort(key=lambda row: (row["rank"], row["nickname"]))
+    ranks_seen = {row["rank"] for row in results}
+    print(f"    {len(results)}명 추출 완료 ({MAX_RANK}위 이내, 순위 {len(ranks_seen)}종 / 공동순위 포함).")
     return results
 
 
