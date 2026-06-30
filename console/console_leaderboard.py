@@ -69,7 +69,7 @@ UUID_RE = re.compile(
     re.I,
 )
 BOARD_NAME_RE = re.compile(rf"{SEARCH_KEYWORD}_[A-Za-z0-9_]+")
-ACCOUNT_NEW_HOURS = 240  # 계정 생성 후 240시간(10일) 이내 → 신규
+ACCOUNT_NEW_HOURS = int(os.environ.get("ACCOUNT_NEW_HOURS", "240"))  # 계정 생성 후 N시간 이내 → 신규
 RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계 대상 건수
 LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS = [
     r"button: .*FALLBACK\|type=button$",
