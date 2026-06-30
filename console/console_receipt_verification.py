@@ -187,13 +187,6 @@ def click_search_button(page):
     safe_wait_for_load(page, "networkidle", 5_000)
 
 
-def read_total_amount(page):
-    total_match = re.search(
-        r"검색 결과 총액:\s*(.+)",
-        page.locator("body").inner_text(),
-    )
-    return total_match.group(1).strip() if total_match else ""
-
 
 def set_rows_per_page(page, count: int = 100):
     print(f"[7-1] 페이지당 행 수를 {count}개로 변경합니다.")
@@ -346,12 +339,10 @@ def collect_result(page, uuid_value, timeout_error):
 
     no_result_locator = page.locator("text=검색 결과가 없습니다.").first
     if wait_for_visible(no_result_locator, 5_000):
-        total_amount = read_total_amount(page)
-        print(f"    결과 없음. 총액: {total_amount}")
+        print("    결과 없음.")
         return {
             "has_results": False,
             "row_count": 0,
-            "total_amount": total_amount,
             "rows": [],
         }
 
@@ -364,13 +355,11 @@ def collect_result(page, uuid_value, timeout_error):
 
     rows = collect_all_receipt_rows(page)
     row_count = len(rows)
-    total_amount = read_total_amount(page)
-    print(f"    결과 {row_count}건, 총액: {total_amount}")
+    print(f"    결과 {row_count}건 수집.")
 
     return {
         "has_results": True,
         "row_count": row_count,
-        "total_amount": total_amount,
         "rows": rows,
     }
 
@@ -398,7 +387,6 @@ def save_artifacts(page, out_dir, uuid_value, succeeded, result_summary=None, er
     if result_summary:
         summary_lines.append(f"has_results={result_summary.get('has_results', '')}")
         summary_lines.append(f"row_count={result_summary.get('row_count', '')}")
-        summary_lines.append(f"total_amount={result_summary.get('total_amount', '')}")
         for i, row in enumerate(result_summary.get("rows", []), start=1):
             if isinstance(row, dict):
                 summary_lines.append(f"row_{i}={' | '.join(f'{k}={v}' for k, v in row.items())}")

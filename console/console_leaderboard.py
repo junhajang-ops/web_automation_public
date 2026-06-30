@@ -555,7 +555,6 @@ def summarize_recent_payments(page, uuid_value, start_url, project_name, timeout
     return {
         "recent_payment_count": len(recent),
         "recent_payment_sum": total,
-        "receipt_total_amount": result.get("total_amount", ""),
     }
 
 
@@ -583,7 +582,7 @@ def enrich_new_users_with_payments(page, all_rows, start_url, project_name, time
             print(f"    [{uuid_value}] {summary['recent_payment_count']}건 합계 {summary['recent_payment_sum']:,}")
         except Exception as exc:  # noqa: BLE001 — 한 명 실패가 전체를 막지 않게
             print(f"    [{uuid_value}] 영수증검증 실패: {exc}")
-            summary = {"recent_payment_count": "", "recent_payment_sum": "", "receipt_total_amount": ""}
+            summary = {"recent_payment_count": "", "recent_payment_sum": ""}
         summary_by_uuid[uuid_value] = summary
 
     for r in all_rows:
@@ -782,7 +781,7 @@ def save_csv(rows: list, out_dir: Path) -> Path:
     csv_path = out_dir / f"leaderboard_pvprank_{ts}.csv"
     base_fields = ["leaderboard", "rank", "uuid", "nickname"]
     gcp_fields = ["account_type", "max_pvp_ticket", "create_account_date", "pvp_log_count"]
-    payment_fields = ["recent_payment_count", "recent_payment_sum", "receipt_total_amount"]
+    payment_fields = ["recent_payment_count", "recent_payment_sum"]
     has_gcp = any(row.get("account_type") for row in rows)
     has_payment = any("recent_payment_sum" in row for row in rows)
     fieldnames = base_fields + (gcp_fields if has_gcp else []) + (payment_fields if has_payment else [])
