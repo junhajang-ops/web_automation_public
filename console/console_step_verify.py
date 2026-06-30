@@ -438,11 +438,12 @@ def record_step_dump(
     name: str = "",
     ignore_patterns=None,
 ) -> str:
+    # 행동(조작) 전 대기: 사람이 현재 화면을 볼 수 있게 한 번만 대기한 뒤 기록/지문 비교.
+    # 실제 조작은 이 함수 반환 후 호출부에서 진행된다.
     tag = _next_tag(name)
     step_pause(page)
     _save_dump(page, tag)
     snap_and_check_ui(page, name=tag, ignore_patterns=ignore_patterns)
-    step_pause(page)  # 스크린샷 후 액션 전 대기
     return tag
 
 
@@ -451,8 +452,10 @@ def record_final_step_state(
     name: str = "",
     ignore_patterns=None,
 ) -> str:
+    # 마지막 단계 기록: 안정화 고정 대기(step_pause)는 두지 않는다.
+    # 조작 후 안정화는 조작 측 폴링(wait_until 등)이 이미 보장한 상태에서 호출되므로
+    # 여기서는 기록 덤프와 지문 비교만 수행한다.
     tag = _next_tag(name)
-    step_pause(page)
     _save_dump(page, tag)
     snap_and_check_ui(page, name=tag, ignore_patterns=ignore_patterns)
     return tag
