@@ -39,7 +39,15 @@ from console_user_search_test import (
     wait_for_visible,
 )
 from console_chart_lookup import PAYMENT_DOCS_DIR
-from console_receipt_verification import run_receipt_verification
+from console_receipt_verification import (
+    RECEIPT_IGNORE_PATTERNS,
+    click_search_button,
+    collect_result,
+    fill_uuid_search,
+    open_receipt_verification_menu,
+    wait_for_receipt_page_render_stable,
+)
+from console_webshop_history import summarize_payitem_history as summarize_payitem_history_lookup
 from console_step_verify import (
     configure_console_output,
     pad_display,
@@ -80,6 +88,8 @@ BOARD_NAME_RE = re.compile(rf"{SEARCH_KEYWORD}_[A-Za-z0-9_]+")
 PAYITEM_ITEM_RE = re.compile(r"(?:^|_)payitem_(\d+)$", re.I)
 ACCOUNT_NEW_HOURS = int(os.environ.get("ACCOUNT_NEW_HOURS", "240"))  # 계정 생성 후 N시간 이내 → 신규
 RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계 대상 건수
+GCP_QUERY_MAX_RETRIES = max(1, int(os.environ.get("GCP_QUERY_MAX_RETRIES", "3")))
+GCP_QUERY_RETRY_WAIT_MS = max(0, int(os.environ.get("GCP_QUERY_RETRY_WAIT_MS", "1000")))
 RANK_COL_WIDTH = 4
 UUID_COL_WIDTH = 36
 NICKNAME_COL_WIDTH = 24
@@ -210,52 +220,49 @@ def get_rows_per_page_dropdown(page, container=None, timeout_ms: int = 10_000):
 def set_rows_per_page(page, target: int, label: str, verify_prefix: str = "", container=None):
     target_text = f"{target}개씩 보기"
     print(f"    {label}: {target_text}로 변경합니다.")
-    dropdown = get_rows_per_page_dropdown(page, container=container)
-    current_text = dropdown.inner_text().strip()
-    if current_text == target_text:
-        print("    이미 설정되어 있습니다.")
-        return
 
-    dropdown.scroll_into_view_if_needed()
-
-    opened = False
+    # 검색/전환 직후 footer pagination이 재렌더되며 드롭다운 element가 DOM에서 떨어질 수 있다(stale).
+    # 조회~열기를 재시도로 감싸 stale 시 재조회하고, 위치 조정은 click의 자동 스크롤에 맡긴다.
+    dropdown = None
     option = None
+    opened = False
     for _ in range(3):
-        record_step_dump(page, name=f"{verify_prefix}_dropdown_pre" if verify_prefix else "rows_dropdown_pre")
-        dropdown.click()
-        expanded = (dropdown.get_attribute("aria-expanded") or "").lower()
-        if expanded != "true":
-            continue
-        # aria-expanded=true 확인 후 option 목록에 target_text가 실제로 보이는지 검증
-        _opt = page.get_by_role("option", name=target_text, exact=True).first
         try:
+            dropdown = get_rows_per_page_dropdown(page, container=container)
+            current_text = dropdown.inner_text().strip()
+            if current_text == target_text:
+                print("    이미 설정되어 있습니다.")
+                return
+            record_step_dump(page, name=f"{verify_prefix}_dropdown_pre" if verify_prefix else "rows_dropdown_pre")
+            dropdown.click()
+            if (dropdown.get_attribute("aria-expanded") or "").lower() != "true":
+                continue
+            # aria-expanded=true 확인 후 option 목록에 target_text가 실제로 보이는지 검증
+            _opt = page.get_by_role("option", name=target_text, exact=True).first
             _opt.wait_for(state="visible", timeout=3_000)
             option = _opt
             opened = True
             break
         except Exception:
-            pass  # 열렸지만 옵션 미표시 → 재시도
+            page.wait_for_timeout(POLL_WAIT_MS)  # stale/옵션 미표시 → 안정 대기 후 재조회
 
     if not opened:
         raise RuntimeError(f"{label} 드롭다운을 열지 못했습니다.")
 
-    option.scroll_into_view_if_needed()
     record_step_dump(page, name=f"{verify_prefix}_option_pre" if verify_prefix else "rows_option_pre")
     option.click()
     safe_wait_for_load(page, "networkidle", 5_000)
 
     def _rows_per_page_applied():
-        current_text = dropdown.inner_text().strip()
-        if current_text == target_text:
-            return True
-        return None
+        try:
+            return True if dropdown.inner_text().strip() == target_text else None
+        except Exception:
+            return None  # 전환 직후 재렌더로 stale → 재폴링
 
     if wait_until(page, _rows_per_page_applied, timeout_ms=10_000, wait_ms=POLL_WAIT_MS):
         return
 
-    raise RuntimeError(
-        f"{label} 전환 결과가 기대와 다릅니다: expected='{target_text}', actual='{dropdown.inner_text().strip()}'"
-    )
+    raise RuntimeError(f"{label} 전환 결과가 기대와 다릅니다: expected='{target_text}'")
 
 
 def collect_visible_board_names(page) -> list:
@@ -468,11 +475,73 @@ def get_week_start_utc() -> datetime.datetime:
     return monday_kst.astimezone(datetime.timezone.utc).replace(tzinfo=None)
 
 
+def _is_retryable_gcp_error(err_text: str) -> bool:
+    text = (err_text or "").strip()
+    if not text:
+        return False
+
+    match = re.search(r"HTTP\s+(\d+)", text, re.I)
+    if match:
+        return int(match.group(1)) in {408, 429, 500, 502, 503, 504}
+
+    lowered = text.lower()
+    return any(
+        token in lowered
+        for token in [
+            "timeout",
+            "timed out",
+            "temporarily unavailable",
+            "connection reset",
+            "remote end closed connection",
+            "ssl",
+            "tls",
+        ]
+    )
+
+
+def _fetch_pvp_match_logs_with_retry(logging_service, project, log_name, uuid, since_iso, until_iso):
+    last_entries = []
+    last_err = None
+
+    for attempt in range(1, GCP_QUERY_MAX_RETRIES + 1):
+        entries, err = fetch_pvp_match_logs(
+            logging_service,
+            project,
+            log_name,
+            uuid,
+            since_iso,
+            until_iso,
+        )
+        if not err:
+            return entries, None
+
+        last_entries = entries
+        last_err = err
+        if not _is_retryable_gcp_error(err) or attempt >= GCP_QUERY_MAX_RETRIES:
+            return entries, err
+
+        wait_seconds = (GCP_QUERY_RETRY_WAIT_MS * attempt) / 1000
+        print(
+            f"      [GCP retry] {uuid} {attempt}/{GCP_QUERY_MAX_RETRIES} 실패: {err} "
+            f"-> {wait_seconds:.1f}초 후 재시도"
+        )
+        time.sleep(wait_seconds)
+
+    return last_entries, last_err
+
+
 def query_pvp_stats(logging_service, project, log_name, uuid, week_start_utc, now_utc) -> dict:
     """GCP log_pvp_match 조회 → account_type / max_pvp_ticket 반환."""
     since_iso = week_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     until_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    entries, err = fetch_pvp_match_logs(logging_service, project, log_name, uuid, since_iso, until_iso)
+    entries, err = _fetch_pvp_match_logs_with_retry(
+        logging_service,
+        project,
+        log_name,
+        uuid,
+        since_iso,
+        until_iso,
+    )
 
     if err and not entries:
         return {
@@ -594,15 +663,56 @@ def _parse_price_to_int(text: str) -> int:
     return int(digits) if digits else 0
 
 
+def prepare_receipt_verification_session(page, explicit_project_base, start_url, project_name):
+    prepare_console_project(
+        page=page,
+        explicit_project_base=explicit_project_base,
+        start_url=start_url,
+        project_name=project_name,
+    )
+    open_receipt_verification_menu(page)
+    wait_for_receipt_page_render_stable(page)
+    return {
+        "initialized": True,
+        "rows_per_page_applied": False,
+    }
+
+
 def summarize_recent_payments(page, uuid_value, start_url, project_name, timeout_error,
-                              limit=RECENT_PAYMENT_LIMIT):
+                              limit=RECENT_PAYMENT_LIMIT, receipt_session=None):
     """콘솔 영수증검증 메뉴 조회 → 최근 limit건 결제액 합계. 읽기 전용.
 
     영수증검증은 이미 100개씩 보기로 최신순 표시되므로 rows 앞에서 limit건을 합산한다.
     """
-    result = run_receipt_verification(
-        page, uuid_value, "", start_url, project_name, timeout_error
+    if receipt_session is None:
+        receipt_session = prepare_receipt_verification_session(
+            page,
+            "",
+            start_url,
+            project_name,
+        )
+    elif not receipt_session.get("initialized"):
+        receipt_session.update(
+            prepare_receipt_verification_session(
+                page,
+                "",
+                start_url,
+                project_name,
+            )
+        )
+
+    fill_uuid_search(page, uuid_value)
+    click_search_button(page)
+    step_and_verify_ui(page, "receipt_results", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
+    result = collect_result(
+        page,
+        uuid_value,
+        timeout_error,
+        ensure_rows_per_page=not receipt_session.get("rows_per_page_applied", False),
     )
+    if result.get("has_results"):
+        receipt_session["rows_per_page_applied"] = True
+
     rows = result.get("rows") or []
     recent = rows[:limit]
     total = sum(_parse_price_to_int(r.get("금액", "")) for r in recent)
@@ -623,6 +733,55 @@ def open_webshop_history_menu(page):
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
     page.locator("input#searchValue").first.wait_for(state="visible", timeout=15_000)
+    wait_for_webshop_history_page_render_stable(page)
+
+
+def _read_visible_role_signature(page):
+    return page.evaluate(
+        """() => [...new Set(
+            [...document.querySelectorAll('[role]')]
+              .map(el => el.getAttribute('role'))
+              .filter(Boolean)
+        )].sort().join('|')"""
+    )
+
+
+def wait_for_webshop_history_page_render_stable(page, timeout_ms: int = 6_000, stable_rounds: int = 2):
+    print("[11-1] 지급 내역 페이지 렌더가 안정될 때까지 기다립니다.")
+    page.locator("input#searchValue").first.wait_for(state="visible", timeout=15_000)
+
+    previous_signature = ""
+    stable_count = 0
+
+    def _render_stable():
+        nonlocal previous_signature, stable_count
+        current_signature = _read_visible_role_signature(page)
+        if current_signature and current_signature == previous_signature:
+            stable_count += 1
+        else:
+            previous_signature = current_signature
+            stable_count = 1 if current_signature else 0
+
+        if stable_count >= stable_rounds:
+            return True
+        return None
+
+    if wait_until(page, _render_stable, timeout_ms=timeout_ms, wait_ms=POLL_WAIT_MS):
+        return
+
+    print("    (지급 내역 렌더 구성이 완전히 고정되진 않았지만 최신 상태로 진행합니다.)")
+
+
+def _wait_webshop_grid_not_loading(page, timeout_ms: int = 10_000):
+    progressbar = page.locator("[role='progressbar']").first
+
+    def _not_loading():
+        try:
+            return not progressbar.is_visible()
+        except Exception:
+            return True
+
+    wait_until(page, _not_loading, timeout_ms=timeout_ms, wait_ms=POLL_WAIT_MS)
 
 
 def ensure_webshop_buyer_search_type(page):
@@ -640,6 +799,7 @@ def fill_webshop_uuid_search(page, uuid_value):
     search_input = page.locator("input#searchValue").first
     search_input.wait_for(state="visible", timeout=15_000)
     search_input.scroll_into_view_if_needed()
+    _wait_webshop_grid_not_loading(page)
     record_step_dump(page, "webshop_history_uuid_input_pre")
     search_input.fill("")
     search_input.fill(uuid_value)
@@ -653,6 +813,7 @@ def click_webshop_search_button(page):
     record_step_dump(page, "webshop_history_search_submit_pre")
     search_button.click()
     safe_wait_for_load(page, "networkidle", 5_000)
+    _wait_webshop_grid_not_loading(page)
 
 
 def _read_grid_field(row, field_name: str) -> str:
@@ -766,6 +927,7 @@ def _collect_current_webshop_page_rows(page) -> list:
 def collect_all_webshop_rows(page) -> list:
     no_result_locator = page.get_by_text("검색 결과가 없습니다.", exact=False).first
     row_locator = page.locator("div.MuiDataGrid-row")
+    _wait_webshop_grid_not_loading(page)
     if wait_for_visible(no_result_locator, 3_000):
         return []
     if not wait_for_visible(row_locator.first, 8_000):
@@ -835,7 +997,7 @@ def _parse_payitem_value(item_id: str) -> int | None:
     return int(match.group(1))
 
 
-def summarize_payitem_history(page, uuid_value):
+def _legacy_summarize_payitem_history_unused(page, uuid_value):
     open_webshop_history_menu(page)
     fill_webshop_uuid_search(page, uuid_value)
     click_webshop_search_button(page)
@@ -880,9 +1042,20 @@ def enrich_new_users_with_payments(page, all_rows, start_url, project_name, time
 
     print(f"\n[10] 신규 유저 {len(new_uuids)}명 영수증검증 최근 {RECENT_PAYMENT_LIMIT}건 결제액 합계 조회...")
     summary_by_uuid = {}
+    receipt_session = {
+        "initialized": False,
+        "rows_per_page_applied": False,
+    }
     for uuid_value in new_uuids:
         try:
-            summary = summarize_recent_payments(page, uuid_value, start_url, project_name, timeout_error)
+            summary = summarize_recent_payments(
+                page,
+                uuid_value,
+                start_url,
+                project_name,
+                timeout_error,
+                receipt_session=receipt_session,
+            )
             print(f"    [{uuid_value}] {summary['recent_payment_count']}건 합계 {summary['recent_payment_sum']:,}")
         except Exception as exc:  # noqa: BLE001 — 한 명 실패가 전체를 막지 않게
             print(f"    [{uuid_value}] 영수증검증 실패: {exc}")
@@ -894,7 +1067,7 @@ def enrich_new_users_with_payments(page, all_rows, start_url, project_name, time
             r.update(summary_by_uuid[r["uuid"]])
 
 
-def enrich_new_users_with_webshop_history(page, all_rows):
+def enrich_new_users_with_webshop_history(page, all_rows, start_url, project_name):
     new_uuids = []
     seen = set()
     for row in all_rows:
@@ -908,9 +1081,19 @@ def enrich_new_users_with_webshop_history(page, all_rows):
 
     print(f"\n[11] 신규 유저 {len(new_uuids)}명 지급 내역에서 payitem_* 합산을 조회합니다.")
     summary_by_uuid = {}
+    webshop_session = {
+        "initialized": False,
+        "rows_per_page_applied": False,
+    }
     for uuid_value in new_uuids:
         try:
-            summary = summarize_payitem_history(page, uuid_value)
+            summary = summarize_payitem_history_lookup(
+                page,
+                uuid_value,
+                start_url=start_url,
+                project_name=project_name,
+                session=webshop_session,
+            )
             print(
                 f"    [{uuid_value}] "
                 f"match={summary['payitem_match_count']} "
@@ -1113,7 +1296,7 @@ def run(
 
     # 신규 유저(계정 240시간 이내)만 영수증검증으로 최근 결제액 합계 점검
     enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error)
-    enrich_new_users_with_webshop_history(page, all_rows)
+    enrich_new_users_with_webshop_history(page, all_rows, start_url, project_name)
 
     return all_rows
 

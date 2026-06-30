@@ -348,7 +348,7 @@ def collect_all_receipt_rows(page):
     return list(collected.values())
 
 
-def collect_result(page, uuid_value, timeout_error):
+def collect_result(page, uuid_value, timeout_error, ensure_rows_per_page=True):
     print("[7] 영수증 검증 결과를 수집합니다.")
 
     no_result_locator = page.locator("text=검색 결과가 없습니다.").first
@@ -364,8 +364,9 @@ def collect_result(page, uuid_value, timeout_error):
     if not wait_for_visible(row_locator.first, 10_000):
         raise timeout_error(f"영수증 검증 결과 행이 나타나지 않았습니다: {uuid_value}")
 
-    set_rows_per_page(page, 100)
-    page.wait_for_timeout(POLL_WAIT_MS)
+    if ensure_rows_per_page:
+        set_rows_per_page(page, 100)
+        page.wait_for_timeout(POLL_WAIT_MS)
 
     rows = collect_all_receipt_rows(page)
     row_count = len(rows)
@@ -445,7 +446,7 @@ def run_receipt_verification(
     fill_uuid_search(page, uuid_value)
     click_search_button(page)
     step_and_verify_ui(page, "receipt_results", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
-    return collect_result(page, uuid_value, timeout_error)
+    return collect_result(page, uuid_value, timeout_error, ensure_rows_per_page=True)
 
 
 def main():
