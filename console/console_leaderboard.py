@@ -38,14 +38,15 @@ from console_user_search_test import (
 )
 from console_chart_lookup import PAYMENT_DOCS_DIR
 from console_receipt_verification import run_receipt_verification
-from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui, wait_until
+from console_step_verify import (
+    configure_console_output,
+    pad_display,
+    init_dump_dir,
+    record_step_dump,
+    step_and_verify_ui,
+    wait_until,
+)
 from test_config import apply_title_profile
-
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
-except AttributeError:
-    pass
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -71,6 +72,12 @@ UUID_RE = re.compile(
 BOARD_NAME_RE = re.compile(rf"{SEARCH_KEYWORD}_[A-Za-z0-9_]+")
 ACCOUNT_NEW_HOURS = int(os.environ.get("ACCOUNT_NEW_HOURS", "240"))  # 계정 생성 후 N시간 이내 → 신규
 RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계 대상 건수
+RANK_COL_WIDTH = 4
+UUID_COL_WIDTH = 36
+NICKNAME_COL_WIDTH = 24
+ACCOUNT_TYPE_COL_WIDTH = 16
+MAX_TICKET_COL_WIDTH = 6
+LOG_COUNT_COL_WIDTH = 5
 LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS = [
     r"button: .*FALLBACK\|type=button$",
     r"button: 한국어\|type=button$",
@@ -667,6 +674,19 @@ def extract_top_ranks(page, board_name: str) -> list:
     return results
 
 
+def _format_board_row(rank, uuid_value, nickname, account_type, max_ticket, log_count) -> str:
+    return "  ".join(
+        [
+            pad_display(rank, RANK_COL_WIDTH, align="right"),
+            pad_display(uuid_value, UUID_COL_WIDTH),
+            pad_display(nickname, NICKNAME_COL_WIDTH),
+            pad_display(account_type, ACCOUNT_TYPE_COL_WIDTH),
+            pad_display(max_ticket, MAX_TICKET_COL_WIDTH, align="right"),
+            pad_display(log_count, LOG_COUNT_COL_WIDTH, align="right"),
+        ]
+    )
+
+
 def run(
     page,
     explicit_project_base,
@@ -710,16 +730,42 @@ def run(
         enrich_board_with_gcp(board_rows, logging_service, gcp_project, gcp_log, week_start_utc, now_utc)
 
         # 보드별 통합 출력
-        sep = "─"
-        print(f"\n  ══ {board_name} ══")
-        print(f"  {'순위':>4}  {'UUID':<36}  {'닉네임':<20}  {'계정상태':<12}  {'최고티켓':>6}  {'로그수':>5}")
-        print(f"  {sep*4}  {sep*36}  {sep*20}  {sep*12}  {sep*6}  {sep*5}")
+        print(f"\n  == {board_name} ==")
+        print(
+            "  "
+            + _format_board_row(
+                "순위",
+                "UUID",
+                "닉네임",
+                "계정상태",
+                "최고티켓",
+                "로그수",
+            )
+        )
+        print(
+            "  "
+            + "  ".join(
+                [
+                    "-" * RANK_COL_WIDTH,
+                    "-" * UUID_COL_WIDTH,
+                    "-" * NICKNAME_COL_WIDTH,
+                    "-" * ACCOUNT_TYPE_COL_WIDTH,
+                    "-" * MAX_TICKET_COL_WIDTH,
+                    "-" * LOG_COUNT_COL_WIDTH,
+                ]
+            )
+        )
         for r in board_rows:
             print(
-                f"  {r['rank']:>4}위  {r['uuid']}  {r['nickname']:<20}  "
-                f"{r.get('account_type', ''):<12}  "
-                f"{str(r.get('max_pvp_ticket', '')):>6}  "
-                f"{str(r.get('pvp_log_count', '')):>5}"
+                "  "
+                + _format_board_row(
+                    f"{r['rank']}위",
+                    r["uuid"],
+                    r["nickname"],
+                    r.get("account_type", ""),
+                    str(r.get("max_pvp_ticket", "")),
+                    str(r.get("pvp_log_count", "")),
+                )
             )
         all_rows.extend(board_rows)
 
@@ -774,6 +820,7 @@ def save_artifacts(page, out_dir: Path, succeeded: bool, rows: list, error_messa
 
 
 def main():
+    configure_console_output()
     args = parse_args()
     apply_title_profile(
         args,

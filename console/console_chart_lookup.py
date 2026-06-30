@@ -23,7 +23,13 @@ import sys
 import time
 from pathlib import Path
 
-from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui, wait_until
+from console_step_verify import (
+    configure_console_output,
+    init_dump_dir,
+    record_step_dump,
+    step_and_verify_ui,
+    wait_until,
+)
 from console_user_search_test import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
@@ -37,13 +43,6 @@ from console_user_search_test import (
     wait_for_visible,
 )
 from test_config import TEST_CHART_NAME, TEST_PURCHASE_CODE, apply_title_profile
-
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
-except AttributeError:
-    pass
-
 
 BASE_DIR = Path(__file__).resolve().parent
 PAYMENT_DOCS_DIR = BASE_DIR.parent / "payment_docs"
@@ -662,6 +661,7 @@ def hold_browser_open(page, hold_seconds):
 
 
 def main():
+    configure_console_output()
     args = parse_args()
     apply_title_profile(
         args,

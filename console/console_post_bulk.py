@@ -25,7 +25,12 @@ from console_user_search_test import (
     prepare_console_project,
     select_target_page,
 )
-from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui
+from console_step_verify import (
+    configure_console_output,
+    init_dump_dir,
+    record_step_dump,
+    step_and_verify_ui,
+)
 from console_post_register import (
     confirm_item_add_popup,
     ensure_receiver_list_rows_per_page,
@@ -42,13 +47,6 @@ from console_post_register import (
 )
 from console_chart_lookup import PAYMENT_DOCS_DIR
 from test_config import apply_title_profile
-
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
-except AttributeError:
-    pass
-
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = "dumps_console_post_bulk"
@@ -299,6 +297,7 @@ def save_artifacts(page, out_dir, result):
 # ── 메인 ─────────────────────────────────────────────────────────────────────
 
 def main():
+    configure_console_output()
     import argparse
     parser = argparse.ArgumentParser(description="우편 일괄 발송")
     parser.add_argument("--profile", default=DEFAULT_PROFILE)

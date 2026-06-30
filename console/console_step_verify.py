@@ -13,9 +13,12 @@ Rules:
 
 import datetime
 import json
+import ctypes
 import os
 import re
+import sys
 import time
+import unicodedata
 from pathlib import Path
 
 
@@ -54,6 +57,7 @@ _FINGERPRINT_JS = r"""
     if (!isVisible(el)) return;
     const text = clean(el.innerText);
     const type = el.getAttribute("type") || "";
+    if (/^\d+\+?$/.test(text)) return;
     if (text || type === "submit") buttons.push({ text, type });
   });
 
@@ -135,6 +139,70 @@ def get_step_wait_ms() -> int:
         if parsed >= 0:
             return parsed
     return DEFAULT_STEP_WAIT_MS
+
+
+def configure_console_output() -> str:
+    encoding = "utf-8"
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleCP(65001)
+            kernel32.SetConsoleOutputCP(65001)
+        except Exception:
+            pass
+
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding=encoding, errors="replace")
+        except Exception:
+            continue
+    return encoding
+
+
+def display_width(value) -> int:
+    text = "" if value is None else str(value)
+    width = 0
+    for ch in text:
+        if ch in "\r\n":
+            continue
+        if unicodedata.combining(ch):
+            continue
+        if unicodedata.east_asian_width(ch) in {"W", "F"}:
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def fit_display_text(value, width: int, ellipsis: str = "...") -> str:
+    text = "" if value is None else str(value)
+    if display_width(text) <= width:
+        return text
+
+    ellipsis_width = display_width(ellipsis)
+    if ellipsis_width >= width:
+        return "." * max(1, width)
+
+    parts: list[str] = []
+    current_width = 0
+    for ch in text:
+        ch_width = display_width(ch)
+        if current_width + ch_width + ellipsis_width > width:
+            break
+        parts.append(ch)
+        current_width += ch_width
+    return "".join(parts) + ellipsis
+
+
+def pad_display(value, width: int, align: str = "left") -> str:
+    text = fit_display_text(value, width)
+    padding = max(0, width - display_width(text))
+    if align == "right":
+        return (" " * padding) + text
+    return text + (" " * padding)
 
 
 def step_pause(page, wait_ms: int | None = None) -> None:

@@ -26,12 +26,6 @@ import sys
 import time
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
-except AttributeError:
-    pass
-
 BASE_DIR = Path(__file__).resolve().parent
 
 # cs 모듈(브랜드→GCP 규칙, log_shop_click 조회) import 위해 경로 추가
@@ -39,7 +33,7 @@ _CS_DIR = BASE_DIR.parent / "cs"
 if str(_CS_DIR) not in sys.path:
     sys.path.insert(0, str(_CS_DIR))
 
-from console_step_verify import init_dump_dir
+from console_step_verify import configure_console_output, init_dump_dir
 from console_user_search_test import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
@@ -335,6 +329,7 @@ def parse_args():
 
 
 def main():
+    configure_console_output()
     args = parse_args()
     apply_title_profile(
         args,
