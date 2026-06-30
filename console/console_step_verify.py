@@ -332,12 +332,15 @@ def _diff_fingerprints(prev: dict, curr: dict) -> list[str]:
         return f"{item['type']}|id={stable_id}"
 
     list_diff("input", prev.get("inputs", []), curr.get("inputs", []), input_key)
-    list_diff(
-        "button",
-        prev.get("buttons", []),
-        curr.get("buttons", []),
-        lambda item: f"{item['text']}|type={item['type']}",
-    )
+
+    def button_key(item):
+        text = item["text"]
+        # 알림 개수 배지(예: '99', '99+')는 수시로 바뀌어 구조 감시에 무의미 → 정규화
+        if re.fullmatch(r"\d+\+?", text):
+            return f"badge|type={item['type']}"
+        return f"{text}|type={item['type']}"
+
+    list_diff("button", prev.get("buttons", []), curr.get("buttons", []), button_key)
     list_diff("sidebar a#id", prev.get("sidebarLinks", []), curr.get("sidebarLinks", []))
     list_diff("role", prev.get("roles", []), curr.get("roles", []))
     list_diff("listbox[name]", prev.get("listboxNames", []), curr.get("listboxNames", []))
@@ -414,12 +417,12 @@ def snap_and_check_ui(
         kept_diffs, ignored_diffs = _split_ignored_diffs(diffs, ignore_patterns=ignore_patterns)
         if kept_diffs:
             changed = True
-            print(f"\n  [UI change] '{name}' changed.")
+            print(f"  [UI change] '{name}' changed.")
             for diff in kept_diffs:
                 print(diff)
             if ignored_diffs:
                 print(f"  [UI ignore] {len(ignored_diffs)} whitelisted diffs skipped.")
-            print("  -> See console/ui_fingerprints/ui_change_log.txt\n")
+            print("  -> See console/ui_fingerprints/ui_change_log.txt")
             _append_change_log(name, kept_diffs, ignored_diffs)
         else:
             print(f"  [UI monitor] '{name}' unchanged.")
