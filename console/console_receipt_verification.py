@@ -47,6 +47,9 @@ DEFAULT_UUID = TEST_UUID
 POLL_WAIT_MS = 1_000
 GRID_SCROLL_STEP_PX = 1_200
 GRID_SCROLL_IDLE_LIMIT = 3
+RECEIPT_IGNORE_PATTERNS = [
+    r"button: badge\|type=button$",
+]
 
 # (data-field, 화면 컬럼명) — dump console_20260623_121712.html 확인
 RECEIPT_FIELDS = [
@@ -120,7 +123,7 @@ def open_receipt_verification_menu(page):
     receipt_link = page.locator("a", has_text="영수증 검증").first
     receipt_link.wait_for(state="visible", timeout=15_000)
     receipt_link.scroll_into_view_if_needed()
-    record_step_dump(page, "receipt_nav_pre")
+    record_step_dump(page, "receipt_nav_pre", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
     receipt_link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
@@ -169,7 +172,7 @@ def fill_uuid_search(page, uuid_value):
     uuid_input = page.locator("input#searchValue").first
     uuid_input.wait_for(state="visible", timeout=15_000)
     uuid_input.scroll_into_view_if_needed()
-    record_step_dump(page, "receipt_uuid_input_pre")
+    record_step_dump(page, "receipt_uuid_input_pre", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
     uuid_input.fill("")
     uuid_input.fill(uuid_value)
 
@@ -179,7 +182,7 @@ def click_search_button(page):
     search_button = page.locator("button", has_text="검색").first
     search_button.wait_for(state="visible", timeout=15_000)
     search_button.scroll_into_view_if_needed()
-    record_step_dump(page, "receipt_search_submit_pre")
+    record_step_dump(page, "receipt_search_submit_pre", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
     search_button.click()
     safe_wait_for_load(page, "networkidle", 5_000)
 
@@ -204,7 +207,7 @@ def set_rows_per_page(page, count: int = 100):
         print("    (already selected)")
         return
     trigger.scroll_into_view_if_needed()
-    record_step_dump(page, "receipt_rows_dd_pre")
+    record_step_dump(page, "receipt_rows_dd_pre", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
     trigger.click()
 
     listbox = page.locator("ul[role='listbox']").first
@@ -213,7 +216,7 @@ def set_rows_per_page(page, count: int = 100):
     if option is None:
         raise RuntimeError(f"Could not find exact rows-per-page option: {target_text}")
     option.wait_for(state="visible", timeout=5_000)
-    record_step_dump(page, "receipt_rows_option_pre")
+    record_step_dump(page, "receipt_rows_option_pre", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
     option.click()
     safe_wait_for_load(page, "networkidle", 5_000)
 
@@ -362,11 +365,7 @@ def collect_result(page, uuid_value, timeout_error):
     rows = collect_all_receipt_rows(page)
     row_count = len(rows)
     total_amount = read_total_amount(page)
-    print(f"    결과 {row_count}건 수집, 총액: {total_amount}")
-
-    for i, row_data in enumerate(rows):
-        summary = " | ".join(f"{l}={v}" for l, v in row_data.items())
-        print(f"    [{i + 1}] {summary}")
+    print(f"    결과 {row_count}건, 총액: {total_amount}")
 
     return {
         "has_results": True,
@@ -443,7 +442,7 @@ def run_receipt_verification(
     wait_for_receipt_page_render_stable(page)
     fill_uuid_search(page, uuid_value)
     click_search_button(page)
-    step_and_verify_ui(page, "receipt_results")
+    step_and_verify_ui(page, "receipt_results", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
     return collect_result(page, uuid_value, timeout_error)
 
 
