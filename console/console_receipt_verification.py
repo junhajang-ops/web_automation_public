@@ -49,9 +49,6 @@ GRID_SCROLL_STEP_PX = 1_200
 GRID_SCROLL_IDLE_LIMIT = 3
 RECEIPT_IGNORE_PATTERNS = [
     r"button: badge\|type=button$",
-    r"role: gridcell$",
-    r"role: rowgroup$",
-    r"role: progressbar$",
 ]
 
 # (data-field, 화면 컬럼명) — dump console_20260623_121712.html 확인
@@ -170,11 +167,25 @@ def wait_for_receipt_page_render_stable(page, timeout_ms: int = 6_000, stable_ro
     print("    (렌더 역할 구성이 완전히 고정되기 전 타임아웃되어 최신 상태로 진행합니다.)")
 
 
+def _wait_grid_not_loading(page, timeout_ms: int = 10_000):
+    """DataGrid progressbar가 사라질 때까지 폴링 대기."""
+    progressbar = page.locator("[role='progressbar']").first
+
+    def _not_loading():
+        try:
+            return not progressbar.is_visible()
+        except Exception:
+            return True
+
+    wait_until(page, _not_loading, timeout_ms=timeout_ms, wait_ms=POLL_WAIT_MS)
+
+
 def fill_uuid_search(page, uuid_value):
     print(f"[5] UUID 입력창(name='searchValue')에 값을 입력합니다: {uuid_value}")
     uuid_input = page.locator("input#searchValue").first
     uuid_input.wait_for(state="visible", timeout=15_000)
     uuid_input.scroll_into_view_if_needed()
+    _wait_grid_not_loading(page)
     record_step_dump(page, "receipt_uuid_input_pre", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
     uuid_input.fill("")
     uuid_input.fill(uuid_value)
