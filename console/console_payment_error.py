@@ -62,7 +62,7 @@ from console_shopdata_lookup import (
 )
 from cs_parse import resolve_brand_gcp_log
 from cs_gcp_logging import build_logging_service, fetch_recent_shop_click_log
-from test_config import TEST_TABLE_NAME, TEST_UUID
+from test_config import TEST_TABLE_NAME, TEST_UUID, apply_title_profile
 
 DEFAULT_OUTPUT = "dumps_console_payment_error"
 DEFAULT_UUID = TEST_UUID
@@ -321,6 +321,13 @@ def parse_args():
     parser.add_argument("--out", default=DEFAULT_OUTPUT)
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
     parser.add_argument("--project-name", default=DEFAULT_PROJECT_NAME)
+    parser.add_argument(
+        "--title",
+        default="",
+        metavar="NAME",
+        help="Title env profile to apply (example: gametitle)",
+    )
+    parser.add_argument("--gametitle", action="store_true", help="Shortcut for --title gametitle")
     parser.add_argument("--hold-seconds", type=int, default=DEFAULT_HOLD_SECONDS)
     parser.add_argument("--emit-json", action="store_true",
                         help="결과 요약을 stdout에 JSON 한 줄로 출력(co-pilot subprocess 연계용)")
@@ -329,6 +336,12 @@ def parse_args():
 
 def main():
     args = parse_args()
+    apply_title_profile(
+        args,
+        default_project_name=DEFAULT_PROJECT_NAME,
+        require_project_name=True,
+        include_key_file=True,
+    )
     sync_playwright, timeout_error = load_playwright()
 
     profile_dir = BASE_DIR / args.profile

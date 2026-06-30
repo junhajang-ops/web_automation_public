@@ -34,7 +34,7 @@ from console_user_search_test import (
     wait_for_visible,
 )
 from console_chart_lookup import PAYMENT_DOCS_DIR, _read_csv_and_lookup
-from test_config import TEST_CHART_NAME, TEST_PURCHASE_CODE, TEST_UUID
+from test_config import TEST_CHART_NAME, TEST_PURCHASE_CODE, TEST_UUID, apply_title_profile
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -63,6 +63,13 @@ def parse_args():
     parser.add_argument("--project-base", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
     parser.add_argument("--project-name", default=DEFAULT_PROJECT_NAME)
+    parser.add_argument(
+        "--title",
+        default="",
+        metavar="NAME",
+        help="Title env profile to apply (example: gametitle)",
+    )
+    parser.add_argument("--gametitle", action="store_true", help="Shortcut for --title gametitle")
     parser.add_argument("--hold-seconds", type=int, default=DEFAULT_HOLD_SECONDS)
     return parser.parse_args()
 
@@ -415,6 +422,11 @@ def save_artifacts(page, out_dir, succeeded, result_summary=None, error_message=
 
 def main():
     args = parse_args()
+    apply_title_profile(
+        args,
+        default_project_name=DEFAULT_PROJECT_NAME,
+        require_project_name=True,
+    )
     sync_playwright, _timeout_error = load_playwright()
 
     profile_dir = BASE_DIR / args.profile

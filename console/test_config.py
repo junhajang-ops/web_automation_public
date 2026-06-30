@@ -46,3 +46,53 @@ TEST_PURCHASE_CODE = os.environ.get("TEST_PURCHASE_CODE", "")
 TEST_TABLE_NAME = os.environ.get("TEST_TABLE_NAME", "ShopData")
 TEST_CHART_NAME = os.environ.get("TEST_CHART_NAME", "Shop")
 STEP_WAIT_MS = int(os.environ.get("STEP_WAIT_MS", "1000"))
+
+
+def apply_title_profile(
+    args,
+    *,
+    default_project_name: str = "",
+    require_project_name: bool = False,
+    include_key_file: bool = False,
+    include_gcp: bool = False,
+):
+    if getattr(args, "gametitle", False) and not getattr(args, "title", ""):
+        args.title = "gametitle"
+
+    title = (getattr(args, "title", "") or "").strip()
+    if not title:
+        return args
+
+    prefix = title.upper()
+    project_name_env = os.environ.get(f"{prefix}_PROJECT_NAME", "").strip()
+
+    if hasattr(args, "project_name"):
+        current_project_name = getattr(args, "project_name", "")
+        if current_project_name == default_project_name:
+            if project_name_env:
+                setattr(args, "project_name", project_name_env)
+            elif require_project_name:
+                raise SystemExit(
+                    f"[오류] --title {title}: env '{prefix}_PROJECT_NAME' 이 비어 있습니다."
+                )
+
+    if include_key_file and hasattr(args, "key"):
+        key_file = os.environ.get(f"{prefix}_KEY_FILE", "").strip()
+        if not getattr(args, "key", ""):
+            setattr(args, "key", key_file)
+
+    if include_gcp:
+        if hasattr(args, "gcp_project") and not getattr(args, "gcp_project", ""):
+            setattr(
+                args,
+                "gcp_project",
+                os.environ.get(f"{prefix}_GCP_PROJECT", "").strip(),
+            )
+        if hasattr(args, "gcp_log") and not getattr(args, "gcp_log", ""):
+            setattr(
+                args,
+                "gcp_log",
+                os.environ.get(f"{prefix}_LOGNAME", "").strip(),
+            )
+
+    return args

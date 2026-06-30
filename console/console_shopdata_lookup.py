@@ -35,7 +35,7 @@ from console_user_search_test import (
     select_target_page,
     wait_for_visible,
 )
-from test_config import TEST_PURCHASE_CODE, TEST_TABLE_NAME, TEST_UUID
+from test_config import TEST_PURCHASE_CODE, TEST_TABLE_NAME, TEST_UUID, apply_title_profile
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -97,6 +97,13 @@ def parse_args():
         default=DEFAULT_PROJECT_NAME,
         help=f"Project name hint to select (default: {DEFAULT_PROJECT_NAME})",
     )
+    parser.add_argument(
+        "--title",
+        default="",
+        metavar="NAME",
+        help="Title env profile to apply (example: gametitle)",
+    )
+    parser.add_argument("--gametitle", action="store_true", help="Shortcut for --title gametitle")
     parser.add_argument(
         "--hold-seconds",
         type=int,
@@ -798,6 +805,11 @@ def hold_browser_open(page, hold_seconds):
 
 def main():
     args = parse_args()
+    apply_title_profile(
+        args,
+        default_project_name=DEFAULT_PROJECT_NAME,
+        require_project_name=True,
+    )
     sync_playwright, timeout_error = load_playwright()
 
     profile_dir = BASE_DIR / args.profile

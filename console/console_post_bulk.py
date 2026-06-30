@@ -41,6 +41,7 @@ from console_post_register import (
     select_expiry_7days,
 )
 from console_chart_lookup import PAYMENT_DOCS_DIR
+from test_config import apply_title_profile
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -305,8 +306,20 @@ def main():
     parser.add_argument("--project-base", default="")
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
     parser.add_argument("--project-name", default=DEFAULT_PROJECT_NAME)
+    parser.add_argument(
+        "--title",
+        default="",
+        metavar="NAME",
+        help="Title env profile to apply (example: gametitle)",
+    )
+    parser.add_argument("--gametitle", action="store_true", help="Shortcut for --title gametitle")
     parser.add_argument("--hold-seconds", type=int, default=DEFAULT_HOLD_SECONDS)
     args = parser.parse_args()
+    apply_title_profile(
+        args,
+        default_project_name=DEFAULT_PROJECT_NAME,
+        require_project_name=True,
+    )
 
     rows, csv_path = load_bulk_csv()
 

@@ -28,6 +28,8 @@ import sys
 import time
 from pathlib import Path
 
+from test_config import apply_title_profile
+
 BASE_DIR = Path(__file__).resolve().parent
 LOGIN_SKIP = ("/login", "/signin", "/oauth", "/logout", "about:blank")
 
@@ -160,6 +162,18 @@ def parse_args():
         default="dumps_console",
         help="dump 결과를 저장할 폴더명 (기본: dumps_console)",
     )
+    parser.add_argument(
+        "--project-name",
+        default="",
+        help="참고용 프로젝트명 (title profile로 자동 치환 가능)",
+    )
+    parser.add_argument(
+        "--title",
+        default="",
+        metavar="NAME",
+        help="Title env profile to apply (example: gametitle)",
+    )
+    parser.add_argument("--gametitle", action="store_true", help="Shortcut for --title gametitle")
     return parser.parse_args()
 
 
@@ -297,6 +311,11 @@ def dump_page(page, dump_dir: Path):
 
 def main():
     args = parse_args()
+    apply_title_profile(
+        args,
+        default_project_name="",
+        require_project_name=True,
+    )
     sync_playwright = _load_playwright()
     profile_dir = BASE_DIR / args.profile
     dump_dir = BASE_DIR / args.out
@@ -308,6 +327,8 @@ def main():
     print(" [주의] 이 도구는 읽기 전용입니다. 자동 클릭이나 저장 동작은 하지 않습니다.")
     print(f" 프로필 폴더 : {profile_dir.name}")
     print(f" 저장 폴더   : {dump_dir.name}")
+    if args.project_name:
+        print(f" 프로젝트명   : {args.project_name}")
 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(

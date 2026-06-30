@@ -38,6 +38,7 @@ from console_user_search_test import (
 )
 from console_chart_lookup import PAYMENT_DOCS_DIR
 from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui
+from test_config import apply_title_profile
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -153,7 +154,8 @@ def wait_for_data_rows(page, timeout_ms: int = 15_000):
     return rows
 
 
-def get_rows_per_page_dropdown(page):
+def get_rows_per_page_dropdown(page, container=None):
+    scope = container if container is not None else page
     selectors = [
         ".MuiTablePagination-select[role='combobox']",
         "[role='combobox']",
@@ -162,7 +164,7 @@ def get_rows_per_page_dropdown(page):
 
     visible_dropdowns = []
     for selector in selectors:
-        dropdowns = page.locator(selector)
+        dropdowns = scope.locator(selector)
         count = dropdowns.count()
         for index in range(count):
             dropdown = dropdowns.nth(index)
@@ -182,10 +184,10 @@ def get_rows_per_page_dropdown(page):
     raise RuntimeError("표시 개수 드롭다운을 찾지 못했습니다.")
 
 
-def set_rows_per_page(page, target: int, label: str, verify_prefix: str = ""):
+def set_rows_per_page(page, target: int, label: str, verify_prefix: str = "", container=None):
     target_text = f"{target}개씩 보기"
     print(f"    {label}: {target_text}로 변경합니다.")
-    dropdown = get_rows_per_page_dropdown(page)
+    dropdown = get_rows_per_page_dropdown(page, container=container)
     current_text = dropdown.inner_text().strip()
     if current_text == target_text:
         print("    이미 설정되어 있습니다.")
@@ -194,19 +196,26 @@ def set_rows_per_page(page, target: int, label: str, verify_prefix: str = ""):
     dropdown.scroll_into_view_if_needed()
 
     opened = False
+    option = None
     for _ in range(3):
         record_step_dump(page, name=f"{verify_prefix}_dropdown_pre" if verify_prefix else "rows_dropdown_pre")
         dropdown.click()
         expanded = (dropdown.get_attribute("aria-expanded") or "").lower()
-        if expanded == "true":
+        if expanded != "true":
+            continue
+        # aria-expanded=true 확인 후 option 목록에 target_text가 실제로 보이는지 검증
+        _opt = page.get_by_role("option", name=target_text, exact=True).first
+        try:
+            _opt.wait_for(state="visible", timeout=3_000)
+            option = _opt
             opened = True
             break
+        except Exception:
+            pass  # 열렸지만 옵션 미표시 → 재시도
 
     if not opened:
         raise RuntimeError(f"{label} 드롭다운을 열지 못했습니다.")
 
-    option = page.get_by_role("option", name=target_text, exact=True).first
-    option.wait_for(state="visible", timeout=10_000)
     option.scroll_into_view_if_needed()
     record_step_dump(page, name=f"{verify_prefix}_option_pre" if verify_prefix else "rows_option_pre")
     option.click()
@@ -258,7 +267,8 @@ def open_leaderboard_list_and_search(page):
     open_leaderboard_page(page, nav_context="initial")
     search_pvp_rank(page)
     print(f"[7] 목록을 {LIST_ROWS_PER_PAGE}개씩 보기로 맞춥니다.")
-    set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows")
+    list_footer = page.locator(".MuiDataGrid-footerContainer").first
+    set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows", container=list_footer)
 
 
 def _click_board_from_list(page, board_name: str):
@@ -619,7 +629,8 @@ def run(
             open_leaderboard_page(page, nav_context="return")
             search_pvp_rank(page)
             print(f"[7] 목록을 {LIST_ROWS_PER_PAGE}개씩 보기로 맞춥니다.")
-            set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows")
+            list_footer = page.locator(".MuiDataGrid-footerContainer").first
+            set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows", container=list_footer)
 
         enter_leaderboard_detail(page, board_name)
         set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
@@ -688,6 +699,13 @@ def save_artifacts(page, out_dir: Path, succeeded: bool, rows: list, error_messa
 
 def main():
     args = parse_args()
+    apply_title_profile(
+        args,
+        default_project_name=DEFAULT_PROJECT_NAME,
+        require_project_name=True,
+        include_key_file=True,
+        include_gcp=True,
+    )
     sync_playwright, _timeout_error = load_playwright()
     profile_dir = BASE_DIR / args.profile
     out_dir = BASE_DIR / args.out
@@ -695,26 +713,14 @@ def main():
     LEADERBOARD_OUT_DIR.mkdir(parents=True, exist_ok=True)
     init_dump_dir(out_dir)
 
-    # --gametitle 는 --title gametitle 단축키
-    if args.gametitle and not args.title:
-        args.title = "gametitle"
-
-    # --title <name>: {NAME}_KEY_FILE 등 프리픽스 env 일괄 적용
     if args.title:
         prefix = args.title.upper()
-        args.key = args.key or os.environ.get(f"{prefix}_KEY_FILE", "")
-        args.gcp_project = args.gcp_project or os.environ.get(f"{prefix}_GCP_PROJECT", "")
-        args.gcp_log = args.gcp_log or os.environ.get(f"{prefix}_LOGNAME", "")
-        args.project_name = (
-            args.project_name
-            if args.project_name != DEFAULT_PROJECT_NAME
-            else os.environ.get(f"{prefix}_PROJECT_NAME", DEFAULT_PROJECT_NAME)
-        )
         missing = [
             f"{prefix}_{k}" for k, v in [
                 ("KEY_FILE", args.key),
                 ("GCP_PROJECT", args.gcp_project),
                 ("LOGNAME", args.gcp_log),
+                ("PROJECT_NAME", args.project_name),
             ] if not v
         ]
         if missing:
