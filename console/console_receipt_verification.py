@@ -49,6 +49,9 @@ GRID_SCROLL_STEP_PX = 1_200
 GRID_SCROLL_IDLE_LIMIT = 3
 RECEIPT_IGNORE_PATTERNS = [
     r"button: badge\|type=button$",
+    r"role: gridcell$",
+    r"role: rowgroup$",
+    r"role: progressbar$",
 ]
 
 # (data-field, 화면 컬럼명) — dump console_20260623_121712.html 확인
