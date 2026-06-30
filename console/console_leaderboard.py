@@ -69,6 +69,7 @@ SEARCH_KEYWORD = "PvPRank"
 MAX_RANK = 30
 LIST_ROWS_PER_PAGE = 100
 DETAIL_ROWS_PER_PAGE = 50
+WEBSHOP_ROWS_PER_PAGE = 100
 POLL_WAIT_MS = 1_000
 GRID_SCROLL_STEP_PX = 900
 UUID_RE = re.compile(
@@ -76,6 +77,7 @@ UUID_RE = re.compile(
     re.I,
 )
 BOARD_NAME_RE = re.compile(rf"{SEARCH_KEYWORD}_[A-Za-z0-9_]+")
+PAYITEM_ITEM_RE = re.compile(r"(?:^|_)payitem_(\d+)$", re.I)
 ACCOUNT_NEW_HOURS = int(os.environ.get("ACCOUNT_NEW_HOURS", "240"))  # 계정 생성 후 N시간 이내 → 신규
 RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계 대상 건수
 RANK_COL_WIDTH = 4
@@ -610,6 +612,256 @@ def summarize_recent_payments(page, uuid_value, start_url, project_name, timeout
     }
 
 
+def open_webshop_history_menu(page):
+    print("[11] 사이드 메뉴에서 '지급 내역'으로 이동합니다.")
+    history_link = page.locator("a#webshopHistory, a[href*='/webshopHistory']").first
+    history_link.wait_for(state="visible", timeout=15_000)
+    history_link.scroll_into_view_if_needed()
+    record_step_dump(page, "webshop_history_nav_pre")
+    history_link.click()
+    click_login_if_needed(page)
+    safe_wait_for_load(page, "domcontentloaded", 15_000)
+    safe_wait_for_load(page, "networkidle", 5_000)
+    page.locator("input#searchValue").first.wait_for(state="visible", timeout=15_000)
+
+
+def ensure_webshop_buyer_search_type(page):
+    search_type = page.locator("input[name='searchType']").first
+    search_type.wait_for(state="attached", timeout=10_000)
+    current_value = (search_type.input_value() or "").strip().lower()
+    if current_value == "buyer":
+        return
+    raise RuntimeError(f"지급 내역 검색 기준이 buyer(결제한 UUID)가 아닙니다: current='{current_value}'")
+
+
+def fill_webshop_uuid_search(page, uuid_value):
+    print(f"[12] 지급 내역 검색 UUID 입력: {uuid_value}")
+    ensure_webshop_buyer_search_type(page)
+    search_input = page.locator("input#searchValue").first
+    search_input.wait_for(state="visible", timeout=15_000)
+    search_input.scroll_into_view_if_needed()
+    record_step_dump(page, "webshop_history_uuid_input_pre")
+    search_input.fill("")
+    search_input.fill(uuid_value)
+
+
+def click_webshop_search_button(page):
+    print("[13] 지급 내역 검색 버튼을 클릭합니다.")
+    search_button = page.get_by_role("button", name="검색", exact=True).first
+    search_button.wait_for(state="visible", timeout=15_000)
+    search_button.scroll_into_view_if_needed()
+    record_step_dump(page, "webshop_history_search_submit_pre")
+    search_button.click()
+    safe_wait_for_load(page, "networkidle", 5_000)
+
+
+def _read_grid_field(row, field_name: str) -> str:
+    try:
+        title_node = row.locator(f"[data-field='{field_name}'] [title]").first
+        title_value = title_node.get_attribute("title")
+        if title_value is not None:
+            return title_value.strip()
+    except Exception:
+        pass
+
+    try:
+        return row.locator(f"[data-field='{field_name}']").first.inner_text().strip()
+    except Exception:
+        return ""
+
+
+def _collect_current_webshop_page_rows(page) -> list:
+    collected = {}
+    idle_rounds = 0
+
+    while idle_rounds < 3:
+        rows = page.locator("div.MuiDataGrid-row")
+        visible_count = rows.count()
+        added_this_round = 0
+
+        for index in range(visible_count):
+            row = rows.nth(index)
+            row_data = {
+                "key": _read_grid_field(row, "key"),
+                "webshop": _read_grid_field(row, "webshop"),
+                "orderId": _read_grid_field(row, "orderId"),
+                "itemId": _read_grid_field(row, "itemId"),
+                "quantity": _read_grid_field(row, "quantity"),
+                "price": _read_grid_field(row, "price"),
+                "buyer": _read_grid_field(row, "buyer"),
+                "receiver": _read_grid_field(row, "receiver"),
+                "senderNickname": _read_grid_field(row, "senderNickname"),
+                "receiverNickname": _read_grid_field(row, "receiverNickname"),
+                "sentAt": _read_grid_field(row, "sentAt"),
+                "receivedAt": _read_grid_field(row, "receivedAt"),
+            }
+            row_key = "||".join(
+                [
+                    row_data.get("orderId", ""),
+                    row_data.get("itemId", ""),
+                    row_data.get("buyer", ""),
+                    row_data.get("sentAt", ""),
+                ]
+            )
+            if row_key in collected:
+                continue
+            collected[row_key] = row_data
+            added_this_round += 1
+
+        before_state = page.evaluate(
+            """() => {
+              const el = document.querySelector('.MuiDataGrid-virtualScroller');
+              if (!el) return null;
+              return {
+                scrollTop: el.scrollTop,
+                clientHeight: el.clientHeight,
+                scrollHeight: el.scrollHeight
+              };
+            }"""
+        )
+        if before_state is None:
+            break
+
+        if added_this_round == 0:
+            idle_rounds += 1
+        else:
+            idle_rounds = 0
+
+        reached_bottom = (
+            before_state["scrollTop"] + before_state["clientHeight"]
+            >= before_state["scrollHeight"] - 4
+        )
+        if reached_bottom and idle_rounds > 0:
+            break
+
+        scroller = page.locator(".MuiDataGrid-virtualScroller").first
+        if not wait_for_visible(scroller, 5_000):
+            break
+        box = scroller.bounding_box()
+        if not box:
+            break
+
+        page.mouse.move(box["x"] + (box["width"] / 2), box["y"] + (box["height"] / 2))
+        record_step_dump(page, "webshop_history_scroll_pre")
+        page.mouse.wheel(0, GRID_SCROLL_STEP_PX)
+        page.wait_for_timeout(POLL_WAIT_MS)
+
+        after_state = page.evaluate(
+            """() => {
+              const el = document.querySelector('.MuiDataGrid-virtualScroller');
+              if (!el) return null;
+              return {
+                scrollTop: el.scrollTop,
+                clientHeight: el.clientHeight,
+                scrollHeight: el.scrollHeight
+              };
+            }"""
+        )
+        if after_state is not None and before_state["scrollTop"] == after_state["scrollTop"]:
+            idle_rounds += 1
+
+    return list(collected.values())
+
+
+def collect_all_webshop_rows(page) -> list:
+    no_result_locator = page.get_by_text("검색 결과가 없습니다.", exact=False).first
+    row_locator = page.locator("div.MuiDataGrid-row")
+    if wait_for_visible(no_result_locator, 3_000):
+        return []
+    if not wait_for_visible(row_locator.first, 8_000):
+        return []
+
+    footer = page.locator(".MuiDataGrid-footerContainer").first
+    set_rows_per_page(
+        page,
+        WEBSHOP_ROWS_PER_PAGE,
+        "지급 내역 표시 개수",
+        verify_prefix="webshop_rows",
+        container=footer,
+    )
+
+    all_rows = []
+    page_index = 1
+    while True:
+        all_rows.extend(_collect_current_webshop_page_rows(page))
+
+        next_button = page.get_by_role("button", name="Go to next page", exact=True).first
+        if not wait_for_visible(next_button, 2_000):
+            break
+        if next_button.is_disabled():
+            break
+
+        displayed_rows = page.locator(".MuiTablePagination-displayedRows").first
+        before_text = displayed_rows.inner_text().strip()
+        next_button.scroll_into_view_if_needed()
+        record_step_dump(page, f"webshop_history_next_page_{page_index}_pre")
+        next_button.click()
+        safe_wait_for_load(page, "networkidle", 5_000)
+
+        def _page_changed():
+            current_text = displayed_rows.inner_text().strip()
+            if current_text and current_text != before_text:
+                return True
+            return None
+
+        if not wait_until(page, _page_changed, timeout_ms=10_000, wait_ms=POLL_WAIT_MS):
+            raise RuntimeError("지급 내역 다음 페이지 이동 후 페이지 표시가 바뀌지 않았습니다.")
+        page.wait_for_timeout(POLL_WAIT_MS)
+        page_index += 1
+
+    deduped = {}
+    for row in all_rows:
+        row_key = "||".join(
+            [
+                row.get("orderId", ""),
+                row.get("itemId", ""),
+                row.get("buyer", ""),
+                row.get("sentAt", ""),
+            ]
+        )
+        deduped[row_key] = row
+    return list(deduped.values())
+
+
+def _parse_payitem_value(item_id: str) -> int | None:
+    item_text = (item_id or "").strip()
+    if not item_text:
+        return None
+    if "mission" in item_text.lower():
+        return None
+    match = PAYITEM_ITEM_RE.search(item_text)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def summarize_payitem_history(page, uuid_value):
+    open_webshop_history_menu(page)
+    fill_webshop_uuid_search(page, uuid_value)
+    click_webshop_search_button(page)
+    step_and_verify_ui(page, "webshop_history_results")
+
+    rows = collect_all_webshop_rows(page)
+    matched_rows = 0
+    quantity_total = 0
+    item_value_sum = 0
+
+    for row in rows:
+        item_value = _parse_payitem_value(row.get("itemId", ""))
+        if item_value is None:
+            continue
+        quantity = int(re.sub(r"[^\d]", "", row.get("quantity", "")) or "1")
+        matched_rows += 1
+        quantity_total += quantity
+        item_value_sum += item_value * quantity
+
+    return {
+        "payitem_match_count": matched_rows,
+        "payitem_quantity_total": quantity_total,
+        "payitem_item_value_sum": item_value_sum,
+    }
+
+
 def enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error):
     """all_rows 중 '계정 신규 생성' 유저에 영수증검증 최근 결제 합계를 in-place 추가.
 
@@ -640,6 +892,43 @@ def enrich_new_users_with_payments(page, all_rows, start_url, project_name, time
     for r in all_rows:
         if r["uuid"] in summary_by_uuid:
             r.update(summary_by_uuid[r["uuid"]])
+
+
+def enrich_new_users_with_webshop_history(page, all_rows):
+    new_uuids = []
+    seen = set()
+    for row in all_rows:
+        if row.get("account_type") == "계정 신규 생성" and row["uuid"] not in seen:
+            seen.add(row["uuid"])
+            new_uuids.append(row["uuid"])
+
+    if not new_uuids:
+        print("\n[11] 신규 유저가 없어 지급 내역 합산을 생략합니다.")
+        return
+
+    print(f"\n[11] 신규 유저 {len(new_uuids)}명 지급 내역에서 payitem_* 합산을 조회합니다.")
+    summary_by_uuid = {}
+    for uuid_value in new_uuids:
+        try:
+            summary = summarize_payitem_history(page, uuid_value)
+            print(
+                f"    [{uuid_value}] "
+                f"match={summary['payitem_match_count']} "
+                f"qty={summary['payitem_quantity_total']} "
+                f"sum={summary['payitem_item_value_sum']:,}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"    [{uuid_value}] 지급 내역 조회 실패: {exc}")
+            summary = {
+                "payitem_match_count": "",
+                "payitem_quantity_total": "",
+                "payitem_item_value_sum": "",
+            }
+        summary_by_uuid[uuid_value] = summary
+
+    for row in all_rows:
+        if row["uuid"] in summary_by_uuid:
+            row.update(summary_by_uuid[row["uuid"]])
 
 
 def extract_top_ranks(page, board_name: str) -> list:
@@ -824,6 +1113,7 @@ def run(
 
     # 신규 유저(계정 240시간 이내)만 영수증검증으로 최근 결제액 합계 점검
     enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error)
+    enrich_new_users_with_webshop_history(page, all_rows)
 
     return all_rows
 
@@ -834,9 +1124,16 @@ def save_csv(rows: list, out_dir: Path) -> Path:
     base_fields = ["leaderboard", "rank", "uuid", "nickname"]
     gcp_fields = ["account_type", "max_pvp_ticket", "create_account_date", "pvp_log_count"]
     payment_fields = ["recent_payment_count", "recent_payment_sum"]
+    webshop_fields = ["payitem_match_count", "payitem_quantity_total", "payitem_item_value_sum"]
     has_gcp = any(row.get("account_type") for row in rows)
     has_payment = any("recent_payment_sum" in row for row in rows)
-    fieldnames = base_fields + (gcp_fields if has_gcp else []) + (payment_fields if has_payment else [])
+    has_webshop = any("payitem_item_value_sum" in row for row in rows)
+    fieldnames = (
+        base_fields
+        + (gcp_fields if has_gcp else [])
+        + (payment_fields if has_payment else [])
+        + (webshop_fields if has_webshop else [])
+    )
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as file_obj:
         writer = csv.DictWriter(file_obj, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
