@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from console_user_search_test import (
@@ -527,11 +528,22 @@ def enrich_board_with_gcp(board_rows, logging_service, project, log_name, week_s
         for row in board_rows:
             row.update({"account_type": "GCP미설정", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": ""})
         return
-    print(f"    [GCP] {len(board_rows)}명 pvp_match 로그 조회 중 "
+    print(f"    [GCP] {len(board_rows)}명 pvp_match 로그 병렬 조회 중 "
           f"(기간: {week_start_utc.strftime('%m/%d %H:%MUTC')} ~ 현재)...")
-    for row in board_rows:
-        stats = query_pvp_stats(logging_service, project, log_name, row["uuid"], week_start_utc, now_utc)
-        row.update(stats)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {
+            executor.submit(
+                query_pvp_stats, logging_service, project, log_name,
+                row["uuid"], week_start_utc, now_utc
+            ): row
+            for row in board_rows
+        }
+        for future in as_completed(futures):
+            row = futures[future]
+            try:
+                row.update(future.result())
+            except Exception as exc:
+                row.update({"account_type": f"조회실패({exc})", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": ""})
 
 
 def _parse_price_to_int(text: str) -> int:
