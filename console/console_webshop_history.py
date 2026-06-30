@@ -45,7 +45,6 @@ DEFAULT_UUID = TEST_UUID
 POLL_WAIT_MS = 1_000
 GRID_SCROLL_STEP_PX = 900
 GRID_SCROLL_IDLE_LIMIT = 3
-WEBSHOP_ROWS_PER_PAGE = 100
 PAYITEM_ITEM_RE = re.compile(r"(?:^|_)payitem_(\d+)$", re.I)
 
 
@@ -156,86 +155,6 @@ def click_webshop_search_button(page):
     _wait_webshop_grid_not_loading(page)
 
 
-def get_rows_per_page_dropdown(page, container=None, timeout_ms: int = 10_000):
-    scope = container if container is not None else page
-    selectors = [
-        ".MuiTablePagination-select[role='combobox']",
-        "[role='combobox']",
-        "[aria-haspopup='listbox']",
-    ]
-
-    def _find_dropdown():
-        visible_dropdowns = []
-        for selector in selectors:
-            dropdowns = scope.locator(selector)
-            count = dropdowns.count()
-            for index in range(count):
-                dropdown = dropdowns.nth(index)
-                try:
-                    if not dropdown.is_visible():
-                        continue
-                    text = dropdown.inner_text().strip()
-                except Exception:
-                    continue
-                if text == "100개씩 보기":
-                    return dropdown
-                if text.endswith("개씩 보기") or "보기" in text:
-                    visible_dropdowns.append(dropdown)
-            if visible_dropdowns:
-                return visible_dropdowns[-1]
-        return None
-
-    dropdown = wait_until(page, _find_dropdown, timeout_ms=timeout_ms, wait_ms=POLL_WAIT_MS)
-    if dropdown is None:
-        raise RuntimeError("지급 내역 표시 개수 드롭다운을 찾지 못했습니다.")
-    return dropdown
-
-
-def set_rows_per_page(page, target: int = WEBSHOP_ROWS_PER_PAGE, container=None):
-    target_text = f"{target}개씩 보기"
-    print(f"[7-1] 지급 내역 표시 개수를 {target_text}로 변경합니다.")
-
-    dropdown = None
-    option = None
-    opened = False
-    for _ in range(3):
-        try:
-            dropdown = get_rows_per_page_dropdown(page, container=container)
-            current_text = dropdown.inner_text().strip()
-            if current_text == target_text:
-                print("    이미 설정되어 있습니다.")
-                return
-            record_step_dump(page, "webshop_rows_dd_pre")
-            dropdown.click()
-            if (dropdown.get_attribute("aria-expanded") or "").lower() != "true":
-                continue
-            option = page.get_by_role("option", name=target_text, exact=True).first
-            option.wait_for(state="visible", timeout=3_000)
-            opened = True
-            break
-        except Exception:
-            page.wait_for_timeout(POLL_WAIT_MS)
-
-    if not opened or option is None:
-        raise RuntimeError("지급 내역 표시 개수 드롭다운을 열지 못했습니다.")
-
-    record_step_dump(page, "webshop_rows_option_pre")
-    option.click()
-    safe_wait_for_load(page, "networkidle", 5_000)
-    _wait_webshop_grid_not_loading(page)
-
-    def _rows_per_page_applied():
-        try:
-            return True if dropdown.inner_text().strip() == target_text else None
-        except Exception:
-            return None
-
-    if wait_until(page, _rows_per_page_applied, timeout_ms=10_000, wait_ms=POLL_WAIT_MS):
-        return
-
-    raise RuntimeError(f"지급 내역 표시 개수 전환 결과가 기대와 다릅니다: expected='{target_text}'")
-
-
 def _read_grid_field(row, field_name: str) -> str:
     try:
         title_node = row.locator(f"[data-field='{field_name}'] [title]").first
@@ -340,7 +259,7 @@ def _collect_current_webshop_page_rows(page) -> list:
     return list(collected.values())
 
 
-def collect_all_webshop_rows(page, ensure_rows_per_page=True) -> list:
+def collect_all_webshop_rows(page) -> list:
     no_result_locator = page.get_by_text("검색 결과가 없습니다.", exact=False).first
     row_locator = page.locator("div.MuiDataGrid-row")
     _wait_webshop_grid_not_loading(page)
@@ -349,52 +268,7 @@ def collect_all_webshop_rows(page, ensure_rows_per_page=True) -> list:
     if not wait_for_visible(row_locator.first, 8_000):
         return []
 
-    if ensure_rows_per_page:
-        footer = page.locator(".MuiDataGrid-footerContainer").first
-        set_rows_per_page(page, WEBSHOP_ROWS_PER_PAGE, container=footer)
-
-    all_rows = []
-    page_index = 1
-    while True:
-        all_rows.extend(_collect_current_webshop_page_rows(page))
-
-        next_button = page.get_by_role("button", name="Go to next page", exact=True).first
-        if not wait_for_visible(next_button, 2_000):
-            break
-        if next_button.is_disabled():
-            break
-
-        displayed_rows = page.locator(".MuiTablePagination-displayedRows").first
-        before_text = displayed_rows.inner_text().strip()
-        next_button.scroll_into_view_if_needed()
-        record_step_dump(page, f"webshop_history_next_page_{page_index}_pre")
-        next_button.click()
-        safe_wait_for_load(page, "networkidle", 5_000)
-        _wait_webshop_grid_not_loading(page)
-
-        def _page_changed():
-            current_text = displayed_rows.inner_text().strip()
-            if current_text and current_text != before_text:
-                return True
-            return None
-
-        if not wait_until(page, _page_changed, timeout_ms=10_000, wait_ms=POLL_WAIT_MS):
-            raise RuntimeError("지급 내역 다음 페이지 이동 후 페이지 표시가 바뀌지 않았습니다.")
-        page.wait_for_timeout(POLL_WAIT_MS)
-        page_index += 1
-
-    deduped = {}
-    for row in all_rows:
-        row_key = "||".join(
-            [
-                row.get("orderId", ""),
-                row.get("itemId", ""),
-                row.get("buyer", ""),
-                row.get("sentAt", ""),
-            ]
-        )
-        deduped[row_key] = row
-    return list(deduped.values())
+    return _collect_current_webshop_page_rows(page)
 
 
 def prepare_webshop_history_session(page, explicit_project_base, start_url, project_name):
@@ -407,7 +281,6 @@ def prepare_webshop_history_session(page, explicit_project_base, start_url, proj
     open_webshop_history_menu(page)
     return {
         "initialized": True,
-        "rows_per_page_applied": False,
     }
 
 
@@ -440,12 +313,7 @@ def summarize_payitem_history(
     fill_webshop_uuid_search(page, uuid_value)
     click_webshop_search_button(page)
     step_and_verify_ui(page, "webshop_history_results")
-    rows = collect_all_webshop_rows(
-        page,
-        ensure_rows_per_page=not session.get("rows_per_page_applied", False),
-    )
-    if rows:
-        session["rows_per_page_applied"] = True
+    rows = collect_all_webshop_rows(page)
 
     matched_rows = 0
     quantity_total = 0

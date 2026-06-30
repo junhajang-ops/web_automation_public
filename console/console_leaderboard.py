@@ -77,7 +77,6 @@ SEARCH_KEYWORD = "PvPRank"
 MAX_RANK = 30
 LIST_ROWS_PER_PAGE = 100
 DETAIL_ROWS_PER_PAGE = 50
-WEBSHOP_ROWS_PER_PAGE = 100
 POLL_WAIT_MS = 1_000
 GRID_SCROLL_STEP_PX = 900
 UUID_RE = re.compile(
@@ -933,56 +932,7 @@ def collect_all_webshop_rows(page) -> list:
     if not wait_for_visible(row_locator.first, 8_000):
         return []
 
-    footer = page.locator(".MuiDataGrid-footerContainer").first
-    set_rows_per_page(
-        page,
-        WEBSHOP_ROWS_PER_PAGE,
-        "지급 내역 표시 개수",
-        verify_prefix="webshop_rows",
-        container=footer,
-    )
-
-    all_rows = []
-    page_index = 1
-    while True:
-        all_rows.extend(_collect_current_webshop_page_rows(page))
-
-        next_button = page.get_by_role("button", name="Go to next page", exact=True).first
-        if not wait_for_visible(next_button, 2_000):
-            break
-        if next_button.is_disabled():
-            break
-
-        displayed_rows = page.locator(".MuiTablePagination-displayedRows").first
-        before_text = displayed_rows.inner_text().strip()
-        next_button.scroll_into_view_if_needed()
-        record_step_dump(page, f"webshop_history_next_page_{page_index}_pre")
-        next_button.click()
-        safe_wait_for_load(page, "networkidle", 5_000)
-
-        def _page_changed():
-            current_text = displayed_rows.inner_text().strip()
-            if current_text and current_text != before_text:
-                return True
-            return None
-
-        if not wait_until(page, _page_changed, timeout_ms=10_000, wait_ms=POLL_WAIT_MS):
-            raise RuntimeError("지급 내역 다음 페이지 이동 후 페이지 표시가 바뀌지 않았습니다.")
-        page.wait_for_timeout(POLL_WAIT_MS)
-        page_index += 1
-
-    deduped = {}
-    for row in all_rows:
-        row_key = "||".join(
-            [
-                row.get("orderId", ""),
-                row.get("itemId", ""),
-                row.get("buyer", ""),
-                row.get("sentAt", ""),
-            ]
-        )
-        deduped[row_key] = row
-    return list(deduped.values())
+    return _collect_current_webshop_page_rows(page)
 
 
 def _parse_payitem_value(item_id: str) -> int | None:
@@ -1083,7 +1033,6 @@ def enrich_new_users_with_webshop_history(page, all_rows, start_url, project_nam
     summary_by_uuid = {}
     webshop_session = {
         "initialized": False,
-        "rows_per_page_applied": False,
     }
     for uuid_value in new_uuids:
         try:
