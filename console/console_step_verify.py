@@ -442,6 +442,7 @@ def record_step_dump(
     step_pause(page)
     _save_dump(page, tag)
     snap_and_check_ui(page, name=tag, ignore_patterns=ignore_patterns)
+    step_pause(page)  # 스크린샷 후 액션 전 대기
     return tag
 
 
