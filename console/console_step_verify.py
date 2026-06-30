@@ -24,6 +24,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_STEP_WAIT_MS = 1_000
+POLL_INTERVAL_MS = 500  # wait_until 폴링(요소 대기) 재확인 주기 — 조작 전 사람 확인 대기(STEP_WAIT_MS)와 무관
 STEP_WAIT_ENV_KEYS = ("CONSOLE_STEP_WAIT_MS", "STEP_WAIT_MS")
 FINGERPRINT_SCHEMA_VERSION = 4
 
@@ -209,12 +210,14 @@ def step_pause(page, wait_ms: int | None = None) -> None:
     page.wait_for_timeout(get_step_wait_ms() if wait_ms is None else wait_ms)
 
 
-def wait_until(page, predicate, timeout_ms: int = 10_000, wait_ms: int | None = None):
-    """predicate()가 truthy 값을 반환할 때까지 step_pause 간격으로 반복 대기한다.
+def wait_until(page, predicate, timeout_ms: int = 10_000, wait_ms: int = POLL_INTERVAL_MS):
+    """predicate()가 truthy 값을 반환할 때까지 wait_ms 간격으로 반복 대기한다.
 
     UI 요소가 렌더 지연으로 늦게 나타나는 경우의 공용 반복 대기 헬퍼.
+    폴링 주기(wait_ms)는 조작 전 사람 확인 대기(step_pause / STEP_WAIT_MS)와는
+    무관한 별도 값이다 — 폴링은 요소 등장을 빠르게 재확인하기 위한 것이며,
+    기본값은 POLL_INTERVAL_MS이고 호출부가 wait_ms로 개별 지정할 수 있다.
     반환: predicate의 truthy 결과(요소/locator 등). 시간 초과 시 None.
-    대기 간격은 step_pause(env CONSOLE_STEP_WAIT_MS / STEP_WAIT_MS)를 따른다.
     """
     deadline = time.monotonic() + timeout_ms / 1000.0
     while True:
@@ -223,7 +226,7 @@ def wait_until(page, predicate, timeout_ms: int = 10_000, wait_ms: int | None = 
             return result
         if time.monotonic() >= deadline:
             return None
-        step_pause(page, wait_ms)
+        page.wait_for_timeout(wait_ms)
 
 
 def init_dump_dir(path: Path) -> None:
