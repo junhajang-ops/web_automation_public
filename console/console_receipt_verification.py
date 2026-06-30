@@ -19,7 +19,7 @@ import sys
 import time
 from pathlib import Path
 
-from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui
+from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui, wait_until
 from console_user_search_test import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
@@ -143,11 +143,11 @@ def wait_for_receipt_page_render_stable(page, timeout_ms: int = 6_000, stable_ro
     print("[4-1] 영수증 검증 페이지 렌더가 안정될 때까지 기다립니다.")
     page.locator("input#searchValue").first.wait_for(state="visible", timeout=15_000)
 
-    deadline = time.time() + (timeout_ms / 1000.0)
     previous_signature = ""
     stable_count = 0
 
-    while time.time() < deadline:
+    def _render_stable():
+        nonlocal previous_signature, stable_count
         current_signature = _read_visible_role_signature(page)
         if current_signature and current_signature == previous_signature:
             stable_count += 1
@@ -156,9 +156,11 @@ def wait_for_receipt_page_render_stable(page, timeout_ms: int = 6_000, stable_ro
             stable_count = 1 if current_signature else 0
 
         if stable_count >= stable_rounds:
-            return
+            return True
+        return None
 
-        page.wait_for_timeout(POLL_WAIT_MS)
+    if wait_until(page, _render_stable, timeout_ms=timeout_ms, wait_ms=POLL_WAIT_MS):
+        return
 
     print("    (렌더 역할 구성이 완전히 고정되기 전 타임아웃되어 최신 상태로 진행합니다.)")
 
@@ -216,11 +218,13 @@ def set_rows_per_page(page, count: int = 100):
     option.click()
     safe_wait_for_load(page, "networkidle", 5_000)
 
-    deadline = time.time() + 10
-    while time.time() < deadline:
+    def _rows_per_page_applied():
         if trigger.inner_text().strip() == target_text:
-            return
-        page.wait_for_timeout(POLL_WAIT_MS)
+            return True
+        return None
+
+    if wait_until(page, _rows_per_page_applied, timeout_ms=10_000, wait_ms=POLL_WAIT_MS):
+        return
 
     raise RuntimeError(
         f"Rows-per-page selection did not apply: expected='{target_text}', actual='{trigger.inner_text().strip()}'"

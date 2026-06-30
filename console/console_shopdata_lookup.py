@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui
+from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui, wait_until
 from console_user_search_test import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
@@ -211,11 +211,13 @@ def ensure_table_selected(page, table_name):
     record_step_dump(page, "table_option_pre")
     option.click()
 
-    deadline = time.time() + 10
-    while time.time() < deadline:
+    def _table_selected():
         if current_text.inner_text().strip() == table_name:
-            return
-        page.wait_for_timeout(POLL_WAIT_MS)
+            return True
+        return None
+
+    if wait_until(page, _table_selected, timeout_ms=10_000, wait_ms=POLL_WAIT_MS):
+        return
 
     raise RuntimeError(f"테이블 선택이 완료되지 않았습니다: {table_name}")
 
@@ -241,8 +243,7 @@ def click_shopdata_search_button(page):
 
 
 def find_shopdata_result_row(page, uuid_value, wait_timeout_ms):
-    deadline = time.time() + (wait_timeout_ms / 1000)
-    while time.time() < deadline:
+    def _find_row():
         cell = page.locator("td#gamer_id p", has_text=uuid_value).first
         if wait_for_visible(cell, 700):
             row = cell.locator("xpath=ancestor::tr[1]").first
@@ -250,8 +251,9 @@ def find_shopdata_result_row(page, uuid_value, wait_timeout_ms):
             if found_text != uuid_value:
                 raise RuntimeError(f"Unexpected ShopData gamer_id text: {found_text}")
             return row
-        page.wait_for_timeout(POLL_WAIT_MS)
-    return None
+        return None
+
+    return wait_until(page, _find_row, timeout_ms=wait_timeout_ms, wait_ms=POLL_WAIT_MS)
 
 
 def wait_for_shopdata_result_row(page, uuid_value, timeout_error):

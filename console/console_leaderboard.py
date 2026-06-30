@@ -37,7 +37,8 @@ from console_user_search_test import (
     wait_for_visible,
 )
 from console_chart_lookup import PAYMENT_DOCS_DIR
-from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui
+from console_receipt_verification import run_receipt_verification
+from console_step_verify import init_dump_dir, record_step_dump, step_and_verify_ui, wait_until
 from test_config import apply_title_profile
 
 try:
@@ -69,6 +70,7 @@ UUID_RE = re.compile(
 )
 BOARD_NAME_RE = re.compile(rf"{SEARCH_KEYWORD}_[A-Za-z0-9_]+")
 ACCOUNT_NEW_HOURS = 240  # 계정 생성 후 240시간(10일) 이내 → 신규
+RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계 대상 건수
 LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS = [
     r"button: .*FALLBACK\|type=button$",
     r"button: 한국어\|type=button$",
@@ -154,7 +156,7 @@ def wait_for_data_rows(page, timeout_ms: int = 15_000):
     return rows
 
 
-def get_rows_per_page_dropdown(page, container=None):
+def get_rows_per_page_dropdown(page, container=None, timeout_ms: int = 10_000):
     scope = container if container is not None else page
     selectors = [
         ".MuiTablePagination-select[role='combobox']",
@@ -162,26 +164,32 @@ def get_rows_per_page_dropdown(page, container=None):
         "[aria-haspopup='listbox']",
     ]
 
-    visible_dropdowns = []
-    for selector in selectors:
-        dropdowns = scope.locator(selector)
-        count = dropdowns.count()
-        for index in range(count):
-            dropdown = dropdowns.nth(index)
-            try:
-                if not dropdown.is_visible():
+    def _find_dropdown():
+        visible_dropdowns = []
+        for selector in selectors:
+            dropdowns = scope.locator(selector)
+            count = dropdowns.count()
+            for index in range(count):
+                dropdown = dropdowns.nth(index)
+                try:
+                    if not dropdown.is_visible():
+                        continue
+                    text = dropdown.inner_text().strip()
+                except Exception:
                     continue
-                text = dropdown.inner_text().strip()
-            except Exception:
-                continue
-            if text == "100개씩 보기":
-                return dropdown
-            if text.endswith("개씩 보기") or "보기" in text:
-                visible_dropdowns.append((selector, dropdown))
-        if visible_dropdowns:
-            return visible_dropdowns[-1][1]
+                if text == "100개씩 보기":
+                    return dropdown
+                if text.endswith("개씩 보기") or "보기" in text:
+                    visible_dropdowns.append(dropdown)
+            if visible_dropdowns:
+                return visible_dropdowns[-1]
+        return None
 
-    raise RuntimeError("표시 개수 드롭다운을 찾지 못했습니다.")
+    # 검색/전환 직후 footer pagination 렌더가 늦을 수 있어 공용 반복 대기로 폴링한다.
+    dropdown = wait_until(page, _find_dropdown, timeout_ms=timeout_ms)
+    if dropdown is None:
+        raise RuntimeError("표시 개수 드롭다운을 찾지 못했습니다.")
+    return dropdown
 
 
 def set_rows_per_page(page, target: int, label: str, verify_prefix: str = "", container=None):
@@ -221,12 +229,14 @@ def set_rows_per_page(page, target: int, label: str, verify_prefix: str = "", co
     option.click()
     safe_wait_for_load(page, "networkidle", 5_000)
 
-    deadline = time.time() + 10
-    while time.time() < deadline:
+    def _rows_per_page_applied():
         current_text = dropdown.inner_text().strip()
         if current_text == target_text:
-            return
-        page.wait_for_timeout(POLL_WAIT_MS)
+            return True
+        return None
+
+    if wait_until(page, _rows_per_page_applied, timeout_ms=10_000, wait_ms=POLL_WAIT_MS):
+        return
 
     raise RuntimeError(
         f"{label} 전환 결과가 기대와 다릅니다: expected='{target_text}', actual='{dropdown.inner_text().strip()}'"
@@ -302,13 +312,15 @@ def enter_leaderboard_detail(page, board_name: str):
     safe_wait_for_load(page, "networkidle", 5_000)
 
     title = page.get_by_role("heading", name=board_name, exact=True).first
-    deadline = time.time() + 15
-    while time.time() < deadline:
+    def _detail_opened():
         if wait_for_visible(title, 1_000):
-            return
+            return True
         if page.url != before_url and wait_for_visible(get_data_rows(page).first, 1_000):
-            return
-        page.wait_for_timeout(POLL_WAIT_MS)
+            return True
+        return None
+
+    if wait_until(page, _detail_opened, timeout_ms=15_000, wait_ms=POLL_WAIT_MS):
+        return
 
     raise RuntimeError(f"'{board_name}' 상세 페이지 진입을 확인하지 못했습니다.")
 
@@ -515,6 +527,63 @@ def enrich_board_with_gcp(board_rows, logging_service, project, log_name, week_s
         row.update(stats)
 
 
+def _parse_price_to_int(text: str) -> int:
+    """금액 셀 텍스트에서 숫자만 추출해 정수로. (예: '₩55,000' → 55000)"""
+    digits = re.sub(r"[^\d]", "", text or "")
+    return int(digits) if digits else 0
+
+
+def summarize_recent_payments(page, uuid_value, start_url, project_name, timeout_error,
+                              limit=RECENT_PAYMENT_LIMIT):
+    """콘솔 영수증검증 메뉴 조회 → 최근 limit건 결제액 합계. 읽기 전용.
+
+    영수증검증은 이미 100개씩 보기로 최신순 표시되므로 rows 앞에서 limit건을 합산한다.
+    """
+    result = run_receipt_verification(
+        page, uuid_value, "", start_url, project_name, timeout_error
+    )
+    rows = result.get("rows") or []
+    recent = rows[:limit]
+    total = sum(_parse_price_to_int(r.get("금액", "")) for r in recent)
+    return {
+        "recent_payment_count": len(recent),
+        "recent_payment_sum": total,
+        "receipt_total_amount": result.get("total_amount", ""),
+    }
+
+
+def enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error):
+    """all_rows 중 '계정 신규 생성' 유저에 영수증검증 최근 결제 합계를 in-place 추가.
+
+    같은 유저가 여러 보드에 중복될 수 있어 uuid 로 한 번만 조회하고 해당 행 전부에 반영.
+    """
+    new_uuids = []
+    seen = set()
+    for r in all_rows:
+        if r.get("account_type") == "계정 신규 생성" and r["uuid"] not in seen:
+            seen.add(r["uuid"])
+            new_uuids.append(r["uuid"])
+
+    if not new_uuids:
+        print("\n[10] 신규 유저(계정 240시간 이내) 없음 — 영수증검증 단계 생략.")
+        return
+
+    print(f"\n[10] 신규 유저 {len(new_uuids)}명 영수증검증 최근 {RECENT_PAYMENT_LIMIT}건 결제액 합계 조회...")
+    summary_by_uuid = {}
+    for uuid_value in new_uuids:
+        try:
+            summary = summarize_recent_payments(page, uuid_value, start_url, project_name, timeout_error)
+            print(f"    [{uuid_value}] {summary['recent_payment_count']}건 합계 {summary['recent_payment_sum']:,}")
+        except Exception as exc:  # noqa: BLE001 — 한 명 실패가 전체를 막지 않게
+            print(f"    [{uuid_value}] 영수증검증 실패: {exc}")
+            summary = {"recent_payment_count": "", "recent_payment_sum": "", "receipt_total_amount": ""}
+        summary_by_uuid[uuid_value] = summary
+
+    for r in all_rows:
+        if r["uuid"] in summary_by_uuid:
+            r.update(summary_by_uuid[r["uuid"]])
+
+
 def extract_top_ranks(page, board_name: str) -> list:
     print(f"[9] '{board_name}' 상세에서 {MAX_RANK}위 이내(공동순위 전원) 데이터를 읽습니다.")
     wait_for_leaderboard_rank_rows(page)
@@ -606,6 +675,7 @@ def run(
     logging_service=None,
     gcp_project="",
     gcp_log="",
+    timeout_error=Exception,
 ) -> list:
     prepare_console_project(
         page=page,
@@ -654,6 +724,10 @@ def run(
         all_rows.extend(board_rows)
 
     step_and_verify_ui(page, "leaderboard_complete")
+
+    # 신규 유저(계정 240시간 이내)만 영수증검증으로 최근 결제액 합계 점검
+    enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error)
+
     return all_rows
 
 
@@ -662,8 +736,10 @@ def save_csv(rows: list, out_dir: Path) -> Path:
     csv_path = out_dir / f"leaderboard_pvprank_{ts}.csv"
     base_fields = ["leaderboard", "rank", "uuid", "nickname"]
     gcp_fields = ["account_type", "max_pvp_ticket", "create_account_date", "pvp_log_count"]
+    payment_fields = ["recent_payment_count", "recent_payment_sum", "receipt_total_amount"]
     has_gcp = any(row.get("account_type") for row in rows)
-    fieldnames = base_fields + (gcp_fields if has_gcp else [])
+    has_payment = any("recent_payment_sum" in row for row in rows)
+    fieldnames = base_fields + (gcp_fields if has_gcp else []) + (payment_fields if has_payment else [])
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as file_obj:
         writer = csv.DictWriter(file_obj, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
@@ -765,6 +841,7 @@ def main():
                 logging_service=logging_service,
                 gcp_project=args.gcp_project,
                 gcp_log=args.gcp_log,
+                timeout_error=_timeout_error,
             )
             save_csv(all_rows, LEADERBOARD_OUT_DIR)
 

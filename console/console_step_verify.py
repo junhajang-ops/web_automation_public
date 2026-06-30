@@ -15,6 +15,7 @@ import datetime
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 
@@ -138,6 +139,23 @@ def get_step_wait_ms() -> int:
 
 def step_pause(page, wait_ms: int | None = None) -> None:
     page.wait_for_timeout(get_step_wait_ms() if wait_ms is None else wait_ms)
+
+
+def wait_until(page, predicate, timeout_ms: int = 10_000, wait_ms: int | None = None):
+    """predicate()가 truthy 값을 반환할 때까지 step_pause 간격으로 반복 대기한다.
+
+    UI 요소가 렌더 지연으로 늦게 나타나는 경우의 공용 반복 대기 헬퍼.
+    반환: predicate의 truthy 결과(요소/locator 등). 시간 초과 시 None.
+    대기 간격은 step_pause(env CONSOLE_STEP_WAIT_MS / STEP_WAIT_MS)를 따른다.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while True:
+        result = predicate()
+        if result:
+            return result
+        if time.monotonic() >= deadline:
+            return None
+        step_pause(page, wait_ms)
 
 
 def init_dump_dir(path: Path) -> None:
