@@ -4,20 +4,45 @@
 LOGGING_READ_SCOPE = "https://www.googleapis.com/auth/logging.read"
 
 
-def build_logging_service(key_path):
-    """GCP Cloud Logging v2 service (읽기 전용). 실패 시 None."""
+def load_logging_credentials(key_path):
+    """서비스계정 키 파일 → credentials(logging.read scope). 실패 시 None.
+
+    credentials 로드(RSA 키 파싱)는 비싸므로 한 번만 로드해 공유하고,
+    스레드별로는 build_logging_service_from_credentials 로 service(회선)만 만든다.
+    """
     try:
         from google.oauth2 import service_account
+    except ImportError:
+        return None
+    try:
+        return service_account.Credentials.from_service_account_file(
+            str(key_path), scopes=[LOGGING_READ_SCOPE]
+        )
+    except Exception:
+        return None
+
+
+def build_logging_service_from_credentials(credentials):
+    """credentials → GCP Cloud Logging v2 service. 실패 시 None.
+
+    googleapiclient service(httplib2/SSL)는 thread-safe하지 않으므로 스레드별로 호출한다.
+    credentials 는 thread-safe하여 여러 스레드가 공유해도 된다.
+    """
+    if credentials is None:
+        return None
+    try:
         from googleapiclient.discovery import build
     except ImportError:
         return None
     try:
-        creds = service_account.Credentials.from_service_account_file(
-            str(key_path), scopes=[LOGGING_READ_SCOPE]
-        )
-        return build("logging", "v2", credentials=creds, cache_discovery=False)
+        return build("logging", "v2", credentials=credentials, cache_discovery=False)
     except Exception:
         return None
+
+
+def build_logging_service(key_path):
+    """GCP Cloud Logging v2 service (읽기 전용). 실패 시 None. (키 로드+build 일괄)"""
+    return build_logging_service_from_credentials(load_logging_credentials(key_path))
 
 
 def fetch_pvp_match_logs(logging_service, project, log_name, uuid, since_utc_iso, until_utc_iso):

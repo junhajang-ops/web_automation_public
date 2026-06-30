@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -56,7 +57,11 @@ BASE_DIR = Path(__file__).resolve().parent
 _CS_DIR = BASE_DIR.parent / "cs"
 if str(_CS_DIR) not in sys.path:
     sys.path.insert(0, str(_CS_DIR))
-from cs_gcp_logging import build_logging_service, fetch_pvp_match_logs  # noqa: E402
+from cs_gcp_logging import (  # noqa: E402
+    build_logging_service_from_credentials,
+    fetch_pvp_match_logs,
+    load_logging_credentials,
+)
 
 DEFAULT_OUTPUT = "dumps_console_leaderboard"
 LEADERBOARD_OUT_DIR = PAYMENT_DOCS_DIR / "leaderboard"
@@ -522,28 +527,63 @@ def query_pvp_stats(logging_service, project, log_name, uuid, week_start_utc, no
     }
 
 
-def enrich_board_with_gcp(board_rows, logging_service, project, log_name, week_start_utc, now_utc):
-    """board_rows 각 행에 GCP pvp_match 통계를 in-place로 추가."""
-    if not logging_service or not project or not log_name:
+# pvp_match 병렬 조회용. credentials는 1회 로드해 공유하고(thread-safe),
+# httplib2/SSL을 품은 service(회선)만 스레드별로 build한다.
+# 스레드풀은 전체 조회가 끝날 때까지 재사용 → service build가 총 max_workers회로 끝난다.
+_gcp_tls = threading.local()
+_gcp_executor = None
+
+
+def _thread_logging_service(credentials):
+    """현재 스레드 전용 logging_service. 스레드당 1회만 build(credentials는 공유)."""
+    service = getattr(_gcp_tls, "service", None)
+    if service is None:
+        service = build_logging_service_from_credentials(credentials)
+        _gcp_tls.service = service
+    return service
+
+
+def _get_gcp_executor():
+    """pvp_match 병렬 조회용 공용 스레드풀. 보드마다 새로 만들지 않고 재사용한다."""
+    global _gcp_executor
+    if _gcp_executor is None:
+        _gcp_executor = ThreadPoolExecutor(max_workers=4)  # 동시 요청 burst 완화(429 감소)
+    return _gcp_executor
+
+
+def shutdown_gcp_executor():
+    """공용 스레드풀 종료 (run 완료 후 main에서 호출)."""
+    global _gcp_executor
+    if _gcp_executor is not None:
+        _gcp_executor.shutdown(wait=True)
+        _gcp_executor = None
+
+
+def enrich_board_with_gcp(board_rows, credentials, project, log_name, week_start_utc, now_utc):
+    """board_rows 각 행에 GCP pvp_match 통계를 in-place로 추가.
+    credentials는 공유, service만 스레드별. 스레드풀은 보드 간 재사용한다."""
+    if not credentials or not project or not log_name:
         for row in board_rows:
             row.update({"account_type": "GCP미설정", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": ""})
         return
     print(f"    [GCP] {len(board_rows)}명 pvp_match 로그 병렬 조회 중 "
           f"(기간: {week_start_utc.strftime('%m/%d %H:%MUTC')} ~ 현재)...")
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {
-            executor.submit(
-                query_pvp_stats, logging_service, project, log_name,
-                row["uuid"], week_start_utc, now_utc
-            ): row
-            for row in board_rows
-        }
-        for future in as_completed(futures):
-            row = futures[future]
-            try:
-                row.update(future.result())
-            except Exception as exc:
-                row.update({"account_type": f"조회실패({exc})", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": ""})
+
+    def _work(uuid_value):
+        # 스레드별 service로 조회 → SSL 연결 공유 충돌 방지
+        service = _thread_logging_service(credentials)
+        if service is None:
+            raise RuntimeError("logging service build 실패(credentials 확인)")
+        return query_pvp_stats(service, project, log_name, uuid_value, week_start_utc, now_utc)
+
+    executor = _get_gcp_executor()
+    futures = {executor.submit(_work, row["uuid"]): row for row in board_rows}
+    for future in as_completed(futures):
+        row = futures[future]
+        try:
+            row.update(future.result())
+        except Exception as exc:
+            row.update({"account_type": f"조회실패({exc})", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": ""})
 
 
 def _parse_price_to_int(text: str) -> int:
@@ -703,7 +743,7 @@ def run(
     explicit_project_base,
     start_url,
     project_name,
-    logging_service=None,
+    credentials=None,
     gcp_project="",
     gcp_log="",
     timeout_error=Exception,
@@ -738,7 +778,7 @@ def run(
         board_rows = extract_top_ranks(page, board_name)
 
         # 각 보드 추출 직후 GCP pvp_match 로그로 계정 상태 보강
-        enrich_board_with_gcp(board_rows, logging_service, gcp_project, gcp_log, week_start_utc, now_utc)
+        enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, week_start_utc, now_utc)
 
         # 보드별 통합 출력
         print(f"\n  == {board_name} ==")
@@ -860,10 +900,10 @@ def main():
         if missing:
             raise SystemExit(f"[오류] --title {args.title}: 다음 env가 비어 있습니다 — {', '.join(missing)}")
 
-    logging_service = None
+    credentials = None
     if args.key:
-        logging_service = build_logging_service(args.key)
-        if logging_service is None:
+        credentials = load_logging_credentials(args.key)
+        if credentials is None:
             print("[경고] GCP 서비스계정 로드 실패. pvp_match 로그 조회 없이 진행합니다.")
 
     print("=" * 55)
@@ -873,7 +913,7 @@ def main():
     print(f"출력     : {out_dir.name}")
     print(f"CSV 저장 : {LEADERBOARD_OUT_DIR}")
     print(f"덤프     : {out_dir} (30일 초과 자동 삭제)")
-    gcp_ready = logging_service and args.gcp_project and args.gcp_log
+    gcp_ready = credentials and args.gcp_project and args.gcp_log
     print(f"GCP 조회 : {'활성 (' + args.gcp_project + ' / ' + args.gcp_log + ')' if gcp_ready else '비활성 (--key / --gcp-project / --gcp-log 미지정)'}")
 
     succeeded = False
@@ -896,7 +936,7 @@ def main():
                 explicit_project_base=args.project_base,
                 start_url=args.start_url,
                 project_name=args.project_name,
-                logging_service=logging_service,
+                credentials=credentials,
                 gcp_project=args.gcp_project,
                 gcp_log=args.gcp_log,
                 timeout_error=_timeout_error,
@@ -928,6 +968,8 @@ def main():
                     )
             finally:
                 context.close()
+
+    shutdown_gcp_executor()
 
     if not succeeded:
         sys.exit(1)
