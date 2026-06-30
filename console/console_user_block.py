@@ -8,6 +8,7 @@ Warning:
 """
 
 import argparse
+import csv
 import datetime
 import sys
 from pathlib import Path
@@ -48,7 +49,11 @@ TEXT_REASON_PLACEHOLDER = "\uc0ac\uc720\ub97c \uc785\ub825\ud558\uc138\uc694."
 TEXT_SUBMIT_BLOCK = "\ucc28\ub2e8 \ub4f1\ub85d\ud558\uae30"
 TEXT_RESULT_DIALOG = "\uc811\uadfc \ucc28\ub2e8 \ub4f1\ub85d \ucc98\ub9ac \uacb0\uacfc"
 TEXT_RESULT_SUCCESS = "\uc811\uadfc \ucc28\ub2e8 \ub4f1\ub85d\uc774 \uc131\uacf5\uc801\uc73c\ub85c \uc644\ub8cc\ub418\uc5c8\uc2b5\ub2c8\ub2e4."
+TEXT_ALREADY_BLOCKED_DIALOG = "\uc548\ub0b4"
+TEXT_ALREADY_BLOCKED_MSG = "\uc774\ubbf8 \ub4f1\ub85d\ub41c \uc720\uc800\uc785\ub2c8\ub2e4."
 TEXT_CONFIRM = "\ud655\uc778"
+
+BAN_HISTORY_DIR = Path(__file__).resolve().parent.parent / "payment_docs" / "ban_history"
 
 
 def parse_args():
@@ -300,22 +305,45 @@ def submit_block_registration(page, dialog):
     submit_button.click()
 
 
-def confirm_result_popup(page):
-    print(f"[15] 결과 팝업에서 '{TEXT_CONFIRM}'을 눌러 닫습니다.")
-    result_dialog = get_visible_dialog_by_title(page, TEXT_RESULT_DIALOG)
-    result_dialog.wait_for(state="visible", timeout=15_000)
+def confirm_result_popup(page) -> str:
+    """결과 팝업을 처리하고 상태 문자열을 반환한다.
 
-    success_text = result_dialog.locator(f"text={TEXT_RESULT_SUCCESS}").first
-    success_text.wait_for(state="visible", timeout=15_000)
+    Returns:
+        "success"         — 차단 등록 성공
+        "already_blocked" — 이미 등록된 유저
+    """
+    def _any_result_dialog():
+        for title, status in [
+            (TEXT_RESULT_DIALOG, "success"),
+            (TEXT_ALREADY_BLOCKED_DIALOG, "already_blocked"),
+        ]:
+            dlg = get_visible_dialog_by_title(page, title)
+            try:
+                if dlg.is_visible():
+                    return (status, dlg)
+            except Exception:
+                pass
+        return None
 
-    confirm_button = result_dialog.get_by_role("button", name=TEXT_CONFIRM, exact=True).first
+    result = wait_until(page, _any_result_dialog, timeout_ms=15_000, wait_ms=1_000)
+    if result is None:
+        raise RuntimeError("결과 팝업(성공/이미등록)이 나타나지 않았습니다.")
+
+    status, dialog = result
+
+    if status == "success":
+        print(f"[15] 차단 등록 성공. '{TEXT_CONFIRM}'을 누릅니다.")
+        dialog.locator(f"text={TEXT_RESULT_SUCCESS}").first.wait_for(state="visible", timeout=5_000)
+    else:
+        print(f"[15] 이미 차단된 유저입니다. '{TEXT_CONFIRM}'을 누릅니다.")
+
+    confirm_button = dialog.get_by_role("button", name=TEXT_CONFIRM, exact=True).first
     confirm_button.wait_for(state="visible", timeout=10_000)
     confirm_button.scroll_into_view_if_needed()
     record_step_dump(page, "user_block_result_confirm_pre")
     confirm_button.click()
 
     def _result_closed():
-        dialog = get_visible_dialog_by_title(page, TEXT_RESULT_DIALOG)
         try:
             if not dialog.is_visible():
                 return True
@@ -325,6 +353,24 @@ def confirm_result_popup(page):
 
     if not wait_until(page, _result_closed, timeout_ms=15_000, wait_ms=1_000):
         raise RuntimeError("결과 팝업이 닫히는 것을 확인하지 못했습니다.")
+
+    return status
+
+
+def save_ban_history(uuid_value, period_days, reason, rank_delete, status, project_key=""):
+    BAN_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = f"_{project_key}" if project_key else ""
+    csv_path = BAN_HISTORY_DIR / f"ban_history{suffix}.csv"
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header = ["timestamp", "uuid", "period_days", "reason", "rank_delete", "status"]
+    row = [ts, uuid_value, str(period_days), reason, str(rank_delete), status]
+    write_header = not csv_path.exists()
+    with open(csv_path, "a", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(header)
+        writer.writerow(row)
+    print(f"  차단 기록 저장: {csv_path} (status={status})")
 
 
 def run_user_block(
@@ -336,6 +382,7 @@ def run_user_block(
     explicit_project_base: str,
     start_url: str,
     project_name: str,
+    project_key: str = "",
 ):
     prepare_console_project(
         page=page,
@@ -355,7 +402,8 @@ def run_user_block(
     set_rank_delete_checkbox(page, dialog, remove_rank)
     fill_block_reason(page, dialog, reason_text)
     submit_block_registration(page, dialog)
-    confirm_result_popup(page)
+    block_status = confirm_result_popup(page)
+    save_ban_history(uuid_value, period_days, reason_text, remove_rank, block_status, project_key)
     step_and_verify_ui(page, "user_block_completed")
 
     return {
@@ -363,6 +411,7 @@ def run_user_block(
         "period_days": period_days,
         "reason": reason_text,
         "rank_delete": remove_rank,
+        "status": block_status,
     }
 
 
@@ -407,6 +456,8 @@ def main():
         default_project_name=DEFAULT_PROJECT_NAME,
         require_project_name=True,
     )
+    import re as _re
+    project_key = args.title.strip() if args.title.strip() else _re.sub(r"[^\w가-힣]", "_", args.project_name).strip("_")
     sync_playwright, _timeout_error = load_playwright()
 
     profile_dir = BASE_DIR / args.profile
@@ -450,6 +501,7 @@ def main():
                 explicit_project_base=args.project_base,
                 start_url=args.start_url,
                 project_name=args.project_name,
+                project_key=project_key,
             )
             succeeded = True
 
