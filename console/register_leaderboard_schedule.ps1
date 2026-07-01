@@ -2,9 +2,10 @@
 # console_leaderboard.py 를 Windows 작업 스케줄러에 등록/갱신한다.
 # 요일/시각은 코드에 하드코딩하지 않고 프로젝트 루트 .env 의 아래 두 값을 읽어 사용한다.
 #
-#   LEADERBOARD_SCHEDULE_DAYS=Monday,Thursday   (콤마 구분, 영문 요일명: Monday/Tuesday/Wednesday/Thursday/Friday/Saturday/Sunday)
-#   LEADERBOARD_SCHEDULE_TIME=09:00             (24시간제 HH:mm)
+#   LEADERBOARD_SCHEDULE_DAYS=Saturday,Sunday       (콤마 구분, 영문 요일명: Monday/Tuesday/Wednesday/Thursday/Friday/Saturday/Sunday)
+#   LEADERBOARD_SCHEDULE_TIME=12:00,14:00,20:00     (콤마 구분, 24시간제 HH:mm. 여러 개 지정 가능)
 #
+# 위 예시는 "토요일·일요일 각각 12:00/14:00/20:00에 실행" = 지정한 요일 전체 x 지정한 시각 전체 조합으로 실행된다.
 # 스케줄을 바꾸고 싶으면 .env 값만 수정한 뒤 이 스크립트를 다시 실행하면 된다(기존 등록을 덮어씀).
 # 등록 취소: unregister_leaderboard_schedule.ps1 실행 (같은 방식으로 우클릭 -> "PowerShell로 실행")
 
@@ -35,12 +36,19 @@ $Days = $envMap["LEADERBOARD_SCHEDULE_DAYS"]
 $Time = $envMap["LEADERBOARD_SCHEDULE_TIME"]
 
 if (-not $Days -or -not $Time) {
-    throw "[오류] .env 에 LEADERBOARD_SCHEDULE_DAYS / LEADERBOARD_SCHEDULE_TIME 을 설정해 주세요. 예) LEADERBOARD_SCHEDULE_DAYS=Monday,Thursday / LEADERBOARD_SCHEDULE_TIME=09:00"
+    throw "[오류] .env 에 LEADERBOARD_SCHEDULE_DAYS / LEADERBOARD_SCHEDULE_TIME 을 설정해 주세요. 예) LEADERBOARD_SCHEDULE_DAYS=Saturday,Sunday / LEADERBOARD_SCHEDULE_TIME=12:00,14:00,20:00"
 }
 
-$DaysOfWeek = $Days.Split(",") | ForEach-Object { $_.Trim() }
+$DaysOfWeek = $Days.Split(",") | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
+$Times = $Time.Split(",") | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
 
-Write-Host "등록할 스케줄: $($DaysOfWeek -join ', ') / $Time"
+foreach ($t in $Times) {
+    if ($t -notmatch "^\d{1,2}:\d{2}$") {
+        throw "[오류] LEADERBOARD_SCHEDULE_TIME 형식이 올바르지 않습니다: '$t' (예: 09:00)"
+    }
+}
+
+Write-Host "등록할 스케줄: 매주 $($DaysOfWeek -join ', ') 요일의 $($Times -join ', ') 시각에 실행됩니다."
 
 # 예약 시각에 PC가 절전(Sleep) 상태여도 깨어나 실행되도록 하려면, 작업 자체의
 # WakeToRun 설정뿐 아니라 전원 설정의 "절전 모드 해제 타이머 허용"도 켜져 있어야 한다.
@@ -53,7 +61,9 @@ Write-Host "전원 설정: 절전 모드 해제 타이머 허용 켬(AC/DC) — 
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$WrapperScript`""
 
-$Trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DaysOfWeek -At $Time
+$Triggers = foreach ($t in $Times) {
+    New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DaysOfWeek -At $t
+}
 
 $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
@@ -63,7 +73,7 @@ $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interac
 $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd -WakeToRun `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
-Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger `
+Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Triggers `
     -Principal $Principal -Settings $Settings -Force | Out-Null
 
-Write-Host "등록 완료: 작업 스케줄러 > '$TaskName' ($($DaysOfWeek -join ', ') $Time)"
+Write-Host "등록 완료: 작업 스케줄러 > '$TaskName' (요일=$($DaysOfWeek -join ', ') / 시각=$($Times -join ', '))"
