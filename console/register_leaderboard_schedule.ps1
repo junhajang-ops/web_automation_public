@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # console_leaderboard.py 를 Windows 작업 스케줄러에 등록/갱신한다.
 # 요일/시각은 코드에 하드코딩하지 않고 프로젝트 루트 .env 의 아래 두 값을 읽어 사용한다.
 #

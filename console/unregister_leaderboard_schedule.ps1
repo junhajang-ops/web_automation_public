@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # register_leaderboard_schedule.ps1 로 등록한 작업 스케줄러 항목을 제거한다.
 # 실행: 이 파일을 우클릭 -> "PowerShell로 실행"
 
