@@ -61,6 +61,12 @@ def apply_title_profile(
 
     title = (getattr(args, "title", "") or "").strip()
     if not title:
+        if require_project_name:
+            raise SystemExit(
+                "[오류] --title 또는 --gametitle 옵션이 필요합니다. "
+                "실수로 잘못된 프로젝트를 대상으로 실행되는 것을 막기 위해 "
+                "옵션 없이는 진행하지 않습니다."
+            )
         return args
 
     prefix = title.upper()
