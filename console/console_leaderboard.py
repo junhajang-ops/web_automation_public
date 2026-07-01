@@ -126,6 +126,11 @@ def parse_args():
         ),
     )
     parser.add_argument("--gametitle", action="store_true", help="--title gametitle 단축키")
+    parser.add_argument(
+        "--unattended",
+        action="store_true",
+        help="예약 실행용: 오류 발생 시 Enter 입력 대기 없이 즉시 종료",
+    )
     return parser.parse_args()
 
 
@@ -1382,8 +1387,11 @@ def main():
         except Exception as exc:
             error_message = str(exc)
             print(f"\n[오류] {exc}")
-            print("브라우저를 열어둡니다. 확인 후 Enter 를 눌러 종료합니다.")
-            input()
+            if args.unattended:
+                print("(--unattended) Enter 대기 없이 종료합니다.")
+            else:
+                print("브라우저를 열어둡니다. 확인 후 Enter 를 눌러 종료합니다.")
+                input()
         finally:
             try:
                 if page is not None:
