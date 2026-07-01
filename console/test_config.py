@@ -84,6 +84,10 @@ def apply_title_profile(
 
     if include_key_file and hasattr(args, "key"):
         key_file = os.environ.get(f"{prefix}_KEY_FILE", "").strip()
+        if key_file and not Path(key_file).is_absolute():
+            # 상대경로는 실행 시 cwd에 따라 못 찾을 수 있으므로(예: 작업 스케줄러 실행)
+            # .env와 같은 기준(프로젝트 루트)의 절대경로로 고정한다.
+            key_file = str(Path(__file__).resolve().parent.parent / key_file)
         if not getattr(args, "key", ""):
             setattr(args, "key", key_file)
 
