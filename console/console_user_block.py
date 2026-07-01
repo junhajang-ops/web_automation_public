@@ -37,6 +37,7 @@ DEFAULT_OUTPUT = "dumps_console_user_block"
 DEFAULT_PROJECT_NAME = "\ud5cc\ud130 \ud0a4\uc6b0\uae30"
 DEFAULT_BLOCK_REASON = "UserBlock/Permanent_DataHack_Desc"
 DEFAULT_BLOCK_PERIOD_DAYS = 9999
+DEFAULT_DEVICE_BAN_COUNT = 3
 
 TEXT_USER_ACCESS = "\uc720\uc800 \uc811\uadfc"
 TEXT_DENY_TAB = "\uc811\uadfc \ucc28\ub2e8"
@@ -52,6 +53,13 @@ TEXT_RESULT_SUCCESS = "\uc811\uadfc \ucc28\ub2e8 \ub4f1\ub85d\uc774 \uc131\uacf5
 TEXT_ALREADY_BLOCKED_DIALOG = "\uc548\ub0b4"
 TEXT_ALREADY_BLOCKED_MSG = "\uc774\ubbf8 \ub4f1\ub85d\ub41c \uc720\uc800\uc785\ub2c8\ub2e4."
 TEXT_CONFIRM = "\ud655\uc778"
+TEXT_CANCEL = "\ucde8\uc18c"
+
+# \ub514\ubc14\uc774\uc2a4 \ucc28\ub2e8(\uc720\uc800 \uc811\uadfc > \uc811\uadfc \ucc28\ub2e8 \ud0ed > \uc811\uadfc \ucc28\ub2e8 \ub4f1\ub85d, \ub300\uc0c1=\ub514\ubc14\uc774\uc2a4) - 2026-07-01 \ub77c\uc774\ube0c \ub364\ud504\ub85c \ud655\uc778\ub41c \uc2e4\uc81c DOM \uad6c\uc870
+TEXT_TARGET_DEVICE = "\ub514\ubc14\uc774\uc2a4"
+TEXT_DEVICE_SEARCH_INPUT_PLACEHOLDER = "UUID \ub610\ub294 \ub2c9\ub124\uc784\uc744 \uc785\ub825\ud558\uc138\uc694"
+TEXT_DEVICE_SEARCH_BUTTON = "\uac80\uc0c9"
+TEXT_ALREADY_BLOCKED_DEVICE_MSG = "\uc774\ubbf8 \ub4f1\ub85d\ub41c \ub514\ubc14\uc774\uc2a4\uc785\ub2c8\ub2e4."
 
 BAN_HISTORY_DIR = Path(__file__).resolve().parent.parent / "web_docs" / "ban_history"
 
@@ -80,6 +88,17 @@ def parse_args():
         "--skip-rank-delete",
         action="store_true",
         help="Do not check the leaderboard-rank removal checkbox.",
+    )
+    parser.add_argument(
+        "--skip-device-block",
+        action="store_true",
+        help="유저 차단 후 디바이스 차단 절차를 건너뜁니다.",
+    )
+    parser.add_argument(
+        "--device-ban-count",
+        type=int,
+        default=DEFAULT_DEVICE_BAN_COUNT,
+        help=f"디바이스 목록 중 최하단 몇 개를 차단할지 (default: {DEFAULT_DEVICE_BAN_COUNT})",
     )
     parser.add_argument("--profile", default=DEFAULT_PROFILE)
     parser.add_argument("--out", default=DEFAULT_OUTPUT)
@@ -198,6 +217,102 @@ def select_target_type_user(page, dialog):
         record_step_dump(page, "user_block_target_user_pre")
         radio_label.click()
     ensure_radio_checked(radio_input, TEXT_TARGET_USER)
+
+
+def select_target_type_device(page, dialog):
+    print(f"[D1] 차단 대상을 '{TEXT_TARGET_DEVICE}'로 맞춥니다.")
+    radio_label = dialog.locator("label").filter(has_text=TEXT_TARGET_DEVICE).first
+    radio_input = radio_label.locator("input[type='radio'][value='device']").first
+    radio_label.wait_for(state="visible", timeout=10_000)
+    if not radio_input.is_checked():
+        radio_label.scroll_into_view_if_needed()
+        record_step_dump(page, "device_block_target_device_pre")
+        radio_label.click()
+    ensure_radio_checked(radio_input, TEXT_TARGET_DEVICE)
+
+
+def fill_device_search_uuid(page, dialog, uuid_value):
+    print(f"[D2] 디바이스 조회용 UUID를 입력합니다: {uuid_value}")
+    uuid_input = dialog.locator(f"input[placeholder='{TEXT_DEVICE_SEARCH_INPUT_PLACEHOLDER}']").first
+    uuid_input.wait_for(state="visible", timeout=10_000)
+    uuid_input.scroll_into_view_if_needed()
+    record_step_dump(page, "device_block_uuid_fill_pre")
+    uuid_input.fill("")
+    uuid_input.fill(uuid_value)
+
+
+def click_device_search_button(page, dialog):
+    print(f"[D3] '{TEXT_DEVICE_SEARCH_BUTTON}' 버튼을 클릭합니다.")
+    search_button = dialog.get_by_role("button", name=TEXT_DEVICE_SEARCH_BUTTON, exact=True).first
+
+    def _search_ready():
+        try:
+            if search_button.is_enabled():
+                return True
+        except Exception:
+            return None
+        return None
+
+    if not wait_until(page, _search_ready, timeout_ms=10_000, wait_ms=1_000):
+        raise RuntimeError(f"'{TEXT_DEVICE_SEARCH_BUTTON}' 버튼이 활성화되지 않았습니다.")
+
+    search_button.scroll_into_view_if_needed()
+    record_step_dump(page, "device_block_search_pre")
+    search_button.click()
+
+
+def open_device_dropdown(page, dialog):
+    print("[D4] 디바이스 목록 드롭다운을 엽니다.")
+    device_combobox = dialog.get_by_role("combobox").first
+    device_combobox.wait_for(state="visible", timeout=15_000)
+
+    def _combobox_ready():
+        try:
+            if device_combobox.get_attribute("aria-disabled") != "true":
+                return True
+        except Exception:
+            return None
+        return None
+
+    if not wait_until(page, _combobox_ready, timeout_ms=15_000, wait_ms=1_000):
+        raise RuntimeError("디바이스 목록 조회 결과를 받지 못했습니다(드롭다운이 계속 비활성 상태).")
+
+    device_combobox.scroll_into_view_if_needed()
+    record_step_dump(page, "device_dropdown_open_pre")
+    device_combobox.click()
+
+    options = page.locator("li[role='option'][data-value]")
+    options.first.wait_for(state="visible", timeout=10_000)
+    return options
+
+
+def list_device_ids(options_locator) -> list[str]:
+    ids = []
+    for index in range(options_locator.count()):
+        value = options_locator.nth(index).get_attribute("data-value")
+        if value:
+            ids.append(value)
+    return ids
+
+
+def select_bottom_device_ids(device_ids: list[str], max_count: int = DEFAULT_DEVICE_BAN_COUNT) -> list[str]:
+    if len(device_ids) <= max_count:
+        return list(device_ids)
+    return device_ids[-max_count:]
+
+
+def select_device_option(page, dialog, device_id: str):
+    print(f"[D5] 디바이스 '{device_id}'를 선택합니다.")
+    option = page.locator(f"li[role='option'][data-value='{device_id}']").first
+    option.wait_for(state="visible", timeout=10_000)
+    option.scroll_into_view_if_needed()
+    record_step_dump(page, "device_option_select_pre")
+    option.click()
+
+    device_combobox = dialog.get_by_role("combobox").first
+    selected_text = device_combobox.inner_text().strip()
+    if selected_text != device_id:
+        raise RuntimeError(f"디바이스 선택이 '{device_id}'로 반영되지 않았습니다: {selected_text}")
 
 
 def select_input_mode_text(page, dialog):
@@ -357,6 +472,136 @@ def confirm_result_popup(page) -> str:
     return status
 
 
+def confirm_device_result_popup(page) -> str:
+    """디바이스 차단 결과 팝업을 처리하고 상태 문자열을 반환한다.
+
+    Returns:
+        "success"         — 차단 등록 성공
+        "already_blocked" — 이미 등록된 디바이스
+    """
+    def _any_result_dialog():
+        for title, status in [
+            (TEXT_RESULT_DIALOG, "success"),
+            (TEXT_ALREADY_BLOCKED_DIALOG, "already_blocked"),
+        ]:
+            dlg = get_visible_dialog_by_title(page, title)
+            try:
+                if dlg.is_visible():
+                    return (status, dlg)
+            except Exception:
+                pass
+        return None
+
+    result = wait_until(page, _any_result_dialog, timeout_ms=15_000, wait_ms=1_000)
+    if result is None:
+        raise RuntimeError("디바이스 차단 결과 팝업(성공/이미등록)이 나타나지 않았습니다.")
+
+    status, dialog = result
+
+    if status == "success":
+        print(f"[D6] 디바이스 차단 등록 성공. '{TEXT_CONFIRM}'을 누릅니다.")
+        dialog.locator(f"text={TEXT_RESULT_SUCCESS}").first.wait_for(state="visible", timeout=5_000)
+    else:
+        print(f"[D6] 이미 차단된 디바이스입니다. '{TEXT_CONFIRM}'을 누릅니다.")
+        dialog.locator(f"text={TEXT_ALREADY_BLOCKED_DEVICE_MSG}").first.wait_for(state="visible", timeout=5_000)
+
+    confirm_button = dialog.get_by_role("button", name=TEXT_CONFIRM, exact=True).first
+    confirm_button.wait_for(state="visible", timeout=10_000)
+    confirm_button.scroll_into_view_if_needed()
+    record_step_dump(page, "device_block_result_confirm_pre")
+    confirm_button.click()
+
+    def _result_closed():
+        try:
+            if not dialog.is_visible():
+                return True
+        except Exception:
+            return True
+        return None
+
+    if not wait_until(page, _result_closed, timeout_ms=15_000, wait_ms=1_000):
+        raise RuntimeError("디바이스 차단 결과 팝업이 닫히는 것을 확인하지 못했습니다.")
+
+    return status
+
+
+def save_device_ban_history(uuid_value, device_id, reason, status, project_key=""):
+    BAN_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = f"_{project_key}" if project_key else ""
+    csv_path = BAN_HISTORY_DIR / f"device_ban_history{suffix}.csv"
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header = ["timestamp", "uuid", "device_id", "reason", "status"]
+    row = [ts, uuid_value, device_id, reason, status]
+    write_header = not csv_path.exists()
+    with open(csv_path, "a", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(header)
+        writer.writerow(row)
+    print(f"  디바이스 차단 기록 저장: {csv_path} (status={status})")
+
+
+def run_device_block(
+    page,
+    uuid_value: str,
+    reason_text: str,
+    project_key: str = "",
+    max_device_count: int = DEFAULT_DEVICE_BAN_COUNT,
+):
+    """유저 차단에 이어 해당 유저의 디바이스 중 최하단 N개를 차단한다.
+
+    디바이스는 한 번에 하나만 등록 가능하므로, 대상 디바이스마다
+    '접근 차단 등록' 다이얼로그를 처음부터 다시 열어 반복한다.
+    """
+    print("\n[D0] 디바이스 차단 절차를 시작합니다.")
+    dialog = open_block_register_dialog(page)
+    select_target_type_device(page, dialog)
+    fill_device_search_uuid(page, dialog, uuid_value)
+    click_device_search_button(page, dialog)
+    options = open_device_dropdown(page, dialog)
+    device_ids = list_device_ids(options)
+
+    if not device_ids:
+        print("  등록된 디바이스가 없어 디바이스 차단을 건너뜁니다.")
+        dialog.get_by_role("button", name=TEXT_CANCEL, exact=True).first.click()
+        step_and_verify_ui(page, "device_block_completed")
+        return []
+
+    target_ids = select_bottom_device_ids(device_ids, max_device_count)
+    print(
+        f"  전체 디바이스 {len(device_ids)}개 중 최하단 {len(target_ids)}개를 "
+        f"차단 대상으로 선택합니다: {target_ids}"
+    )
+
+    results = []
+
+    # 최하단(가장 마지막) 디바이스는 이미 열려 있는 드롭다운에서 바로 선택한다.
+    first_id = target_ids[-1]
+    select_device_option(page, dialog, first_id)
+    fill_block_reason(page, dialog, reason_text)
+    submit_block_registration(page, dialog)
+    status = confirm_device_result_popup(page)
+    save_device_ban_history(uuid_value, first_id, reason_text, status, project_key)
+    results.append({"uuid": uuid_value, "device_id": first_id, "status": status})
+
+    # 나머지는 최하단에서부터 위로, 매번 다이얼로그를 다시 열어 진행한다.
+    for device_id in reversed(target_ids[:-1]):
+        dialog = open_block_register_dialog(page)
+        select_target_type_device(page, dialog)
+        fill_device_search_uuid(page, dialog, uuid_value)
+        click_device_search_button(page, dialog)
+        open_device_dropdown(page, dialog)
+        select_device_option(page, dialog, device_id)
+        fill_block_reason(page, dialog, reason_text)
+        submit_block_registration(page, dialog)
+        status = confirm_device_result_popup(page)
+        save_device_ban_history(uuid_value, device_id, reason_text, status, project_key)
+        results.append({"uuid": uuid_value, "device_id": device_id, "status": status})
+
+    step_and_verify_ui(page, "device_block_completed")
+    return results
+
+
 def save_ban_history(uuid_value, period_days, reason, rank_delete, status, project_key=""):
     BAN_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     suffix = f"_{project_key}" if project_key else ""
@@ -383,6 +628,8 @@ def run_user_block(
     start_url: str,
     project_name: str,
     project_key: str = "",
+    skip_device_block: bool = False,
+    device_ban_count: int = DEFAULT_DEVICE_BAN_COUNT,
 ):
     prepare_console_project(
         page=page,
@@ -404,7 +651,18 @@ def run_user_block(
     submit_block_registration(page, dialog)
     block_status = confirm_result_popup(page)
     save_ban_history(uuid_value, period_days, reason_text, remove_rank, block_status, project_key)
-    step_and_verify_ui(page, "user_block_completed")
+
+    device_results = []
+    if skip_device_block:
+        step_and_verify_ui(page, "user_block_completed")
+    else:
+        device_results = run_device_block(
+            page,
+            uuid_value=uuid_value,
+            reason_text=reason_text,
+            project_key=project_key,
+            max_device_count=device_ban_count,
+        )
 
     return {
         "uuid": uuid_value,
@@ -412,6 +670,8 @@ def run_user_block(
         "reason": reason_text,
         "rank_delete": remove_rank,
         "status": block_status,
+        "device_block_count": len(device_results),
+        "device_block_results": device_results,
     }
 
 
@@ -474,6 +734,7 @@ def main():
     print(f"차단 기간  : {args.period_days}")
     print(f"차단 사유  : {args.reason}")
     print(f"리더보드 삭제: {not args.skip_rank_delete}")
+    print(f"디바이스 차단: {not args.skip_device_block} (최하단 {args.device_ban_count}개)")
     print(f"시작 URL   : {args.start_url}")
     print(f"프로젝트명 : {args.project_name}")
 
@@ -502,6 +763,8 @@ def main():
                 start_url=args.start_url,
                 project_name=args.project_name,
                 project_key=project_key,
+                skip_device_block=args.skip_device_block,
+                device_ban_count=args.device_ban_count,
             )
             succeeded = True
 
