@@ -117,6 +117,10 @@ def parse_args():
 
 
 def get_visible_dialog_by_title(page, title_text):
+    # 반환값은 항상 필터 기반의 동적 locator여야 한다. dialogs.nth(index)를 그대로
+    # 반환하면, 이후 다른 다이얼로그가 닫혀 [role='dialog'] 개수/순서가 바뀔 때
+    # 그 인덱스가 다른 요소를 가리키게 되어 클릭이 타임아웃된다(실제 발생 사례:
+    # '이미 등록됨' 안내 팝업이 뜨며 뒤의 등록 폼 다이얼로그가 닫혀 인덱스가 밀림).
     dialogs = page.locator("[role='dialog']")
     count = dialogs.count()
     for index in range(count):
@@ -126,7 +130,7 @@ def get_visible_dialog_by_title(page, title_text):
                 continue
             heading = dialog.locator("h2, [role='heading']").first
             if heading.inner_text().strip() == title_text:
-                return dialog
+                return page.locator("[role='dialog']").filter(has_text=title_text).first
         except Exception:
             continue
     return page.locator("[role='dialog']").filter(has_text=title_text).first
