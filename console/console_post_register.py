@@ -5,11 +5,11 @@ Console console post-register helper.
 Scope:
 - Open the post page from the side menu
 - Open the post-register popup
-- Select expiration period "7??
+- Select expiration period "7일"
 - Fill title and content
 - Open the item-add popup
 - Select TEST_CHART_NAME in the chart dropdown
-- Select item by ShopTable_ID (looked up from payment_docs/ CSV)
+- Select item by ShopTable_ID (looked up from web_docs/ CSV)
 
 Final registration (receiver input, submit) requires human approval.
 """
@@ -44,8 +44,8 @@ from test_config import TEST_CHART_NAME, TEST_PURCHASE_CODE, TEST_UUID, apply_ti
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = "dumps_console_post_register"
-POST_TITLE = "寃곗젣?곹뭹吏湲?"
-POST_CONTENT = "寃곗젣?곹뭹吏湲?"
+POST_TITLE = "결제상품지급"
+POST_CONTENT = "결제상품지급"
 
 
 def parse_args():
@@ -74,15 +74,15 @@ def parse_args():
 
 
 def get_post_register_dialog(page):
-    return page.locator("[role='dialog']").filter(has_text="?고렪 ?깅줉").first
+    return page.locator("[role='dialog']").filter(has_text="우편 등록").first
 
 
 def get_item_add_dialog(page):
-    return page.locator("[role='dialog']").filter(has_text="?꾩씠??異붽?").last
+    return page.locator("[role='dialog']").filter(has_text="아이템 추가").last
 
 
 def open_post_page(page):
-    print("[4] ?ъ씠??硫붾돱?먯꽌 '?고렪' ?섏씠吏濡??대룞?⑸땲??")
+    print("[4] 사이드 메뉴에서 '우편' 페이지로 이동합니다.")
     post_link = page.locator("a#basePost, a[href*='/basePost']").first
     post_link.wait_for(state="visible", timeout=15_000)
     post_link.scroll_into_view_if_needed()
@@ -95,8 +95,8 @@ def open_post_page(page):
 
 
 def open_post_register_popup(page):
-    print("[5] '?고렪 ?깅줉' 踰꾪듉???대┃?⑸땲??")
-    button = page.locator("button.ui.button").filter(has_text="?고렪 ?깅줉").first
+    print("[5] '우편 등록' 버튼을 클릭합니다.")
+    button = page.locator("button.ui.button").filter(has_text="우편 등록").first
     button.wait_for(state="visible", timeout=15_000)
     button.scroll_into_view_if_needed()
     record_step_dump(page, "post_popup_pre")
@@ -107,10 +107,10 @@ def open_post_register_popup(page):
 
 
 def select_expiry_7days(page):
-    print("[6] 留뚮즺湲곌컙 '7?????좏깮?⑸땲??")
+    print("[6] 만료기간 '7일'을 선택합니다.")
     dialog = get_post_register_dialog(page)
-    field = dialog.locator(".field").filter(has_text="留뚮즺湲곌컙").first
-    radio_box = field.locator(".ui.radio.checkbox").filter(has_text="7??").first
+    field = dialog.locator(".field").filter(has_text="만료기간").first
+    radio_box = field.locator(".ui.radio.checkbox").filter(has_text="7일").first
     hidden_radio = field.locator("input[name='expirationType'][value='7']").first
 
     radio_box.wait_for(state="visible", timeout=10_000)
@@ -122,7 +122,7 @@ def select_expiry_7days(page):
         "checked" in ((radio_box.get_attribute("class") or "").lower())
     )
     if not is_checked:
-        raise RuntimeError("留뚮즺湲곌컙 '7?? ?좏깮???곹깭??諛섏쁺?섏? ?딆븯?듬땲??")
+        raise RuntimeError("만료기간 '7일' 선택이 상태에 반영되지 않았습니다.")
 
 
 def fill_title_and_content(page, title, content):
@@ -130,13 +130,13 @@ def fill_title_and_content(page, title, content):
     title_input = dialog.locator("input[name='country.0.title']").first
     content_area = dialog.locator("textarea[name='country.0.content']").first
 
-    print(f"[7] ?쒕ぉ ?낅젰: '{title}'")
+    print(f"[7] 제목 입력: '{title}'")
     title_input.wait_for(state="visible", timeout=10_000)
     title_input.scroll_into_view_if_needed()
     record_step_dump(page, "title_pre_fill")
     title_input.fill(title)
 
-    print(f"[8] ?댁슜 ?낅젰: '{content}'")
+    print(f"[8] 내용 입력: '{content}'")
     content_area.wait_for(state="visible", timeout=10_000)
     content_area.scroll_into_view_if_needed()
     record_step_dump(page, "content_pre_fill")
@@ -144,8 +144,8 @@ def fill_title_and_content(page, title, content):
 
 
 def open_item_add_popup(page):
-    print("[9] '?꾩씠???깅줉' 踰꾪듉???대┃?⑸땲??")
-    button = page.locator("button.ui.basic.button").filter(has_text="?꾩씠???깅줉").first
+    print("[9] '아이템 등록' 버튼을 클릭합니다.")
+    button = page.locator("button.ui.basic.button").filter(has_text="아이템 등록").first
     button.wait_for(state="visible", timeout=15_000)
     button.scroll_into_view_if_needed()
     record_step_dump(page, "item_popup_pre")
@@ -156,26 +156,26 @@ def open_item_add_popup(page):
 
 
 def load_shop_table_id(chart_name: str) -> str:
-    """payment_docs/ ????λ맂 CSV?먯꽌 TEST_PURCHASE_CODE ??ShopTable_ID 諛섑솚."""
+    """web_docs/ 에 저장된 CSV에서 TEST_PURCHASE_CODE → ShopTable_ID 반환."""
     csvs = sorted(PAYMENT_DOCS_DIR.glob(f"chart_{chart_name}_*.csv"))
     if not csvs:
         raise RuntimeError(
-            f"payment_docs/ ??'{chart_name}' CSV ?놁쓬 ??console_chart_lookup.py 癒쇱? ?ㅽ뻾 ?꾩슂"
+            f"web_docs/ 에 '{chart_name}' CSV 없음 — console_chart_lookup.py 먼저 실행 필요"
         )
     csv_path = csvs[-1]
-    print(f"[CSV] {csv_path.name} ?먯꽌 ShopTable_ID 議고쉶 以?..")
+    print(f"[CSV] {csv_path.name} 에서 ShopTable_ID 조회 중...")
     result = _read_csv_and_lookup(csv_path, TEST_PURCHASE_CODE)
     shop_table_id = result.get("shop_table_id", "")
     if not shop_table_id:
         raise RuntimeError(
-            f"CSV?먯꽌 purchase_code='{TEST_PURCHASE_CODE}'????묓븯??ShopTable_ID瑜?李얠? 紐삵뻽?듬땲??"
+            f"CSV에서 purchase_code='{TEST_PURCHASE_CODE}'에 대응하는 ShopTable_ID를 찾지 못했습니다."
         )
     print(f"    ShopTable_ID: {shop_table_id}")
     return shop_table_id
 
 
 def select_chart_in_item_popup(page, chart_name):
-    print(f"[10] ?꾩씠??異붽? ?앹뾽 李⑦듃 ?쒕∼?ㅼ슫?먯꽌 '{chart_name}'???좏깮?⑸땲??")
+    print(f"[10] 아이템 추가 팝업 차트 드롭다운에서 '{chart_name}'을 선택합니다.")
     dialog = get_item_add_dialog(page)
     dropdown = dialog.locator("[role='listbox']").first
     dropdown.wait_for(state="visible", timeout=10_000)
@@ -185,17 +185,17 @@ def select_chart_in_item_popup(page, chart_name):
 
     option = find_exact_text_match(dialog.locator("[role='option']"), chart_name)
     if option is None:
-        raise RuntimeError(f"李⑦듃 ?쒕∼?ㅼ슫?먯꽌 ?뺥솗??'{chart_name}'? ?쇱튂?섎뒗 ??ぉ??李얠? 紐삵뻽?듬땲??")
+        raise RuntimeError(f"차트 드롭다운에서 정확히 '{chart_name}'와 일치하는 항목을 찾지 못했습니다.")
     option.wait_for(state="visible", timeout=5_000)
     option.scroll_into_view_if_needed()
     record_step_dump(page, "chart_option_pre")
     option.click()
 
     selected_text = dropdown.locator(".text, .divider.text").first.inner_text().strip()
-    print(f"    ?좏깮 寃곌낵: '{selected_text}'")
+    print(f"    선택 결과: '{selected_text}'")
     if selected_text != chart_name:
         raise RuntimeError(
-            f"李⑦듃 ?쒕∼?ㅼ슫 ?좏깮 寃곌낵媛 湲곕?媛믨낵 ?ㅻ쫭?덈떎: expected='{chart_name}', actual='{selected_text}'"
+            f"차트 드롭다운 선택 결과가 기대값과 다릅니다: expected='{chart_name}', actual='{selected_text}'"
         )
     return selected_text
 
@@ -214,21 +214,21 @@ def find_exact_text_match(items, target_text):
 
 def ensure_receiver_list_rows_per_page(page, rows_per_page: int = 100):
     dialog = get_post_register_dialog(page)
-    target_text = f"{rows_per_page}媛쒖뵫 蹂닿린"
-    limit_dd = dialog.locator("[role='listbox']").filter(has_text="媛쒖뵫").first
+    target_text = f"{rows_per_page}개씩 보기"
+    limit_dd = dialog.locator("[role='listbox']").filter(has_text="개씩").first
     limit_dd.wait_for(state="visible", timeout=10_000)
     current_text = limit_dd.locator(".text, .divider.text").first.inner_text().strip()
     if current_text == target_text:
         return
 
-    print(f"[15-page] ?섏떊??紐⑸줉??{target_text} 蹂닿린濡??꾪솚?⑸땲??")
+    print(f"[15-page] 수신자 목록을 {target_text} 보기로 전환합니다.")
     limit_dd.scroll_into_view_if_needed()
     record_step_dump(page, "rcvr_rows_dd_pre")
     limit_dd.click()
 
     option = find_exact_text_match(dialog.locator("[role='option']"), target_text)
     if option is None:
-        raise RuntimeError(f"?섏떊??紐⑸줉 媛쒖닔 ?듭뀡?먯꽌 ?뺥솗??'{target_text}'? ?쇱튂?섎뒗 ??ぉ??李얠? 紐삵뻽?듬땲??")
+        raise RuntimeError(f"수신자 목록 개수 옵션에서 정확히 '{target_text}'와 일치하는 항목을 찾지 못했습니다.")
     option.wait_for(state="visible", timeout=10_000)
     option.scroll_into_view_if_needed()
     record_step_dump(page, "rcvr_rows_option_pre")
@@ -246,12 +246,12 @@ def ensure_receiver_list_rows_per_page(page, rows_per_page: int = 100):
     selected_text = limit_dd.locator(".text, .divider.text").first.inner_text().strip()
     if selected_text != target_text:
         raise RuntimeError(
-            f"?섏떊??紐⑸줉 媛쒖닔 ?꾪솚 寃곌낵媛 湲곕?? ?ㅻ쫭?덈떎: expected='{target_text}', actual='{selected_text}'"
+            f"수신자 목록 개수 전환 결과가 기대와 다릅니다: expected='{target_text}', actual='{selected_text}'"
         )
 
 
 def select_item_in_popup(page, shop_table_id: str):
-    print(f"[11] ?꾩씠???쒕∼?ㅼ슫?먯꽌 ShopTable_ID='{shop_table_id}' ?좏깮?⑸땲??")
+    print(f"[11] 아이템 드롭다운에서 ShopTable_ID='{shop_table_id}' 선택합니다.")
     dialog = get_item_add_dialog(page)
     item_dropdown = dialog.locator("[name='item'][role='listbox']").first
     item_dropdown.wait_for(state="visible", timeout=10_000)
@@ -267,16 +267,16 @@ def select_item_in_popup(page, shop_table_id: str):
     option.click()
 
     selected_text = item_dropdown.locator(".text, .divider.text").first.inner_text().strip()
-    print(f"    ?좏깮 寃곌낵: {selected_text[:80]}...")
+    print(f"    선택 결과: {selected_text[:80]}...")
     if target_substr not in selected_text:
         raise RuntimeError(
-            f"?꾩씠???좏깮 寃곌낵??ShopTable_ID='{shop_table_id}'媛 ?놁뒿?덈떎. actual='{selected_text[:120]}'"
+            f"아이템 선택 결과에 ShopTable_ID='{shop_table_id}'가 없습니다. actual='{selected_text[:120]}'"
         )
     return selected_text
 
 
 def fill_item_count(page, count: int = 1):
-    print(f"[12] ?섎웾 '{count}' ?낅젰?⑸땲??")
+    print(f"[12] 수량 '{count}' 입력합니다.")
     dialog = get_item_add_dialog(page)
     count_input = dialog.locator("input[name='itemCount']").first
     count_input.wait_for(state="visible", timeout=10_000)
@@ -286,7 +286,7 @@ def fill_item_count(page, count: int = 1):
 
 
 def confirm_item_add_popup(page):
-    print("[13] ?꾩씠??異붽? ?앹뾽 '?뺤씤' 踰꾪듉???대┃?⑸땲??")
+    print("[13] 아이템 추가 팝업 '확인' 버튼을 클릭합니다.")
     dialog = get_item_add_dialog(page)
     confirm_btn = dialog.locator("button.ui.medium.positive.button").first
     confirm_btn.wait_for(state="visible", timeout=10_000)
@@ -294,11 +294,11 @@ def confirm_item_add_popup(page):
     record_step_dump(page, "item_confirm_pre")
     confirm_btn.click()
     dialog.wait_for(state="hidden", timeout=10_000)
-    # ?앹뾽 ?ロ옒 ?湲?    dialog.wait_for(state="hidden", timeout=10_000)
+    # 팝업 닫힘 대기
 
 
 def fill_receiver_uuid(page, uuid: str):
-    print(f"[14] ?좎? 踰덊샇/?됰꽕?????UUID ?낅젰?⑸땲?? {uuid}")
+    print(f"[14] 유저 번호/닉네임 란에 UUID 입력합니다: {uuid}")
     dialog = get_post_register_dialog(page)
     gamer_input = dialog.locator("input[name='gamer']").first
     gamer_input.wait_for(state="visible", timeout=10_000)
@@ -308,9 +308,9 @@ def fill_receiver_uuid(page, uuid: str):
 
 
 def click_receiver_register(page):
-    print("[15] ?섏떊??'?깅줉' 踰꾪듉???대┃?⑸땲??")
+    print("[15] 수신자 '등록' 버튼을 클릭합니다.")
     dialog = get_post_register_dialog(page)
-    register_btn = dialog.locator("button.ui.primary.button").filter(has_text="?깅줉").first
+    register_btn = dialog.locator("button.ui.primary.button").filter(has_text="등록").first
     register_btn.wait_for(state="visible", timeout=10_000)
     register_btn.scroll_into_view_if_needed()
     record_step_dump(page, "receiver_register_pre")
@@ -340,12 +340,12 @@ def wait_for_receiver_registered(page, uuid: str, timeout_ms: int = 15_000):
         return None
 
     if wait_until(page, _receiver_registered, timeout_ms=timeout_ms, wait_ms=300):
-        print(f"    ?섏떊??諛섏쁺 ?뺤씤: {uuid}")
+        print(f"    수신자 반영 확인: {uuid}")
         return
 
     if not input_cleared:
-        raise RuntimeError(f"?섏떊??UUID ?낅젰???鍮꾩썙吏吏 ?딆븯?듬땲?? {uuid}")
-    raise RuntimeError(f"?섏떊??UUID媛 紐⑸줉??諛섏쁺?섏? ?딆븯?듬땲?? {uuid}")
+        raise RuntimeError(f"수신자 UUID 입력란이 비워지지 않았습니다: {uuid}")
+    raise RuntimeError(f"수신자 UUID가 목록에 반영되지 않았습니다: {uuid}")
 
 
 def register_receiver_uuid_and_wait(page, uuid: str, timeout_ms: int = 15_000):
@@ -397,12 +397,12 @@ def save_artifacts(page, out_dir, succeeded, result_summary=None, error_message=
     try:
         page.screenshot(path=f"{stem}.png", full_page=True)
     except Exception as exc:
-        print(f"  (?ㅽ겕由곗꺑 ????ㅽ뙣: {exc})")
+        print(f"  (스크린샷 저장 실패: {exc})")
 
     try:
         Path(f"{stem}.html").write_text(page.content(), encoding="utf-8")
     except Exception as exc:
-        print(f"  (HTML ????ㅽ뙣: {exc})")
+        print(f"  (HTML 저장 실패: {exc})")
 
     lines = [
         f"success={succeeded}",
@@ -418,9 +418,9 @@ def save_artifacts(page, out_dir, succeeded, result_summary=None, error_message=
     try:
         Path(f"{stem}.txt").write_text("\n".join(lines), encoding="utf-8")
     except Exception as exc:
-        print(f"  (?붿빟 ????ㅽ뙣: {exc})")
+        print(f"  (요약 저장 실패: {exc})")
 
-    print(f"\n?꾪떚?⑺듃 ????꾨즺: {stem}.png / .html / .txt")
+    print(f"\n아티팩트 저장 완료: {stem}.png / .html / .txt")
 
 
 def main():
@@ -441,11 +441,11 @@ def main():
     print("=" * 60)
     print(" Console console post-register helper")
     print("=" * 60)
-    print(f"?꾨줈???대뜑: {profile_dir.name}")
-    print(f"異쒕젰 ?대뜑  : {out_dir.name}")
-    print(f"???李⑦듃  : {args.chart_name}")
-    print(f"?쒖옉 URL   : {args.start_url}")
-    print(f"?꾨줈?앺듃紐?: {args.project_name}")
+    print(f"프로필 폴더: {profile_dir.name}")
+    print(f"출력 폴더  : {out_dir.name}")
+    print(f"대상 차트  : {args.chart_name}")
+    print(f"시작 URL   : {args.start_url}")
+    print(f"프로젝트명 : {args.project_name}")
 
     succeeded = False
     error_message = ""
@@ -471,17 +471,17 @@ def main():
             )
             succeeded = True
 
-            print("\n=== ?꾨즺 (?꾩씠???좏깮源뚯?) ===")
+            print("\n=== 완료 (아이템 선택까지) ===")
             for key, value in result_summary.items():
                 print(f"  {key}: {value}")
 
             if args.hold_seconds > 0:
-                print(f"[16] {args.hold_seconds}珥??湲???醫낅즺?⑸땲??")
+                print(f"[16] {args.hold_seconds}초 대기 후 종료합니다.")
                 page.wait_for_timeout(args.hold_seconds * 1_000)
 
         except Exception as exc:
             error_message = str(exc)
-            print(f"\n[?ㅻ쪟] {error_message}")
+            print(f"\n[오류] {error_message}")
         finally:
             try:
                 page = select_target_page(context, page)
@@ -493,7 +493,7 @@ def main():
                     error_message=error_message,
                 )
             except Exception as exc:
-                print(f"  (?꾪떚?⑺듃 ???以??ㅻ쪟: {exc})")
+                print(f"  (아티팩트 저장 중 오류: {exc})")
             context.close()
 
 

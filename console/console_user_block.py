@@ -53,7 +53,7 @@ TEXT_ALREADY_BLOCKED_DIALOG = "\uc548\ub0b4"
 TEXT_ALREADY_BLOCKED_MSG = "\uc774\ubbf8 \ub4f1\ub85d\ub41c \uc720\uc800\uc785\ub2c8\ub2e4."
 TEXT_CONFIRM = "\ud655\uc778"
 
-BAN_HISTORY_DIR = Path(__file__).resolve().parent.parent / "payment_docs" / "ban_history"
+BAN_HISTORY_DIR = Path(__file__).resolve().parent.parent / "web_docs" / "ban_history"
 
 
 def parse_args():

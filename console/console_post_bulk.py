@@ -2,7 +2,7 @@
 """
 console_post_bulk.py — 우편 일괄 발송 스크립트
 
-payment_docs/post_bulk*.csv 의 행을 (posttitle, postbody, chart category, item, value)
+web_docs/post_bulk*.csv 의 행을 (posttitle, postbody, chart category, item, value)
 기준으로 묶어, 동일 조합이면 수신자만 반복 등록 후 한 번에 발송합니다.
 
 CSV 필수 열: posttitle, postbody, chart category, item, value, uuid
@@ -56,11 +56,11 @@ POST_SEND_WAIT_MS = 5_000
 # ── CSV 로드 ──────────────────────────────────────────────────────────────────
 
 def load_bulk_csv() -> list:
-    """payment_docs/post_bulk*.csv 중 가장 최신 파일을 읽어 행 목록 반환."""
+    """web_docs/post_bulk*.csv 중 가장 최신 파일을 읽어 행 목록 반환."""
     csvs = sorted(PAYMENT_DOCS_DIR.glob("post_bulk*.csv"))
     if not csvs:
         raise RuntimeError(
-            "payment_docs/ 에 'post_bulk*.csv' 없음 — 파일을 먼저 준비해 주세요."
+            "web_docs/ 에 'post_bulk*.csv' 없음 — 파일을 먼저 준비해 주세요."
         )
     csv_path = csvs[-1]
     print(f"[CSV] {csv_path.name} 로드 중...")

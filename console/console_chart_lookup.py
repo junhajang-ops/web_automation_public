@@ -45,7 +45,7 @@ from console_user_search_test import (
 from test_config import TEST_CHART_NAME, TEST_PURCHASE_CODE, apply_title_profile
 
 BASE_DIR = Path(__file__).resolve().parent
-PAYMENT_DOCS_DIR = BASE_DIR.parent / "payment_docs"
+PAYMENT_DOCS_DIR = BASE_DIR.parent / "web_docs"
 DEFAULT_OUTPUT = "dumps_console_chart_lookup"
 DEFAULT_CHART_NAME = TEST_CHART_NAME
 POLL_WAIT_MS = 1_000
@@ -110,9 +110,9 @@ def parse_args():
 def set_dropdown_value(dropdown, target_text, label, verify_prefix=""):
     current_text_locator = dropdown.locator(".divider.text, .divider.default.text").first
     current_text = current_text_locator.inner_text().strip()
-    print(f"    ?꾩옱媛? '{current_text}'")
+    print(f"    현재값: '{current_text}'")
     if current_text == target_text:
-        print("    (?대? ?ㅼ젙?섏뼱 ?덉뼱 嫄대꼫?곷땲??)")
+        print("    (이미 설정되어 있어 건너뜁니다.)")
         return
 
     dropdown.scroll_into_view_if_needed()
@@ -130,14 +130,14 @@ def set_dropdown_value(dropdown, target_text, label, verify_prefix=""):
             break
 
     if not opened:
-        raise RuntimeError(f"{label} ?쒕∼?ㅼ슫???댁? 紐삵뻽?듬땲??")
+        raise RuntimeError(f"{label} 드롭다운을 열지 못했습니다.")
 
     option = find_exact_text_match(
         dropdown.locator(".menu [role='option']"),
         target_text,
     )
     if option is None:
-        raise RuntimeError(f"{label} ?듭뀡?먯꽌 ?뺥솗??'{target_text}'? ?쇱튂?섎뒗 ??ぉ??李얠? 紐삵뻽?듬땲??")
+        raise RuntimeError(f"{label} 옵션에서 정확히 '{target_text}'와 일치하는 항목을 찾지 못했습니다.")
     option.wait_for(state="visible", timeout=10_000)
     option.scroll_into_view_if_needed()
 
@@ -164,17 +164,17 @@ def set_dropdown_value(dropdown, target_text, label, verify_prefix=""):
         wait_ms=POLL_WAIT_MS,
     )
     if applied_text is not None:
-        print(f"    ?꾪솚 ?꾨즺: '{applied_text}'")
+        print(f"    전환 완료: '{applied_text}'")
         return
 
     raise RuntimeError(
-        f"{label} '{target_text}'濡??꾪솚?섏? 紐삵뻽?듬땲???꾩옱媛?'{last_seen}'). "
-        "?쒕∼?ㅼ슫/?듭뀡 議곗옉 諛⑹떇 ?ы솗???꾩슂 ???ㅽ뙣瑜?臾댁떆?섍퀬 吏꾪뻾?섏? ?딆뒿?덈떎."
+        f"{label} '{target_text}'로 전환하지 못했습니다(현재값 '{last_seen}'). "
+        "드롭다운/옵션 조작 방식 재확인 필요 — 실패를 무시하고 진행하지 않습니다."
     )
 
 
 def open_chart_page(page):
-    print("[4] ?ъ씠??硫붾돱?먯꽌 '李⑦듃' ?섏씠吏濡??대룞?⑸땲??")
+    print("[4] 사이드 메뉴에서 '차트' 페이지로 이동합니다.")
     chart_link = page.locator("a#baseChart, a[href*='/baseChart']").first
     chart_link.wait_for(state="visible", timeout=15_000)
     chart_link.scroll_into_view_if_needed()
@@ -193,11 +193,11 @@ def get_chart_list_rows_per_page_dropdown(page):
 
 
 def set_chart_list_rows_per_page(page, rows_per_page):
-    print(f"[5] ?곗륫 ?섎떒 {rows_per_page}媛쒖뵫 蹂닿린濡?蹂寃쏀빀?덈떎.")
+    print(f"[5] 우측 하단 {rows_per_page}개씩 보기로 변경합니다.")
     set_dropdown_value(
         get_chart_list_rows_per_page_dropdown(page),
-        f"{rows_per_page}媛쒖뵫 蹂닿린",
-        "李⑦듃 紐⑸줉 ?쒖떆 媛쒖닔",
+        f"{rows_per_page}개씩 보기",
+        "차트 목록 표시 개수",
         verify_prefix="chart_list_rows",
     )
 
@@ -243,7 +243,7 @@ def go_to_next_chart_page(page, current_page_number):
     next_button.wait_for(state="visible", timeout=15_000)
     next_button.scroll_into_view_if_needed()
     record_step_dump(page, "chart_next_pre")
-    print(f"[7] ?꾩옱 ?섏씠吏???놁뼱??李⑦듃 紐⑸줉 {current_page_number + 1}?섏씠吏濡??대룞?⑸땲??")
+    print(f"[7] 현재 페이지에 없어서 차트 목록 {current_page_number + 1}페이지로 이동합니다.")
     next_button.click()
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
@@ -258,7 +258,7 @@ def get_window_scroll_y(page):
 
 
 def scroll_until_chart_visible(page, chart_name, page_number):
-    print(f"[6] 李⑦듃 紐⑸줉 {page_number}?섏씠吏?먯꽌 '{chart_name}' 留곹겕瑜?李얠뒿?덈떎.")
+    print(f"[6] 차트 목록 {page_number}페이지에서 '{chart_name}' 링크를 찾습니다.")
     chart_link = build_chart_link_locator(page, chart_name)
     if wait_for_visible(chart_link, 1_000):
         chart_link.scroll_into_view_if_needed()
@@ -300,8 +300,8 @@ def find_chart_across_pages(page, chart_name):
 
         if row_count < ROWS_PER_PAGE:
             print(
-                f"[7] 李⑦듃 紐⑸줉 {page_number}?섏씠吏 ???섍? {row_count}媛쒕씪 留덉?留??섏씠吏濡??먮떒?덉뒿?덈떎. "
-                f"'{chart_name}' 李⑦듃媛 ?놁뒿?덈떎."
+                f"[7] 차트 목록 {page_number}페이지 행 수가 {row_count}개라 마지막 페이지로 판단했습니다. "
+                f"'{chart_name}' 차트가 없습니다."
             )
             return {
                 "lookup_status": "not_found",
@@ -311,7 +311,7 @@ def find_chart_across_pages(page, chart_name):
             }
 
         if not is_chart_next_page_available(page):
-            print(f"[7] ?ㅼ쓬 ?섏씠吏媛 ?놁뼱 '{chart_name}' 李⑦듃媛 ?놁뒿?덈떎.")
+            print(f"[7] 다음 페이지가 없어 '{chart_name}' 차트가 없습니다.")
             return {
                 "lookup_status": "not_found",
                 "page_number": page_number,
@@ -342,16 +342,16 @@ def open_chart_detail(page, chart_name):
     chart_number = row_cells.nth(1).inner_text().strip()
     applied_chart = row_cells.nth(3).inner_text().strip()
 
-    print(f"[8] '{chart_name}' 李⑦듃 留곹겕瑜??대┃?⑸땲??")
+    print(f"[8] '{chart_name}' 차트 링크를 클릭합니다.")
     record_step_dump(page, "chart_detail_link_pre")
     chart_link.click()
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
-    page.get_by_role("button", name="李⑦듃 ?뚯씪 ?낅줈??").wait_for(
+    page.get_by_role("button", name="차트 파일 업로드").wait_for(
         state="visible",
         timeout=15_000,
     )
-    page.get_by_text("?꾩옱 ?곸슜 李⑦듃 ?뚯씪").wait_for(state="visible", timeout=15_000)
+    page.get_by_text("현재 적용 차트 파일").wait_for(state="visible", timeout=15_000)
 
     current_file = ""
     current_file_locator = page.locator("text=/Myapp_.*\\.xlsx/").first
@@ -359,7 +359,7 @@ def open_chart_detail(page, chart_name):
         current_file = current_file_locator.inner_text().strip()
 
     print(
-        "[9] 李⑦듃 ?곸꽭 ?섏씠吏 吏꾩엯???뺤씤?덉뒿?덈떎: "
+        "[9] 차트 상세 페이지 진입을 확인했습니다: "
         f"chart_number={chart_number}, applied_chart={applied_chart}"
     )
     return {
@@ -384,7 +384,7 @@ def find_applied_chart_file_row(page):
 
 
 def get_applied_file_id(page) -> str:
-    """?뚯씪 ?대젰 ?뚯씠釉붿뿉???꾩옱 ?곸슜 以묒씤 ?됱쓽 ?뚯씪 ID(td.nth(3))瑜?諛섑솚?⑸땲??"""
+    """파일 이력 테이블에서 현재 적용 중인 행의 파일 ID(td.nth(3))를 반환합니다."""
     row = find_applied_chart_file_row(page)
     try:
         return row.locator("td").nth(3).inner_text().strip()
@@ -393,14 +393,14 @@ def get_applied_file_id(page) -> str:
 
 
 def click_applied_chart_file_row(page):
-    """泥댄겕諛뺤뒪 ?(td.nth(0)) ?대┃?쇰줈 ???좏깮 ??CSV ?ㅼ슫濡쒕뱶 踰꾪듉 ?쒖꽦??"""
-    print("[10] ?꾩옱 ?곸슜 以묒씤 李⑦듃 ?뚯씪 ?됱쓣 ?좏깮?⑸땲??")
+    """체크박스 셀(td.nth(0)) 클릭으로 행 선택 → CSV 다운로드 버튼 활성화."""
+    print("[10] 현재 적용 중인 차트 파일 행을 선택합니다.")
 
-    csv_btn = page.locator("button.ui").filter(has_text="CSV ?ㅼ슫濡쒕뱶").first
+    csv_btn = page.locator("button.ui").filter(has_text="CSV 다운로드").first
     try:
         cls = csv_btn.get_attribute("class") or ""
         if "disabled" not in cls:
-            print("    (?대? ?좏깮???????대┃ ?앸왂)")
+            print("    (이미 선택됨 — 행 클릭 생략)")
             return
     except Exception:
         pass
@@ -414,7 +414,7 @@ def click_applied_chart_file_row(page):
         record_step_dump(page, "chart_file_select_pre")
         row.click()
 
-    # CSV 踰꾪듉 ?쒖꽦???湲?(理쒕? 5珥?
+    # CSV 버튼 활성화 대기 (최대 5초)
     def _csv_enabled():
         try:
             cls = csv_btn.get_attribute("class") or ""
@@ -435,11 +435,11 @@ def get_chart_data_rows_per_page_dropdown(page):
 
 
 def set_chart_data_rows_per_page(page, rows_per_page):
-    print(f"[11] 李⑦듃 ?곗씠??{rows_per_page}媛쒖뵫 蹂닿린濡?蹂寃쏀빀?덈떎.")
+    print(f"[11] 차트 데이터 {rows_per_page}개씩 보기로 변경합니다.")
     set_dropdown_value(
         get_chart_data_rows_per_page_dropdown(page),
-        f"{rows_per_page}媛쒖뵫 蹂닿린",
-        "李⑦듃 ?곗씠???쒖떆 媛쒖닔",
+        f"{rows_per_page}개씩 보기",
+        "차트 데이터 표시 개수",
         verify_prefix="chart_data_rows",
     )
 
@@ -451,7 +451,7 @@ def get_chart_data_next_page_button(page):
 
 
 def navigate_all_chart_data_pages(page):
-    print("[12] 李⑦듃 ?곗씠???꾩껜 ?섏씠吏瑜??쒗쉶?⑸땲??")
+    print("[12] 차트 데이터 전체 페이지를 순회합니다.")
     start_ts = time.time()
     page_count = 1
 
@@ -476,7 +476,7 @@ def navigate_all_chart_data_pages(page):
         page_count += 1
 
     elapsed = round(time.time() - start_ts, 1)
-    print(f"    ?꾨즺: {page_count}?섏씠吏, ?뚯슂?쒓컙 {elapsed}珥?")
+    print(f"    완료: {page_count}페이지, 소요시간 {elapsed}초")
     return {
         "data_page_count": page_count,
         "data_elapsed_seconds": elapsed,
@@ -484,7 +484,7 @@ def navigate_all_chart_data_pages(page):
 
 
 def _read_csv_and_lookup(csv_path: Path, purchase_code: str) -> dict:
-    """CSV ??踰??쒗쉶: ?됀룹뿴 ??吏묎퀎 + purchase_code ??ShopTable_ID ?먯깋."""
+    """CSV 한 번 순회: 행·열 수 집계 + purchase_code → ShopTable_ID 탐색."""
     row_count = col_count = 0
     shop_table_id = ""
     for enc in ("utf-8-sig", "utf-8", "euc-kr"):
@@ -501,16 +501,16 @@ def _read_csv_and_lookup(csv_path: Path, purchase_code: str) -> dict:
                         for col in (pc_cols or []):
                             if row.get(col, "").strip() == purchase_code.strip():
                                 shop_table_id = row.get("ShopTable_ID", "")
-                                print(f"    {col}='{purchase_code}' ??ShopTable_ID={shop_table_id}")
+                                print(f"    {col}='{purchase_code}' → ShopTable_ID={shop_table_id}")
                                 break
             break
         except UnicodeDecodeError:
             continue
         except Exception as exc:
-            print(f"    (CSV ?쎄린 ?ㅻ쪟: {exc})")
+            print(f"    (CSV 읽기 오류: {exc})")
             break
     if purchase_code and not shop_table_id:
-        print(f"    (purchase_code '{purchase_code}' 誘몃컻寃?")
+        print(f"    (purchase_code '{purchase_code}' 미발견)")
     return {"csv_row_count": row_count, "csv_col_count": col_count, "shop_table_id": shop_table_id}
 
 
@@ -519,8 +519,8 @@ def _accept_dialog(dialog):
 
 
 def _do_download_csv(page, csv_path: Path):
-    """CSV ?ㅼ슫濡쒕뱶 踰꾪듉 ?대┃ ???뺤씤 紐⑤떖 泥섎━ ???뚯씪 ???"""
-    csv_btn = page.locator("button.ui").filter(has_text="CSV ?ㅼ슫濡쒕뱶").first
+    """CSV 다운로드 버튼 클릭 → 확인 모달 처리 → 파일 저장."""
+    csv_btn = page.locator("button.ui").filter(has_text="CSV 다운로드").first
     csv_btn.scroll_into_view_if_needed()
     record_step_dump(page, "csv_download_pre")
     page.on("dialog", _accept_dialog)
@@ -528,40 +528,40 @@ def _do_download_csv(page, csv_path: Path):
         with page.expect_download(timeout=60_000) as dl_info:
             csv_btn.click()
             confirm_btn = page.locator("[role='dialog'] button").filter(
-                has_text="?뺤씤"
+                has_text="확인"
             ).first
             if wait_for_visible(confirm_btn, 5_000):
-                print("    (?뺤씤 紐⑤떖 媛먯? ???뺤씤 踰꾪듉 ?대┃)")
+                print("    (확인 모달 감지 — 확인 버튼 클릭)")
                 record_step_dump(page, "csv_confirm_pre")
                 confirm_btn.click()
     finally:
         page.remove_listener("dialog", _accept_dialog)
     dl_info.value.save_as(str(csv_path))
-    print(f"    ??? {csv_path.name}")
+    print(f"    저장: {csv_path.name}")
 
 
 def download_chart_csv(page, chart_name: str, applied_file_id: str) -> dict:
-    """?뚯씪 ID 湲곕컲 罹먯떆 ?뺤씤 ???꾩슂 ???ㅼ슫濡쒕뱶 ??ShopTable_ID ?먯깋."""
-    print("[11] CSV ?뚯씪???뺤씤?⑸땲??")
+    """파일 ID 기반 캐시 확인 → 필요 시 다운로드 → ShopTable_ID 탐색."""
+    print("[11] CSV 파일을 확인합니다.")
     PAYMENT_DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
     csv_filename = f"chart_{chart_name}_{applied_file_id}.csv"
     csv_path = PAYMENT_DOCS_DIR / csv_filename
 
     if csv_path.exists():
-        print(f"    (?뚯씪 ID {applied_file_id} 湲곗??????ㅼ슫濡쒕뱶 ?ㅽ궢)")
-        print(f"    湲곗〈 ?뚯씪 ?ъ슜: {csv_filename}")
+        print(f"    (파일 ID {applied_file_id} 기저장 — 다운로드 스킵)")
+        print(f"    기존 파일 사용: {csv_filename}")
     else:
-        # 媛숈? 李⑦듃???댁쟾 踰꾩쟾 ??젣
+        # 같은 차트의 이전 버전 삭제
         for old in PAYMENT_DOCS_DIR.glob(f"chart_{chart_name}_*.csv"):
             old.unlink()
-            print(f"    (?댁쟾 踰꾩쟾 ??젣: {old.name})")
-        # ???좏깮 ???ㅼ슫濡쒕뱶
+            print(f"    (이전 버전 삭제: {old.name})")
+        # 행 선택 후 다운로드
         click_applied_chart_file_row(page)
         _do_download_csv(page, csv_path)
 
     stats = _read_csv_and_lookup(csv_path, TEST_PURCHASE_CODE)
-    print(f"    ???? {stats['csv_row_count']}, ???? {stats['csv_col_count']}")
+    print(f"    행 수: {stats['csv_row_count']}, 열 수: {stats['csv_col_count']}")
     return {**stats, "csv_file": csv_filename, "applied_file_id": applied_file_id}
 
 
@@ -584,7 +584,7 @@ def run_chart_lookup(
     summary = open_chart_detail(page, chart_name)
     if summary["lookup_status"] == "found":
         applied_file_id = get_applied_file_id(page)
-        print(f"[10-pre] ?꾩옱 ?곸슜 ?뚯씪 ID: {applied_file_id}")
+        print(f"[10-pre] 현재 적용 파일 ID: {applied_file_id}")
         csv_summary = download_chart_csv(page, chart_name, applied_file_id)
         summary.update(csv_summary)
         step_and_verify_ui(page, "chart_lookup_complete")
@@ -611,12 +611,12 @@ def save_artifacts(
     try:
         page.screenshot(path=screenshot_path, full_page=True)
     except Exception as exc:
-        print(f"  (?ㅽ겕由곗꺑 ????ㅽ뙣: {exc})")
+        print(f"  (스크린샷 저장 실패: {exc})")
 
     try:
         Path(html_path).write_text(page.content(), encoding="utf-8")
     except Exception as exc:
-        print(f"  (HTML ????ㅽ뙣: {exc})")
+        print(f"  (HTML 저장 실패: {exc})")
 
     summary_lines = [
         f"success={succeeded}",
@@ -645,16 +645,16 @@ def save_artifacts(
     try:
         Path(txt_path).write_text("\n".join(summary_lines), encoding="utf-8")
     except Exception as exc:
-        print(f"  (?붿빟 ????ㅽ뙣: {exc})")
+        print(f"  (요약 저장 실패: {exc})")
 
-    print(f"\n?꾪떚?⑺듃 ????꾨즺: {stem}.png / .html / .txt")
+    print(f"\n아티팩트 저장 완료: {stem}.png / .html / .txt")
 
 
 def hold_browser_open(page, hold_seconds):
     if hold_seconds <= 0:
         return
 
-    print(f"[13] ?꾩옱 ?붾㈃??{hold_seconds}珥??숈븞 ?좎??⑸땲??")
+    print(f"[13] 현재 화면을 {hold_seconds}초 동안 유지합니다.")
     deadline = time.time() + hold_seconds
     while time.time() < deadline:
         page.wait_for_timeout(POLL_WAIT_MS)
@@ -678,11 +678,11 @@ def main():
     print("=" * 60)
     print(" Console chart lookup smoke test")
     print("=" * 60)
-    print(f"?꾨줈???대뜑: {profile_dir.name}")
-    print(f"異쒕젰 ?대뜑  : {out_dir.name}")
-    print(f"???李⑦듃  : {args.chart_name}")
-    print(f"?쒖옉 URL   : {args.start_url}")
-    print(f"?꾨줈?앺듃紐?: {args.project_name}")
+    print(f"프로필 폴더: {profile_dir.name}")
+    print(f"출력 폴더  : {out_dir.name}")
+    print(f"대상 차트  : {args.chart_name}")
+    print(f"시작 URL   : {args.start_url}")
+    print(f"프로젝트명 : {args.project_name}")
 
     succeeded = False
     error_message = ""
@@ -710,7 +710,7 @@ def main():
             hold_browser_open(page, args.hold_seconds)
         except Exception as exc:
             error_message = str(exc)
-            print(f"\n[?ㅻ쪟] {error_message}")
+            print(f"\n[오류] {error_message}")
         finally:
             try:
                 page = select_target_page(context, page)
@@ -733,6 +733,6 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n?ъ슜???붿껌?쇰줈 醫낅즺?덉뒿?덈떎.")
+        print("\n사용자 요청으로 종료했습니다.")
         sys.exit(130)
 
