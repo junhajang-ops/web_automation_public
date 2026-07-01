@@ -393,17 +393,17 @@ def set_rank_delete_checkbox(page, dialog, enabled: bool):
         raise RuntimeError("리더보드 순위 삭제 체크 상태가 반영되지 않았습니다.")
 
 
-def fill_block_reason(page, dialog, reason_text):
+def fill_block_reason(page, dialog, reason_text, step_name="user_block_reason_fill_pre"):
     print(f"[13] 사유를 입력합니다: {reason_text}")
     reason_input = dialog.locator(f"input[placeholder='{TEXT_REASON_PLACEHOLDER}']").first
     reason_input.wait_for(state="visible", timeout=10_000)
     reason_input.scroll_into_view_if_needed()
-    record_step_dump(page, "user_block_reason_fill_pre")
+    record_step_dump(page, step_name)
     reason_input.fill("")
     reason_input.fill(reason_text)
 
 
-def submit_block_registration(page, dialog):
+def submit_block_registration(page, dialog, step_name="user_block_submit_pre"):
     print(f"[14] '{TEXT_SUBMIT_BLOCK}' 버튼을 클릭합니다.")
     submit_button = dialog.get_by_role("button", name=TEXT_SUBMIT_BLOCK, exact=True).first
     submit_button.wait_for(state="visible", timeout=10_000)
@@ -420,7 +420,7 @@ def submit_block_registration(page, dialog):
         raise RuntimeError(f"'{TEXT_SUBMIT_BLOCK}' 버튼이 활성화되지 않았습니다.")
 
     submit_button.scroll_into_view_if_needed()
-    record_step_dump(page, "user_block_submit_pre")
+    record_step_dump(page, step_name)
     submit_button.click()
 
 
@@ -545,6 +545,14 @@ def save_device_ban_history(uuid_value, device_id, reason, status, project_key="
     print(f"  디바이스 차단 기록 저장: {csv_path} (status={status})")
 
 
+def is_block_dialog_open(page) -> bool:
+    dialog = page.locator("[role='dialog']").filter(has_text=TEXT_OPEN_BLOCK_DIALOG).first
+    try:
+        return dialog.is_visible()
+    except Exception:
+        return False
+
+
 def run_device_block(
     page,
     uuid_value: str,
@@ -554,8 +562,11 @@ def run_device_block(
 ):
     """유저 차단에 이어 해당 유저의 디바이스 중 최하단 N개를 차단한다.
 
-    디바이스는 한 번에 하나만 등록 가능하므로, 대상 디바이스마다
-    '접근 차단 등록' 다이얼로그를 처음부터 다시 열어 반복한다.
+    디바이스는 한 번에 하나만 등록 가능하다. 실측 결과:
+    - 차단 등록 성공 시 '접근 차단 등록' 다이얼로그가 자동으로 닫힌다.
+    - '이미 등록된 디바이스입니다' 안내를 확인해도 다이얼로그는 열린 채 유지되며,
+      드롭다운에서 다음 디바이스를 다시 골라 이어서 등록할 수 있다.
+    매 반복마다 다이얼로그가 실제로 열려 있는지 직접 확인해 분기한다(추측 금지).
     """
     print("\n[D0] 디바이스 차단 절차를 시작합니다.")
     dialog = open_block_register_dialog(page)
@@ -567,6 +578,7 @@ def run_device_block(
 
     if not device_ids:
         print("  등록된 디바이스가 없어 디바이스 차단을 건너뜁니다.")
+        record_step_dump(page, "device_block_cancel_pre")
         dialog.get_by_role("button", name=TEXT_CANCEL, exact=True).first.click()
         step_and_verify_ui(page, "device_block_completed")
         return []
@@ -578,29 +590,36 @@ def run_device_block(
     )
 
     results = []
+    dropdown_open = True  # 방금 open_device_dropdown()으로 목록을 열어 둔 상태
 
-    # 최하단(가장 마지막) 디바이스는 이미 열려 있는 드롭다운에서 바로 선택한다.
-    first_id = target_ids[-1]
-    select_device_option(page, dialog, first_id)
-    fill_block_reason(page, dialog, reason_text)
-    submit_block_registration(page, dialog)
-    status = confirm_device_result_popup(page)
-    save_device_ban_history(uuid_value, first_id, reason_text, status, project_key)
-    results.append({"uuid": uuid_value, "device_id": first_id, "status": status})
+    # 최하단(가장 마지막) 디바이스부터 위로 하나씩 처리한다.
+    for device_id in reversed(target_ids):
+        if not is_block_dialog_open(page):
+            dialog = open_block_register_dialog(page)
+            select_target_type_device(page, dialog)
+            fill_device_search_uuid(page, dialog, uuid_value)
+            click_device_search_button(page, dialog)
+            open_device_dropdown(page, dialog)
+            dropdown_open = True
+        elif not dropdown_open:
+            open_device_dropdown(page, dialog)
+            dropdown_open = True
 
-    # 나머지는 최하단에서부터 위로, 매번 다이얼로그를 다시 열어 진행한다.
-    for device_id in reversed(target_ids[:-1]):
-        dialog = open_block_register_dialog(page)
-        select_target_type_device(page, dialog)
-        fill_device_search_uuid(page, dialog, uuid_value)
-        click_device_search_button(page, dialog)
-        open_device_dropdown(page, dialog)
         select_device_option(page, dialog, device_id)
-        fill_block_reason(page, dialog, reason_text)
-        submit_block_registration(page, dialog)
+        dropdown_open = False  # 옵션 선택 시 드롭다운은 자동으로 닫힌다.
+        fill_block_reason(page, dialog, reason_text, step_name="device_block_reason_fill_pre")
+        submit_block_registration(page, dialog, step_name="device_block_submit_pre")
         status = confirm_device_result_popup(page)
         save_device_ban_history(uuid_value, device_id, reason_text, status, project_key)
         results.append({"uuid": uuid_value, "device_id": device_id, "status": status})
+
+    if is_block_dialog_open(page):
+        print("  마지막 대상까지 처리했지만 다이얼로그가 남아 있어 '취소'로 닫습니다.")
+        cancel_button = dialog.get_by_role("button", name=TEXT_CANCEL, exact=True).first
+        cancel_button.wait_for(state="visible", timeout=10_000)
+        cancel_button.scroll_into_view_if_needed()
+        record_step_dump(page, "device_block_cancel_pre")
+        cancel_button.click()
 
     step_and_verify_ui(page, "device_block_completed")
     return results
