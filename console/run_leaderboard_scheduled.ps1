@@ -17,4 +17,33 @@ if (-not (Test-Path $LogDir)) {
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $LogFile = Join-Path $LogDir "leaderboard_$Timestamp.log"
 
-& $Python $Script --gametitle --unattended *>> $LogFile
+# 화면 잠금(Win+L) 중에도 모니터/GPU 렌더링이 절전으로 내려가지 않도록
+# 이 스크립트가 도는 동안만 Windows에 "화면·시스템을 켜둬라"라고 알려준다.
+# 비밀번호 잠금 자체는 그대로 유지되고, 화면 전원/렌더링만 켜진 상태로 유지된다.
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class PowerHelper {
+    [FlagsAttribute]
+    public enum EXECUTION_STATE : uint {
+        ES_CONTINUOUS = 0x80000000,
+        ES_SYSTEM_REQUIRED = 0x00000001,
+        ES_DISPLAY_REQUIRED = 0x00000002
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern EXECUTION_STATE SetThreadExecutionState(EXECUTION_STATE esFlags);
+}
+"@ -ErrorAction SilentlyContinue
+
+$KeepAwake = ([PowerHelper+EXECUTION_STATE]::ES_CONTINUOUS -bor
+             [PowerHelper+EXECUTION_STATE]::ES_SYSTEM_REQUIRED -bor
+             [PowerHelper+EXECUTION_STATE]::ES_DISPLAY_REQUIRED)
+[PowerHelper]::SetThreadExecutionState($KeepAwake) | Out-Null
+
+try {
+    & $Python $Script --gametitle --unattended *>> $LogFile
+}
+finally {
+    # 실행이 끝나면 평소 전원 관리 설정으로 되돌린다.
+    [PowerHelper]::SetThreadExecutionState([PowerHelper+EXECUTION_STATE]::ES_CONTINUOUS) | Out-Null
+}
