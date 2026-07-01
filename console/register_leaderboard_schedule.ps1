@@ -6,7 +6,7 @@
 #   LEADERBOARD_SCHEDULE_TIME=09:00             (24시간제 HH:mm)
 #
 # 스케줄을 바꾸고 싶으면 .env 값만 수정한 뒤 이 스크립트를 다시 실행하면 된다(기존 등록을 덮어씀).
-# 등록 취소: Unregister-ScheduledTask -TaskName "ConsoleLeaderboard" -Confirm:$false
+# 등록 취소: unregister_leaderboard_schedule.ps1 실행 (같은 방식으로 우클릭 -> "PowerShell로 실행")
 
 $ErrorActionPreference = "Stop"
 
