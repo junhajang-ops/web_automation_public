@@ -314,7 +314,7 @@ def main():
     apply_title_profile(
         args,
         default_project_name="",
-        require_project_name=True,
+        require_project_name=False,
     )
     sync_playwright = _load_playwright()
     profile_dir = BASE_DIR / args.profile
