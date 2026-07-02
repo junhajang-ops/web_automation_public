@@ -88,6 +88,12 @@ UUID_RE = re.compile(
     re.I,
 )
 ACCOUNT_NEW_HOURS = int(os.environ.get("ACCOUNT_NEW_HOURS", "240"))  # 계정 생성 후 N시간 이내 → 신규
+# 계정 생성일 조회 시 GCP 로그를 거슬러 볼 시간 범위(하한). 기본값은 신규 계정 기준(ACCOUNT_NEW_HOURS)과 동일.
+# 근거: 진짜 "신규" 계정은 반드시 이 창 안에 로그가 있다(가입 자체가 창 안). 따라서 이 창만 조회해도
+# 신규 판정에 필요한 로그는 전부 잡힌다. 창 안에 로그가 없으면 최근 활동이 없다는 뜻 → 신규일 수 없음 → 기존 유저.
+# 범위를 좁히면 entries.list 스캔이 작아져 "빈 첫 페이지+nextPageToken" 문제도 사실상 사라진다(공식 권장 우회).
+# 경계/수집지연이 우려되면 이 env만 키워 창을 넓히면 된다(판정 임계값 ACCOUNT_NEW_HOURS는 그대로).
+ACCOUNT_LOOKUP_LOOKBACK_HOURS = max(1, int(os.environ.get("ACCOUNT_LOOKUP_LOOKBACK_HOURS", str(ACCOUNT_NEW_HOURS))))
 RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계 대상 건수
 GCP_QUERY_MAX_RETRIES = max(1, int(os.environ.get("GCP_QUERY_MAX_RETRIES", "10")))
 GCP_QUERY_RETRY_WAIT_MS = max(0, int(os.environ.get("GCP_QUERY_RETRY_WAIT_MS", "1000")))
@@ -572,17 +578,27 @@ def _is_retryable_gcp_error(err_text: str) -> bool:
     )
 
 
-def _build_recent_user_log_filter(project: str, log_name: str, uuid: str) -> str:
+def _rfc3339_hours_before(now_utc, hours: int) -> str:
+    """now_utc(naive UTC)에서 hours시간 전을 GCP 필터용 RFC3339(Z) 문자열로."""
+    dt = now_utc - datetime.timedelta(hours=hours)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _build_recent_user_log_filter(project: str, log_name: str, uuid: str, since_iso: str = None) -> str:
     # SUB_CATEGORY 제한 없음 — 해당 유저의 로그 종류를 가리지 않고 가장 최근 생성된 것을 조회한다.
+    # since_iso가 있으면 timestamp 하한을 걸어 스캔 범위를 신규 계정 기준 창으로 좁힌다(ACCOUNT_LOOKUP_LOOKBACK_HOURS).
     log_path = f"projects/{project}/logs/{log_name}"
-    return f'logName="{log_path}" AND jsonPayload._user_id="{uuid}"'
+    filt = f'logName="{log_path}" AND jsonPayload._user_id="{uuid}"'
+    if since_iso:
+        filt += f' AND timestamp >= "{since_iso}"'
+    return filt
 
 
-def _fetch_recent_user_log_with_retry(logging_service, project, log_name, uuid):
+def _fetch_recent_user_log_with_retry(logging_service, project, log_name, uuid, since_iso=None):
     if not (project and log_name and uuid):
         return None, "project/log_name/uuid 부족"
 
-    filter_expr = _build_recent_user_log_filter(project, log_name, uuid)
+    filter_expr = _build_recent_user_log_filter(project, log_name, uuid, since_iso)
     last_err = None
 
     for attempt in range(1, GCP_QUERY_MAX_RETRIES + 1):
@@ -605,13 +621,20 @@ def _fetch_recent_user_log_with_retry(logging_service, project, log_name, uuid):
 
 
 def query_account_creation_info(logging_service, project, log_name, uuid, now_utc) -> dict:
-    """유저의 가장 최근 로그(종류 무관) 1건에서 계정 생성일(_create_account_date)만 읽는다."""
-    entry, err = _fetch_recent_user_log_with_retry(logging_service, project, log_name, uuid)
+    """유저의 최근 로그(종류 무관, 신규 기준 창 안) 1건에서 계정 생성일(_create_account_date)만 읽는다.
+
+    조회 창은 ACCOUNT_LOOKUP_LOOKBACK_HOURS(기본=ACCOUNT_NEW_HOURS)로 좁힌다. 창 안에 로그가 없으면
+    최근 활동이 없다는 뜻이고, 그런 계정은 신규일 수 없으므로 "기존 유저"로 확정한다(과거엔 "로그없음"으로
+    표기해 조회 실패처럼 보였으나, 실제로는 조회가 정상이고 단지 창 밖의 오래된 계정이라는 뜻).
+    """
+    since_iso = _rfc3339_hours_before(now_utc, ACCOUNT_LOOKUP_LOOKBACK_HOURS)
+    entry, err = _fetch_recent_user_log_with_retry(logging_service, project, log_name, uuid, since_iso)
 
     if err:
         return {"account_type": f"조회실패({err})", "create_account_date": ""}
     if entry is None:
-        return {"account_type": "로그없음", "create_account_date": ""}
+        # 신규 기준 창 안에 로그 없음 → 최근 활동 없음 → 신규 계정 아님 → 기존 유저.
+        return {"account_type": "기존 유저", "create_account_date": ""}
 
     create_date_str = (entry.get("jsonPayload") or {}).get("_create_account_date", "")
 
