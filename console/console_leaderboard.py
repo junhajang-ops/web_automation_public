@@ -982,7 +982,7 @@ def run(
                 # 키워드 전환용 "return"(직전 화면=목록 페이지)과는 실제 화면이 달라 지문 이름을 분리한다.
                 open_leaderboard_list_and_search(page, keyword, nav_context="board_loop")
                 enter_leaderboard_detail(page, board_name)
-                set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
+                set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix="detail_rows")
                 board_rows = extract_top_ranks(page, board_name)
                 # 각 보드 추출 직후 GCP 최근 로그(종류 무관)로 계정 생성일 보강
                 enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, now_utc)
