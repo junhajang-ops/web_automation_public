@@ -9,9 +9,13 @@ Scope:
 - Search visible <keyword>_* leaderboards for each configured keyword (project별 env로 관리, 복수 지정 가능)
 - Open each leaderboard from the on-screen list
 - Read every player within rank <= 30 from the detail table (ties included)
+- Enrich new accounts with receipt-verification / payment-history sums
 - Save CSV and debug artifacts
 
-This script is intentionally read-only. It does not click any mutation action.
+By default this script is read-only. Only when --block-new-users is passed does it
+perform a mutation: new accounts whose total payment sum is at or below the env-managed
+threshold (USER_BLOCK_MAX_TOTAL_PAYMENT, default 200,000) are user-blocked (device ban
+included). Without the flag it merely prints the block candidates (dry-run).
 """
 
 import argparse
@@ -48,6 +52,12 @@ from console_receipt_verification import (
     wait_for_receipt_page_render_stable,
 )
 from console_webshop_history import summarize_payitem_history as summarize_payitem_history_lookup
+from console_user_block import (
+    DEFAULT_BLOCK_PERIOD_DAYS,
+    DEFAULT_BLOCK_REASON,
+    DEFAULT_DEVICE_BAN_COUNT,
+    run_user_block,
+)
 from console_step_verify import (
     configure_console_output,
     display_width,
@@ -98,6 +108,8 @@ RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계
 GCP_QUERY_MAX_RETRIES = max(1, int(os.environ.get("GCP_QUERY_MAX_RETRIES", "10")))
 GCP_QUERY_RETRY_WAIT_MS = max(0, int(os.environ.get("GCP_QUERY_RETRY_WAIT_MS", "1000")))
 RETRY_MAX_RETRIES = get_retry_max_retries()  # console_user_block.py와 공용 env — 목록 재진입 재시도도 동일 개념이라 공용
+# 신규 유저 차단 임계값: 총 결제액(영수증검증+지급내역)이 이 값 "이하"면 차단 대상. env로 관리.
+BLOCK_MAX_TOTAL_PAYMENT = max(0, int(os.environ.get("USER_BLOCK_MAX_TOTAL_PAYMENT", "200000")))
 RANK_COL_WIDTH = 4
 UUID_COL_WIDTH = 36
 ACCOUNT_TYPE_COL_WIDTH = 16  # 계정상태 고정폭 — 조회실패(...) 예외 메시지는 이 폭에서 말줄임 처리됨
@@ -189,6 +201,43 @@ def parse_args():
             "테스트용: 검색된 리더보드 중 1개만 조회한 뒤 나머지 키워드/리더보드는 "
             "건너뛰고 바로 다음 단계(신규유저 영수증검증 등)로 진행합니다."
         ),
+    )
+    # --- 신규 유저 차단(운영 실행) 옵션 ---
+    parser.add_argument(
+        "--block-new-users",
+        action="store_true",
+        help=(
+            f"신규 유저 중 총 결제액이 임계값(기본 {BLOCK_MAX_TOTAL_PAYMENT:,}원, "
+            "env USER_BLOCK_MAX_TOTAL_PAYMENT) 이하인 대상을 실제로 user_block(디바이스밴 포함)합니다. "
+            "지정하지 않으면 후보 목록만 출력하는 드라이런으로 동작합니다(운영 실행 승인 게이트)."
+        ),
+    )
+    parser.add_argument(
+        "--reason",
+        default=DEFAULT_BLOCK_REASON,
+        help=f"차단 사유 (default: {DEFAULT_BLOCK_REASON})",
+    )
+    parser.add_argument(
+        "--period-days",
+        type=int,
+        default=DEFAULT_BLOCK_PERIOD_DAYS,
+        help=f"차단 기간(일) (default: {DEFAULT_BLOCK_PERIOD_DAYS})",
+    )
+    parser.add_argument(
+        "--skip-rank-delete",
+        action="store_true",
+        help="차단 시 리더보드 순위 삭제 체크를 하지 않습니다.",
+    )
+    parser.add_argument(
+        "--skip-device-block",
+        action="store_true",
+        help="user_block 후 디바이스 차단 절차를 건너뜁니다(기본은 디바이스밴 포함).",
+    )
+    parser.add_argument(
+        "--device-ban-count",
+        type=int,
+        default=DEFAULT_DEVICE_BAN_COUNT,
+        help=f"디바이스 목록 중 최하단 몇 개를 차단할지 (default: {DEFAULT_DEVICE_BAN_COUNT})",
     )
     return parser.parse_args()
 
@@ -925,6 +974,155 @@ def compute_total_payment_sum(all_rows):
             row["total_payment_sum"] = recent + payitem
 
 
+def select_block_candidates(all_rows, max_total_payment: int) -> list:
+    """차단 대상 신규 유저 선정. UUID 기준 중복 제거.
+
+    선정 조건:
+    - account_type == '계정 신규 생성' (기존 유저는 제외).
+    - total_payment_sum 이 정수로 존재 — compute_total_payment_sum은 영수증검증·지급내역이
+      둘 다 정상 조회(정수)됐을 때만 이 값을 채운다. 하나라도 조회 실패면 키가 없으므로
+      여기서 자연히 제외된다("조회했는데 0원"(total==0, 차단 대상)과 "조회 실패"(키 없음, 미진행)를 정확히 분리).
+    - total_payment_sum <= max_total_payment (임계값 이하).
+    """
+    candidates = []
+    seen = set()
+    for row in all_rows:
+        if row.get("account_type") != "계정 신규 생성":
+            continue
+        uuid_value = row["uuid"]
+        if uuid_value in seen:
+            continue
+        total = row.get("total_payment_sum")
+        if not isinstance(total, int):
+            continue  # 영수증검증/지급내역 중 하나라도 조회 실패 → 차단 미진행
+        if total > max_total_payment:
+            continue
+        seen.add(uuid_value)
+        candidates.append(
+            {
+                "uuid": uuid_value,
+                "nickname": row.get("nickname", ""),
+                "total_payment_sum": total,
+            }
+        )
+    return candidates
+
+
+def _annotate_block_status(all_rows, status_by_uuid: dict):
+    for row in all_rows:
+        if row["uuid"] in status_by_uuid:
+            row["block_status"] = status_by_uuid[row["uuid"]]
+
+
+def block_low_payment_new_users(page, all_rows, start_url, project_name, args, project_key) -> dict:
+    """신규 유저 중 총 결제액 임계값 이하 대상을 user_block(+디바이스밴)한다.
+
+    운영 실행이므로 기본은 드라이런(후보만 출력)이고, --block-new-users 지정 시에만 실제 차단한다.
+    각 UUID는 독립 재시도 예산을 갖고, 하나가 실패해도 다음 대상으로 계속 진행한다(배치 격리).
+    user_block/디바이스밴은 '이미 등록됨'을 화면 문구로 정확히 판정하므로 멱등적이라 재시도 가능하다.
+    """
+    candidates = select_block_candidates(all_rows, BLOCK_MAX_TOTAL_PAYMENT)
+
+    print(
+        f"\n[12] 신규 유저 중 총 결제액 {BLOCK_MAX_TOTAL_PAYMENT:,}원 이하 차단 대상 선정 "
+        "(기존 유저·조회 실패 제외)..."
+    )
+    if not candidates:
+        print("    차단 대상 신규 유저가 없습니다.")
+        return {"executed": bool(args.block_new_users), "candidates": [], "results": []}
+
+    print(f"    차단 대상 {len(candidates)}명:")
+    for c in candidates:
+        print(f"      - {c['uuid']} ({c['nickname']}) 총결제 {c['total_payment_sum']:,}원")
+
+    status_by_uuid = {}
+
+    if not args.block_new_users:
+        print(
+            "    [드라이런] --block-new-users 미지정 — 실제 차단은 진행하지 않습니다. "
+            "후보 목록만 출력하고 CSV에는 '차단대상(미실행)'으로 표기합니다."
+        )
+        for c in candidates:
+            status_by_uuid[c["uuid"]] = "차단대상(미실행)"
+        _annotate_block_status(all_rows, status_by_uuid)
+        return {"executed": False, "candidates": candidates, "results": []}
+
+    print(
+        f"    [실행] --block-new-users 지정 — {len(candidates)}명 실제 차단"
+        f"(디바이스밴 {'생략' if args.skip_device_block else '포함'})을 시작합니다."
+    )
+    results = []
+    for idx, c in enumerate(candidates, start=1):
+        uuid_value = c["uuid"]
+        print(f"\n{'=' * 60}")
+        print(f" [{idx}/{len(candidates)}] 차단: {uuid_value} (총결제 {c['total_payment_sum']:,}원)")
+        print("=" * 60)
+
+        attempt_counter = {"count": 0}
+
+        def _run(uuid_value=uuid_value):
+            attempt_counter["count"] += 1
+            if attempt_counter["count"] > 1:
+                print(
+                    f"[재시도 {attempt_counter['count']}/{RETRY_MAX_RETRIES}] "
+                    f"uuid={uuid_value} 차단 절차를 처음부터 다시 시작합니다."
+                )
+            return run_user_block(
+                page=page,
+                uuid_value=uuid_value,
+                reason_text=args.reason,
+                period_days=args.period_days,
+                remove_rank=not args.skip_rank_delete,
+                explicit_project_base="",
+                start_url=start_url,
+                project_name=project_name,
+                project_key=project_key,
+                skip_device_block=args.skip_device_block,
+                device_ban_count=args.device_ban_count,
+            )
+
+        def _recover():
+            prepare_console_project(
+                page=page,
+                explicit_project_base="",
+                start_url=start_url,
+                project_name=project_name,
+            )
+
+        try:
+            summary = retry_with_recovery(
+                action=_run,
+                recovery=_recover,
+                label=f"uuid={uuid_value} 차단 절차 재시도",
+                recovery_desc=f"콘솔 초기화면({start_url})/프로젝트 선택부터 다시 준비합니다.",
+                max_retries=RETRY_MAX_RETRIES,
+            )
+            print(
+                f"    [{uuid_value}] 차단 완료: status={summary['status']}, "
+                f"device={summary['device_block_count']}"
+            )
+            status_by_uuid[uuid_value] = f"차단:{summary['status']}(device={summary['device_block_count']})"
+            results.append({"uuid": uuid_value, "succeeded": True, "summary": summary})
+        except Exception as exc:  # noqa: BLE001 — 한 명 실패가 전체 배치를 막지 않게
+            print(f"    [{uuid_value}] 차단 실패(재시도 소진) — 다음 대상으로 넘어갑니다: {exc}")
+            status_by_uuid[uuid_value] = f"차단실패({exc})"
+            results.append({"uuid": uuid_value, "succeeded": False, "error": str(exc)})
+
+    _annotate_block_status(all_rows, status_by_uuid)
+
+    success_count = sum(1 for r in results if r["succeeded"])
+    fail_count = len(results) - success_count
+    print(f"\n[차단 요약] 성공 {success_count}건 / 실패(스킵) {fail_count}건")
+    for r in results:
+        mark = "성공" if r["succeeded"] else "실패(스킵)"
+        line = f"    [{mark}] {r['uuid']}"
+        if not r["succeeded"]:
+            line += f" — {r.get('error', '')}"
+        print(line)
+
+    return {"executed": True, "candidates": candidates, "results": results}
+
+
 def extract_top_ranks(page, board_name: str) -> list:
     print(f"[9] '{board_name}' 상세에서 {MAX_RANK}위 이내(공동순위 전원) 데이터를 읽습니다.")
     wait_for_leaderboard_rank_rows(page)
@@ -1194,16 +1392,19 @@ def save_csv(rows: list, out_dir: Path) -> Path:
     payment_fields = ["recent_payment_count", "recent_payment_sum"]
     webshop_fields = ["payitem_match_count", "payitem_quantity_total", "payitem_item_value_sum"]
     total_fields = ["total_payment_sum"]
+    block_fields = ["block_status"]
     has_gcp = any(row.get("account_type") for row in rows)
     has_payment = any("recent_payment_sum" in row for row in rows)
     has_webshop = any("payitem_item_value_sum" in row for row in rows)
     has_total = any("total_payment_sum" in row for row in rows)
+    has_block = any("block_status" in row for row in rows)
     fieldnames = (
         base_fields
         + (gcp_fields if has_gcp else [])
         + (payment_fields if has_payment else [])
         + (webshop_fields if has_webshop else [])
         + (total_fields if has_total else [])
+        + (block_fields if has_block else [])
     )
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as file_obj:
         writer = csv.DictWriter(file_obj, fieldnames=fieldnames, extrasaction="ignore")
@@ -1241,9 +1442,13 @@ def main():
         require_project_name=True,
         include_key_file=True,
         include_gcp=True,
+        default_block_reason=DEFAULT_BLOCK_REASON,
+        include_block_reason=True,
         default_leaderboard_keywords=DEFAULT_SEARCH_KEYWORDS,
         include_leaderboard_keywords=True,
     )
+    # 차단 기록 CSV 파일명 접미사 — console_user_block.main()과 동일 규칙(title 우선, 없으면 프로젝트명 정규화).
+    project_key = args.title.strip() if args.title.strip() else re.sub(r"[^\w가-힣]", "_", args.project_name).strip("_")
     keyword_list = [k.strip() for k in args.keywords.split(",") if k.strip()]
     if not keyword_list:
         raise SystemExit("[오류] --keywords 값이 비어 있습니다.")
@@ -1285,11 +1490,19 @@ def main():
     print(f"GCP 조회 : {'활성 (' + args.gcp_project + ' / ' + args.gcp_log + ')' if gcp_ready else '비활성 (--key / --gcp-project / --gcp-log 미지정)'}")
     if args.test_single_board:
         print("테스트   : --test-single-board 활성 — 리더보드 1개만 조회 후 다음 단계로 진행")
+    if args.block_new_users:
+        print(
+            f"차단     : 활성 (실제 차단) — 신규 유저 총결제 {BLOCK_MAX_TOTAL_PAYMENT:,}원 이하, "
+            f"디바이스밴 {'생략' if args.skip_device_block else '포함'}, 사유='{args.reason}'"
+        )
+    else:
+        print(f"차단     : 드라이런 (--block-new-users 미지정) — 후보만 출력, 임계값 {BLOCK_MAX_TOTAL_PAYMENT:,}원 이하")
 
     succeeded = False
     all_rows = []
     skipped_boards = []
     error_message = ""
+    block_had_failures = False
     page = None
 
     with sync_playwright() as playwright:
@@ -1314,6 +1527,20 @@ def main():
                 timeout_error=_timeout_error,
                 single_board_test=args.test_single_board,
             )
+
+            # 조회 완료 후: 신규 유저 중 총결제 임계값 이하 대상 차단(운영 실행) 또는 후보 출력(드라이런).
+            block_outcome = block_low_payment_new_users(
+                page=page,
+                all_rows=all_rows,
+                start_url=args.start_url,
+                project_name=args.project_name,
+                args=args,
+                project_key=project_key,
+            )
+            block_had_failures = block_outcome["executed"] and any(
+                not r["succeeded"] for r in block_outcome["results"]
+            )
+
             save_csv(all_rows, LEADERBOARD_OUT_DIR)
 
             board_count = len(set(row["leaderboard"] for row in all_rows))
@@ -1352,8 +1579,9 @@ def main():
 
     if not succeeded:
         sys.exit(1)
-    if skipped_boards:
-        # 실행 자체는 완료됐지만 일부 리더보드가 스킵됐다는 사실을 종료 코드로 숨기지 않는다.
+    if skipped_boards or block_had_failures:
+        # 실행 자체는 완료됐지만 일부 리더보드 스킵 또는 일부 차단 실패가 있었다는 사실을
+        # 종료 코드로 숨기지 않는다.
         sys.exit(2)
 
 
