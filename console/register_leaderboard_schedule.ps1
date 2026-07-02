@@ -81,5 +81,5 @@ try {
 }
 finally {
     # 창이 뜨자마자 바로 닫혀 결과(성공/오류 메시지)를 못 보는 것을 막기 위해 잠깐 유지한다.
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 10
 }
