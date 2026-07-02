@@ -220,6 +220,7 @@ def click_search_button(page):
     record_step_dump(page, "receipt_search_submit_pre", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
     search_button.click()
     safe_wait_for_load(page, "networkidle", 5_000)
+    _wait_grid_not_loading(page)
 
 
 
@@ -404,6 +405,7 @@ def _verify_receipt_rows_match_uuid(rows: list[dict], expected_uuid: str) -> Non
 
 def collect_result(page, uuid_value, timeout_error, ensure_rows_per_page=True):
     print("[7] 영수증 검증 결과를 수집합니다.")
+    _wait_grid_not_loading(page)
 
     no_result_locator = page.locator("text=검색 결과가 없습니다.").first
     row_locator = page.locator("div.MuiDataGrid-row")
