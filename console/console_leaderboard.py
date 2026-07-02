@@ -805,7 +805,10 @@ def enrich_new_users_with_payments(page, all_rows, start_url, project_name, time
         # 세션이 초기화된 상태에서 UUID 하나가 실패해도, 다음 시도가 여전히 초기화된
         # 것으로 착각해 fill_uuid_search를 바로 재시도하지 않도록 초기화 플래그를
         # 되돌리고 콘솔 초기화면부터 다시 준비한다(prepare_console_project 재사용).
+        # rows_per_page_applied도 함께 되돌린다 — 메뉴를 새로 열면 페이지 크기가 기본값으로
+        # 돌아가므로, 재시도 첫 검색은 첫 번째 검색처럼 다시 100개씩 보기를 선택해야 한다.
         receipt_session["initialized"] = False
+        receipt_session["rows_per_page_applied"] = False
         prepare_console_project(
             page=page,
             explicit_project_base="",
@@ -856,13 +859,17 @@ def enrich_new_users_with_webshop_history(page, all_rows, start_url, project_nam
     summary_by_uuid = {}
     webshop_session = {
         "initialized": False,
+        "rows_per_page_applied": False,
     }
 
     def _recover_webshop_session():
         # 세션이 초기화된 상태에서 UUID 하나가 실패해도, 다음 시도가 여전히 초기화된
         # 것으로 착각해 fill_webshop_uuid_search를 바로 재시도하지 않도록 초기화 플래그를
         # 되돌리고 콘솔 초기화면부터 다시 준비한다(prepare_console_project 재사용).
+        # rows_per_page_applied도 함께 되돌린다 — 메뉴를 새로 열면 페이지 크기가 기본값으로
+        # 돌아가므로, 재시도 첫 검색은 첫 번째 검색처럼 다시 100개씩 보기를 선택해야 한다.
         webshop_session["initialized"] = False
+        webshop_session["rows_per_page_applied"] = False
         prepare_console_project(
             page=page,
             explicit_project_base="",

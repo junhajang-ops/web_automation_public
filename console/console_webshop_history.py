@@ -308,18 +308,25 @@ def _collect_current_webshop_page_rows(page) -> list:
     return list(collected.values())
 
 
-def collect_all_webshop_rows(page) -> list:
+def collect_all_webshop_rows(page, ensure_rows_per_page=True) -> list:
     no_result_locator = page.get_by_text("검색 결과가 없습니다.", exact=False).first
     row_locator = page.locator("div.MuiDataGrid-row")
     _wait_webshop_grid_not_loading(page)
-    if wait_for_visible(no_result_locator, 3_000):
-        return []
-    if not wait_for_visible(row_locator.first, 8_000):
+
+    def _no_result_or_rows():
+        if no_result_locator.is_visible():
+            return "no_result"
+        if row_locator.first.is_visible():
+            return "rows"
+        return None
+
+    if wait_until(page, _no_result_or_rows, timeout_ms=8_000) != "rows":
         return []
 
-    # 영수증 검증과 동일하게, 기본 페이지 크기를 넘는 행이 누락되지 않도록 먼저 100개씩 보기로 전환한다.
-    set_rows_per_page(page, 100)
-    page.wait_for_timeout(POLL_WAIT_MS)
+    if ensure_rows_per_page:
+        # 영수증 검증과 동일하게, 기본 페이지 크기를 넘는 행이 누락되지 않도록 먼저 100개씩 보기로 전환한다.
+        set_rows_per_page(page, 100)
+        page.wait_for_timeout(POLL_WAIT_MS)
 
     return _collect_current_webshop_page_rows(page)
 
@@ -366,7 +373,9 @@ def summarize_payitem_history(
     fill_webshop_uuid_search(page, uuid_value)
     click_webshop_search_button(page)
     step_and_verify_ui(page, "webshop_history_results", ignore_patterns=WEBSHOP_HISTORY_GRID_IGNORE_PATTERNS)
-    rows = collect_all_webshop_rows(page)
+    rows = collect_all_webshop_rows(page, ensure_rows_per_page=not session.get("rows_per_page_applied", False))
+    if rows:
+        session["rows_per_page_applied"] = True
 
     matched_rows = 0
     quantity_total = 0
