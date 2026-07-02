@@ -89,7 +89,7 @@ ACCOUNT_NEW_HOURS = int(os.environ.get("ACCOUNT_NEW_HOURS", "240"))  # 계정 �
 RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계 대상 건수
 GCP_QUERY_MAX_RETRIES = max(1, int(os.environ.get("GCP_QUERY_MAX_RETRIES", "10")))
 GCP_QUERY_RETRY_WAIT_MS = max(0, int(os.environ.get("GCP_QUERY_RETRY_WAIT_MS", "1000")))
-LEADERBOARD_ENTER_MAX_RETRIES = max(1, int(os.environ.get("LEADERBOARD_ENTER_MAX_RETRIES", "3")))
+RETRY_MAX_RETRIES = max(1, int(os.environ.get("RETRY_MAX_RETRIES", "3")))  # console_user_block.py와 공용 env
 LEADERBOARD_NAV_MAX_RETRIES = max(1, int(os.environ.get("LEADERBOARD_NAV_MAX_RETRIES", "3")))
 RANK_COL_WIDTH = 4
 UUID_COL_WIDTH = 36
@@ -390,16 +390,16 @@ def enter_leaderboard_detail(page, board_name: str):
 def enter_leaderboard_detail_with_retry(page, keyword: str, board_name: str):
     """진입 확인 실패 시 목록 화면을 다시 열고 재클릭 — 클릭이 씹혀 화면 전환이 안 되는 경우 대응."""
     last_exc = None
-    for attempt in range(1, LEADERBOARD_ENTER_MAX_RETRIES + 1):
+    for attempt in range(1, RETRY_MAX_RETRIES + 1):
         try:
             enter_leaderboard_detail(page, board_name)
             return
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
-            if attempt >= LEADERBOARD_ENTER_MAX_RETRIES:
+            if attempt >= RETRY_MAX_RETRIES:
                 break
             print(
-                f"    [진입 재시도] '{board_name}' {attempt}/{LEADERBOARD_ENTER_MAX_RETRIES} 실패: {exc} "
+                f"    [진입 재시도] '{board_name}' {attempt}/{RETRY_MAX_RETRIES} 실패: {exc} "
                 f"-> 목록을 다시 열고 재시도합니다."
             )
             open_leaderboard_list_and_search_with_retry(page, keyword, nav_context="return")

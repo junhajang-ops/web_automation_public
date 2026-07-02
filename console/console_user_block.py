@@ -13,6 +13,7 @@ Warning:
 import argparse
 import csv
 import datetime
+import os
 import sys
 from pathlib import Path
 
@@ -43,7 +44,8 @@ DEFAULT_PROJECT_NAME = "\ud5cc\ud130 \ud0a4\uc6b0\uae30"
 DEFAULT_BLOCK_REASON = "UserBlock/Permanent_DataHack_Desc"
 DEFAULT_BLOCK_PERIOD_DAYS = 9999
 DEFAULT_DEVICE_BAN_COUNT = 3
-DEFAULT_RETRIES = 3
+# console_leaderboard.py의 진입 재시도(RETRY_MAX_RETRIES)와 동일한 env로 공용 관리.
+DEFAULT_RETRIES = max(1, int(os.environ.get("RETRY_MAX_RETRIES", "3")))
 RETRY_BACKOFF_MS = 2_000
 
 TEXT_USER_ACCESS = "\uc720\uc800 \uc811\uadfc"
@@ -130,7 +132,7 @@ def parse_args():
         default=DEFAULT_RETRIES,
         help=(
             "페이지 로딩 실패 등 개별 오류 발생 시, 유저/디바이스 차단 절차 전체를 "
-            f"처음부터 다시 시도할 최대 횟수 (default: {DEFAULT_RETRIES})"
+            f"처음부터 다시 시도할 최대 횟수 (default: {DEFAULT_RETRIES}, env RETRY_MAX_RETRIES로 재정의 가능)"
         ),
     )
     return parser.parse_args()
