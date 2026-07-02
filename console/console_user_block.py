@@ -476,40 +476,47 @@ def confirm_result_popup(page) -> str:
     return status
 
 
-def confirm_device_result_popup(page) -> str:
-    """디바이스 차단 결과 팝업을 처리하고 상태 문자열을 반환한다.
+def confirm_device_result_popup(page, dialog) -> str:
+    """디바이스 차단 결과를 판정하고 처리한다.
+
+    실측 결과(run_device_block 참고): 성공 시에는 별도 "결과" 팝업이 뜨지 않고
+    '접근 차단 등록' 다이얼로그 자체가 자동으로 닫힌다. '이미 등록된 디바이스입니다'
+    안내만 별도의 '안내' 팝업으로 뜨며, 이 팝업을 확인해도 등록 다이얼로그는 열린 채
+    유지된다. 유저 차단 흐름(confirm_result_popup)과 달리 "성공" 전용 결과 다이얼로그는
+    존재하지 않으므로 기다리지 않는다.
 
     Returns:
-        "success"         — 차단 등록 성공
-        "already_blocked" — 이미 등록된 디바이스
+        "success"         — 차단 등록 성공(등록 다이얼로그가 자동으로 닫힘)
+        "already_blocked" — 이미 등록된 디바이스(안내 팝업 확인)
     """
-    def _any_result_dialog():
-        for title, status in [
-            (TEXT_RESULT_DIALOG, "success"),
-            (TEXT_ALREADY_BLOCKED_DIALOG, "already_blocked"),
-        ]:
-            dlg = get_visible_dialog_by_title(page, title)
-            try:
-                if dlg.is_visible():
-                    return (status, dlg)
-            except Exception:
-                pass
+    def _outcome():
+        already_dialog = get_visible_dialog_by_title(page, TEXT_ALREADY_BLOCKED_DIALOG)
+        try:
+            if already_dialog.is_visible():
+                return ("already_blocked", already_dialog)
+        except Exception:
+            pass
+        try:
+            if not dialog.is_visible():
+                return ("success", None)
+        except Exception:
+            return ("success", None)
         return None
 
-    result = wait_until(page, _any_result_dialog, timeout_ms=15_000, wait_ms=1_000)
+    result = wait_until(page, _outcome, timeout_ms=15_000, wait_ms=1_000)
     if result is None:
-        raise RuntimeError("디바이스 차단 결과 팝업(성공/이미등록)이 나타나지 않았습니다.")
+        raise RuntimeError("디바이스 차단 결과(성공/이미등록)를 확인하지 못했습니다.")
 
-    status, dialog = result
+    status, popup = result
 
     if status == "success":
-        print(f"[D6] 디바이스 차단 등록 성공. '{TEXT_CONFIRM}'을 누릅니다.")
-        dialog.locator(f"text={TEXT_RESULT_SUCCESS}").first.wait_for(state="visible", timeout=5_000)
-    else:
-        print(f"[D6] 이미 차단된 디바이스입니다. '{TEXT_CONFIRM}'을 누릅니다.")
-        dialog.locator(f"text={TEXT_ALREADY_BLOCKED_DEVICE_MSG}").first.wait_for(state="visible", timeout=5_000)
+        print("[D6] 디바이스 차단 등록 성공(등록 다이얼로그가 자동으로 닫힘).")
+        return status
 
-    confirm_button = dialog.get_by_role("button", name=TEXT_CONFIRM, exact=True).first
+    print(f"[D6] 이미 차단된 디바이스입니다. '{TEXT_CONFIRM}'을 누릅니다.")
+    popup.locator(f"text={TEXT_ALREADY_BLOCKED_DEVICE_MSG}").first.wait_for(state="visible", timeout=5_000)
+
+    confirm_button = popup.get_by_role("button", name=TEXT_CONFIRM, exact=True).first
     confirm_button.wait_for(state="visible", timeout=10_000)
     confirm_button.scroll_into_view_if_needed()
     record_step_dump(page, "device_block_result_confirm_pre")
@@ -517,14 +524,14 @@ def confirm_device_result_popup(page) -> str:
 
     def _result_closed():
         try:
-            if not dialog.is_visible():
+            if not popup.is_visible():
                 return True
         except Exception:
             return True
         return None
 
     if not wait_until(page, _result_closed, timeout_ms=15_000, wait_ms=1_000):
-        raise RuntimeError("디바이스 차단 결과 팝업이 닫히는 것을 확인하지 못했습니다.")
+        raise RuntimeError("이미등록 안내 팝업이 닫히는 것을 확인하지 못했습니다.")
 
     return status
 
@@ -609,7 +616,7 @@ def run_device_block(
         dropdown_open = False  # 옵션 선택 시 드롭다운은 자동으로 닫힌다.
         fill_block_reason(page, dialog, reason_text, step_name="device_block_reason_fill_pre")
         submit_block_registration(page, dialog, step_name="device_block_submit_pre")
-        status = confirm_device_result_popup(page)
+        status = confirm_device_result_popup(page, dialog)
         save_device_ban_history(uuid_value, device_id, reason_text, status, project_key)
         results.append({"uuid": uuid_value, "device_id": device_id, "status": status})
 
