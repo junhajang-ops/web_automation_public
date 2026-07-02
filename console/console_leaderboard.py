@@ -92,6 +92,7 @@ RANK_COL_WIDTH = 4
 UUID_COL_WIDTH = 36
 NICKNAME_COL_WIDTH = 24
 ACCOUNT_TYPE_COL_WIDTH = 16
+CREATE_DATE_COL_WIDTH = 26
 LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS = [
     r"button: .*FALLBACK\|type=button$",
     r"button: 한국어\|type=button$",
@@ -859,13 +860,14 @@ def extract_top_ranks(page, board_name: str) -> list:
     return results
 
 
-def _format_board_row(rank, uuid_value, nickname, account_type) -> str:
+def _format_board_row(rank, uuid_value, nickname, account_type, create_date) -> str:
     return "  ".join(
         [
             pad_display(rank, RANK_COL_WIDTH, align="right"),
             pad_display(uuid_value, UUID_COL_WIDTH),
             pad_display(nickname, NICKNAME_COL_WIDTH),
             pad_display(account_type, ACCOUNT_TYPE_COL_WIDTH),
+            pad_display(create_date, CREATE_DATE_COL_WIDTH),
         ]
     )
 
@@ -930,6 +932,7 @@ def run(
                     "UUID",
                     "닉네임",
                     "계정상태",
+                    "계정생성일",
                 )
             )
             print(
@@ -940,6 +943,7 @@ def run(
                         "-" * UUID_COL_WIDTH,
                         "-" * NICKNAME_COL_WIDTH,
                         "-" * ACCOUNT_TYPE_COL_WIDTH,
+                        "-" * CREATE_DATE_COL_WIDTH,
                     ]
                 )
             )
@@ -951,6 +955,7 @@ def run(
                         r["uuid"],
                         r["nickname"],
                         r.get("account_type", ""),
+                        r.get("create_account_date", ""),
                     )
                 )
             all_rows.extend(board_rows)
