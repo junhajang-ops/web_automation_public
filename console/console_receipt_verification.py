@@ -69,6 +69,10 @@ RECEIPT_FIELDS = [
     ("price",              "금액"),
     ("status",             "상태"),
 ]
+RECEIPT_GAMER_ID_LABEL = next(
+    (label for field, label in RECEIPT_FIELDS if field == "gamerId"),
+    "gamerId",
+)
 
 
 def parse_args():
@@ -183,6 +187,19 @@ def _wait_grid_not_loading(page, timeout_ms: int = 10_000):
     wait_until(page, _not_loading, timeout_ms=timeout_ms, wait_ms=POLL_WAIT_MS)
 
 
+def _normalize_uuid(value: str) -> str:
+    return (value or "").strip().lower()
+
+
+def _verify_uuid_input_value(uuid_input, expected_uuid: str) -> None:
+    actual_value = uuid_input.input_value().strip()
+    if _normalize_uuid(actual_value) == _normalize_uuid(expected_uuid):
+        return
+    raise RuntimeError(
+        f"UUID input mismatch: expected='{expected_uuid}', actual='{actual_value}'"
+    )
+
+
 def fill_uuid_search(page, uuid_value):
     print(f"[5] UUID 입력창(name='searchValue')에 값을 입력합니다: {uuid_value}")
     uuid_input = page.locator("input#searchValue").first
@@ -192,6 +209,7 @@ def fill_uuid_search(page, uuid_value):
     record_step_dump(page, "receipt_uuid_input_pre", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
     uuid_input.fill("")
     uuid_input.fill(uuid_value)
+    _verify_uuid_input_value(uuid_input, uuid_value)
 
 
 def click_search_button(page):
@@ -351,6 +369,39 @@ def collect_all_receipt_rows(page):
     return list(collected.values())
 
 
+def _verify_receipt_rows_match_uuid(rows: list[dict], expected_uuid: str) -> None:
+    expected_normalized = _normalize_uuid(expected_uuid)
+    mismatches = []
+
+    for row_index, row_data in enumerate(rows, start=1):
+        actual_uuid = str(row_data.get(RECEIPT_GAMER_ID_LABEL, "")).strip()
+        if _normalize_uuid(actual_uuid) == expected_normalized:
+            continue
+        mismatches.append(
+            {
+                "row_index": row_index,
+                "actual_uuid": actual_uuid,
+                "order_id": str(row_data.get("二쇰Ц ID", "")).strip(),
+                "row_no": str(row_data.get("踰덊샇", "")).strip(),
+            }
+        )
+
+    if not mismatches:
+        return
+
+    samples = ", ".join(
+        (
+            f"row {item['row_index']}[no={item['row_no']}, "
+            f"orderId='{item['order_id']}', uuid='{item['actual_uuid']}']"
+        )
+        for item in mismatches[:3]
+    )
+    raise RuntimeError(
+        f"Receipt result UUID mismatch for '{expected_uuid}': "
+        f"{len(mismatches)} row(s) differ. {samples}"
+    )
+
+
 def collect_result(page, uuid_value, timeout_error, ensure_rows_per_page=True):
     print("[7] 영수증 검증 결과를 수집합니다.")
 
@@ -372,6 +423,7 @@ def collect_result(page, uuid_value, timeout_error, ensure_rows_per_page=True):
         page.wait_for_timeout(POLL_WAIT_MS)
 
     rows = collect_all_receipt_rows(page)
+    _verify_receipt_rows_match_uuid(rows, uuid_value)
     row_count = len(rows)
     print(f"    결과 {row_count}건 수집.")
 
