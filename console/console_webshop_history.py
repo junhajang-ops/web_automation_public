@@ -155,6 +155,44 @@ def click_webshop_search_button(page):
     _wait_webshop_grid_not_loading(page)
 
 
+def set_rows_per_page(page, count: int = 100):
+    print(f"[6-1] 페이지당 행 수를 {count}개로 변경합니다.")
+    target_text = f"{count}개씩 보기"
+    trigger = page.locator(".MuiTablePagination-select[role='combobox']").first
+    if not wait_for_visible(trigger, 5_000):
+        print("    (페이지 크기 드롭다운 없음 — 건너뜁니다.)")
+        return
+    current_text = trigger.inner_text().strip()
+    if current_text == target_text:
+        print("    (already selected)")
+        return
+    trigger.scroll_into_view_if_needed()
+    record_step_dump(page, "webshop_history_rows_dd_pre")
+    trigger.click()
+
+    listbox = page.locator("ul[role='listbox']").first
+    listbox.wait_for(state="visible", timeout=10_000)
+    option = find_exact_text_match(listbox.locator("li[role='option']"), target_text)
+    if option is None:
+        raise RuntimeError(f"지급 내역 표시 개수에서 '{target_text}' 옵션을 찾지 못했습니다.")
+    option.wait_for(state="visible", timeout=5_000)
+    record_step_dump(page, "webshop_history_rows_option_pre")
+    option.click()
+    safe_wait_for_load(page, "networkidle", 5_000)
+
+    def _rows_per_page_applied():
+        if trigger.inner_text().strip() == target_text:
+            return True
+        return None
+
+    if wait_until(page, _rows_per_page_applied, timeout_ms=10_000, wait_ms=POLL_WAIT_MS):
+        return
+
+    raise RuntimeError(
+        f"지급 내역 표시 개수 전환 결과가 기대와 다릅니다: expected='{target_text}', actual='{trigger.inner_text().strip()}'"
+    )
+
+
 def _read_grid_field(row, field_name: str) -> str:
     try:
         title_node = row.locator(f"[data-field='{field_name}'] [title]").first
@@ -267,6 +305,10 @@ def collect_all_webshop_rows(page) -> list:
         return []
     if not wait_for_visible(row_locator.first, 8_000):
         return []
+
+    # 영수증 검증과 동일하게, 기본 페이지 크기를 넘는 행이 누락되지 않도록 먼저 100개씩 보기로 전환한다.
+    set_rows_per_page(page, 100)
+    page.wait_for_timeout(POLL_WAIT_MS)
 
     return _collect_current_webshop_page_rows(page)
 
