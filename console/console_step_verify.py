@@ -330,6 +330,11 @@ def _diff_fingerprints(prev: dict, curr: dict) -> list[str]:
         if item["name"]:
             if re.match(r"^dataSet\.\d+\.dataValue$", item["name"]):
                 return f"{item['type']}|name=dataSet.*.dataValue"
+            if re.match(r"^:[a-z0-9]+:$", item["name"]):
+                # React useId() 등이 렌더될 때마다 재발급하는 동적 id. 콘솔 콘솔 전반에서
+                # radio/label 그룹 name으로 흔히 쓰여, 실제 구조 변경이 아닌데도 매번 다른
+                # 값이 되어 오탐을 유발한다. id 폴백 경로와 동일한 패턴으로 정규화한다.
+                return f"{item['type']}|name=:react-id:"
             return f"{item['type']}|name={item['name']}"
         stable_id = item["id"] if item["id"] and not re.match(r"^:[a-z0-9]+:$", item["id"]) else ""
         return f"{item['type']}|id={stable_id}"
