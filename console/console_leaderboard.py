@@ -319,11 +319,14 @@ def open_leaderboard_list_and_search(page, keyword: str, nav_context: str = "ini
     set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows", container=list_footer)
 
 
-def open_leaderboard_list_and_search_with_retry(page, keyword: str, nav_context: str = "initial"):
-    """목록 진입+검색 실패 시 로그인 상태를 재확인하고 재시도한다.
+def open_leaderboard_list_and_search_with_retry(page, keyword: str, start_url: str, project_name: str, nav_context: str = "initial"):
+    """목록 진입+검색 실패 시 콘솔 초기화면(start_url)으로 재접속해 재시도한다.
 
-    세션 자동 로그아웃으로 사이드 메뉴 클릭 후 로그인 화면으로 튕겨 화면 전환이
-    확인되지 않는 경우(검색창이 끝내 나타나지 않아 타임아웃)를 대응.
+    세션 자동 로그아웃뿐 아니라, 이전 동작에서 남은 MUI 메뉴/드롭다운의 보이지 않는
+    backdrop이 클릭을 가로막아 사이드바 진입 자체가 반복 실패하는 경우도 있다
+    (실측: is_login_page는 False인데도 클릭이 계속 막힘). 로그인 여부만 확인해서는
+    이 상태를 벗어나지 못하므로, 기존에 쓰던 start_url로 재접속해 화면을 완전히
+    리셋하고 프로젝트를 메뉴로 다시 선택한다(prepare_console_project 재사용).
     """
     last_exc = None
     for attempt in range(1, LEADERBOARD_NAV_MAX_RETRIES + 1):
@@ -336,9 +339,14 @@ def open_leaderboard_list_and_search_with_retry(page, keyword: str, nav_context:
                 break
             print(
                 f"    [목록 진입 재시도] {attempt}/{LEADERBOARD_NAV_MAX_RETRIES} 실패: {exc} "
-                f"-> 로그인 상태 확인 후 재시도합니다."
+                f"-> 콘솔 초기화면({start_url})으로 재접속 후 재시도합니다."
             )
-            click_login_if_needed(page)
+            prepare_console_project(
+                page=page,
+                explicit_project_base="",
+                start_url=start_url,
+                project_name=project_name,
+            )
 
     raise last_exc
 
@@ -387,7 +395,7 @@ def enter_leaderboard_detail(page, board_name: str):
     raise RuntimeError(f"'{board_name}' 상세 페이지 진입을 확인하지 못했습니다.")
 
 
-def enter_leaderboard_detail_with_retry(page, keyword: str, board_name: str):
+def enter_leaderboard_detail_with_retry(page, keyword: str, board_name: str, start_url: str, project_name: str):
     """진입 확인 실패 시 목록 화면을 다시 열고 재클릭 — 클릭이 씹혀 화면 전환이 안 되는 경우 대응."""
     last_exc = None
     for attempt in range(1, RETRY_MAX_RETRIES + 1):
@@ -402,7 +410,9 @@ def enter_leaderboard_detail_with_retry(page, keyword: str, board_name: str):
                 f"    [진입 재시도] '{board_name}' {attempt}/{RETRY_MAX_RETRIES} 실패: {exc} "
                 f"-> 목록을 다시 열고 재시도합니다."
             )
-            open_leaderboard_list_and_search_with_retry(page, keyword, nav_context="return")
+            open_leaderboard_list_and_search_with_retry(
+                page, keyword, start_url, project_name, nav_context="return"
+            )
 
     raise last_exc
 
@@ -953,11 +963,11 @@ def run(
     for keyword in keywords:
         print(f"\n=== 검색어 '{keyword}' ===")
         if is_first_open:
-            open_leaderboard_list_and_search_with_retry(page, keyword, nav_context="initial")
+            open_leaderboard_list_and_search_with_retry(page, keyword, start_url, project_name, nav_context="initial")
             is_first_open = False
         else:
             print(f"[7-retry] 다음 검색어('{keyword}')를 위해 목록 화면을 다시 엽니다.")
-            open_leaderboard_list_and_search_with_retry(page, keyword, nav_context="return")
+            open_leaderboard_list_and_search_with_retry(page, keyword, start_url, project_name, nav_context="return")
 
         board_names = collect_visible_board_names(page, keyword)
         if not board_names:
@@ -968,9 +978,9 @@ def run(
             try:
                 if index > 0:
                     print("[7-retry] 다음 리더보드를 위해 목록 화면을 다시 엽니다.")
-                    open_leaderboard_list_and_search_with_retry(page, keyword, nav_context="return")
+                    open_leaderboard_list_and_search_with_retry(page, keyword, start_url, project_name, nav_context="return")
 
-                enter_leaderboard_detail_with_retry(page, keyword, board_name)
+                enter_leaderboard_detail_with_retry(page, keyword, board_name, start_url, project_name)
                 set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
                 board_rows = extract_top_ranks(page, board_name)
 
