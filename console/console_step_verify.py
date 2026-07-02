@@ -257,6 +257,29 @@ def wait_until(page, predicate, timeout_ms: int = 10_000, wait_ms: int = POLL_IN
         page.wait_for_timeout(wait_ms)
 
 
+def retry_with_recovery(action, recovery, label: str, recovery_desc: str, max_retries: int):
+    """action()을 최대 max_retries회 시도한다. 실패마다 recovery()를 호출한 뒤 재시도하고,
+
+    마지막 시도까지 실패하면 마지막 예외를 그대로 올린다(재시도 소진 후 이 대상을
+    스킵할지 최종 실패로 볼지는 이 함수가 아니라 호출자/상위 배치 계층이 결정한다 —
+    검증은 fail-fast로 끝내고 재시도 정책은 상위에 위임하는 공용 원칙에 따른 것).
+    action()의 반환값을 그대로 돌려준다. label/recovery_desc는 실패 시 출력할
+    로그 문구("    [{label}] N/max 실패: 에러 -> {recovery_desc}")에 쓰인다.
+    """
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return action()
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt >= max_retries:
+                break
+            print(f"    [{label}] {attempt}/{max_retries} 실패: {exc} -> {recovery_desc}")
+            recovery()
+
+    raise last_exc
+
+
 def init_dump_dir(path: Path) -> None:
     _dump_dir[0] = path
     path.mkdir(parents=True, exist_ok=True)
