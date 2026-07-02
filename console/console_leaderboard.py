@@ -90,6 +90,7 @@ RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계
 GCP_QUERY_MAX_RETRIES = max(1, int(os.environ.get("GCP_QUERY_MAX_RETRIES", "10")))
 GCP_QUERY_RETRY_WAIT_MS = max(0, int(os.environ.get("GCP_QUERY_RETRY_WAIT_MS", "1000")))
 LEADERBOARD_ENTER_MAX_RETRIES = max(1, int(os.environ.get("LEADERBOARD_ENTER_MAX_RETRIES", "3")))
+LEADERBOARD_NAV_MAX_RETRIES = max(1, int(os.environ.get("LEADERBOARD_NAV_MAX_RETRIES", "3")))
 RANK_COL_WIDTH = 4
 UUID_COL_WIDTH = 36
 ACCOUNT_TYPE_COL_WIDTH = 16  # 계정상태 고정폭 — 조회실패(...) 예외 메시지는 이 폭에서 말줄임 처리됨
@@ -318,6 +319,30 @@ def open_leaderboard_list_and_search(page, keyword: str, nav_context: str = "ini
     set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows", container=list_footer)
 
 
+def open_leaderboard_list_and_search_with_retry(page, keyword: str, nav_context: str = "initial"):
+    """목록 진입+검색 실패 시 로그인 상태를 재확인하고 재시도한다.
+
+    세션 자동 로그아웃으로 사이드 메뉴 클릭 후 로그인 화면으로 튕겨 화면 전환이
+    확인되지 않는 경우(검색창이 끝내 나타나지 않아 타임아웃)를 대응.
+    """
+    last_exc = None
+    for attempt in range(1, LEADERBOARD_NAV_MAX_RETRIES + 1):
+        try:
+            open_leaderboard_list_and_search(page, keyword, nav_context=nav_context)
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt >= LEADERBOARD_NAV_MAX_RETRIES:
+                break
+            print(
+                f"    [목록 진입 재시도] {attempt}/{LEADERBOARD_NAV_MAX_RETRIES} 실패: {exc} "
+                f"-> 로그인 상태 확인 후 재시도합니다."
+            )
+            click_login_if_needed(page)
+
+    raise last_exc
+
+
 def _click_board_from_list(page, board_name: str):
     rows = get_data_rows(page)
     row = rows.filter(has_text=board_name).first
@@ -377,7 +402,7 @@ def enter_leaderboard_detail_with_retry(page, keyword: str, board_name: str):
                 f"    [진입 재시도] '{board_name}' {attempt}/{LEADERBOARD_ENTER_MAX_RETRIES} 실패: {exc} "
                 f"-> 목록을 다시 열고 재시도합니다."
             )
-            open_leaderboard_list_and_search(page, keyword, nav_context="return")
+            open_leaderboard_list_and_search_with_retry(page, keyword, nav_context="return")
 
     raise last_exc
 
@@ -928,11 +953,11 @@ def run(
     for keyword in keywords:
         print(f"\n=== 검색어 '{keyword}' ===")
         if is_first_open:
-            open_leaderboard_list_and_search(page, keyword, nav_context="initial")
+            open_leaderboard_list_and_search_with_retry(page, keyword, nav_context="initial")
             is_first_open = False
         else:
             print(f"[7-retry] 다음 검색어('{keyword}')를 위해 목록 화면을 다시 엽니다.")
-            open_leaderboard_list_and_search(page, keyword, nav_context="return")
+            open_leaderboard_list_and_search_with_retry(page, keyword, nav_context="return")
 
         board_names = collect_visible_board_names(page, keyword)
         if not board_names:
@@ -940,11 +965,11 @@ def run(
             continue
 
         for index, board_name in enumerate(board_names):
-            if index > 0:
-                print("[7-retry] 다음 리더보드를 위해 목록 화면을 다시 엽니다.")
-                open_leaderboard_list_and_search(page, keyword, nav_context="return")
-
             try:
+                if index > 0:
+                    print("[7-retry] 다음 리더보드를 위해 목록 화면을 다시 엽니다.")
+                    open_leaderboard_list_and_search_with_retry(page, keyword, nav_context="return")
+
                 enter_leaderboard_detail_with_retry(page, keyword, board_name)
                 set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
                 board_rows = extract_top_ranks(page, board_name)
