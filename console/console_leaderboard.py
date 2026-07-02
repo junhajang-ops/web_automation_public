@@ -97,7 +97,10 @@ UUID_COL_WIDTH = 36
 ACCOUNT_TYPE_COL_WIDTH = 16  # 계정상태 고정폭 — 조회실패(...) 예외 메시지는 이 폭에서 말줄임 처리됨
 NICKNAME_HEADER = "닉네임"
 CREATE_DATE_HEADER = "계정생성일"
-LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS = [
+# 리더보드 목록/상세 화면 공통: 보상 우편 제목 위젯(FALLBACK/한국어 탭 포함 여부)이
+# 화면 조작과 무관하게 비동기로 깜빡이며 구조 지문을 오탐시킨다. 여러 화면/단계에서
+# 재사용하므로 화면 국소가 아닌 위젯 단위 이름으로 둔다.
+LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS = [
     r"button: .*FALLBACK\|type=button$",
     r"button: 한국어\|type=button$",
     r"role: tabpanel$",
@@ -177,7 +180,7 @@ def open_leaderboard_page(page, nav_context: str = "initial"):
     link.wait_for(state="visible", timeout=15_000)
     link.scroll_into_view_if_needed()
     ignore_patterns = (
-        LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS
+        LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS
         if nav_context in ("return", "board_loop")
         else None
     )
@@ -261,7 +264,7 @@ def get_rows_per_page_dropdown(page, container=None, timeout_ms: int = 10_000):
     return dropdown
 
 
-def set_rows_per_page(page, target: int, label: str, verify_prefix: str = "", container=None):
+def set_rows_per_page(page, target: int, label: str, verify_prefix: str = "", container=None, ignore_patterns=None):
     target_text = f"{target}개씩 보기"
     print(f"    {label}: {target_text}로 변경합니다.")
 
@@ -277,7 +280,11 @@ def set_rows_per_page(page, target: int, label: str, verify_prefix: str = "", co
             if current_text == target_text:
                 print("    이미 설정되어 있습니다.")
                 return
-            record_step_dump(page, name=f"{verify_prefix}_dropdown_pre" if verify_prefix else "rows_dropdown_pre")
+            record_step_dump(
+                page,
+                name=f"{verify_prefix}_dropdown_pre" if verify_prefix else "rows_dropdown_pre",
+                ignore_patterns=ignore_patterns,
+            )
             dropdown.click()
             if (dropdown.get_attribute("aria-expanded") or "").lower() != "true":
                 continue
@@ -293,7 +300,11 @@ def set_rows_per_page(page, target: int, label: str, verify_prefix: str = "", co
     if not opened:
         raise RuntimeError(f"{label} 드롭다운을 열지 못했습니다.")
 
-    record_step_dump(page, name=f"{verify_prefix}_option_pre" if verify_prefix else "rows_option_pre")
+    record_step_dump(
+        page,
+        name=f"{verify_prefix}_option_pre" if verify_prefix else "rows_option_pre",
+        ignore_patterns=ignore_patterns,
+    )
     option.click()
     safe_wait_for_load(page, "networkidle", 5_000)
 
@@ -982,7 +993,13 @@ def run(
                 # 키워드 전환용 "return"(직전 화면=목록 페이지)과는 실제 화면이 달라 지문 이름을 분리한다.
                 open_leaderboard_list_and_search(page, keyword, nav_context="board_loop")
                 enter_leaderboard_detail(page, board_name)
-                set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix="detail_rows")
+                set_rows_per_page(
+                    page,
+                    DETAIL_ROWS_PER_PAGE,
+                    "리더보드 상세 표시 개수",
+                    verify_prefix="detail_rows",
+                    ignore_patterns=LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS,
+                )
                 board_rows = extract_top_ranks(page, board_name)
                 # 각 보드 추출 직후 GCP 최근 로그(종류 무관)로 계정 생성일 보강
                 enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, now_utc)
