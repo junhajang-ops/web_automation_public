@@ -1,7 +1,16 @@
 # -*- coding: utf-8 -*-
 """cs/console 공용 GCP Logging 읽기 helper."""
 
+import os
+
 LOGGING_READ_SCOPE = "https://www.googleapis.com/auth/logging.read"
+
+# Cloud Logging entries.list는 검색을 다 끝내지 못하면 entries=[] 인데도 nextPageToken을
+# 돌려주며(공식 문서 명시), 클라이언트가 토큰으로 계속 넘겨야 실제 로그를 만난다.
+# 첫 페이지만 읽고 "로그없음"으로 단정하면 실제 로그가 있는 유저를 false negative로 놓친다
+# (BattleScore처럼 최근 접속이 몇 주 전인 유저에서 결정적으로 재현됨).
+# 빈 페이지를 몇 번까지 따라갈지 상한. 소진 시 "로그없음"이 아니라 불확실(에러)로 반환한다.
+GCP_MAX_EMPTY_PAGES = max(1, int(os.environ.get("GCP_MAX_EMPTY_PAGES", "20")))
 
 
 def load_logging_credentials(key_path):
@@ -45,13 +54,23 @@ def build_logging_service(key_path):
     return build_logging_service_from_credentials(load_logging_credentials(key_path))
 
 
-def fetch_recent_log_entry(logging_service, project, filter_expr):
-    """filter_expr 조건에 맞는 가장 최근 로그 1건 조회 (orderBy timestamp desc, pageSize 1).
+def fetch_recent_log_entry(logging_service, project, filter_expr, max_empty_pages=None):
+    """filter_expr 조건에 맞는 가장 최근 로그 1건 조회 (orderBy timestamp desc).
 
     로그 종류·SUB_CATEGORY 등 세부 조회 조건은 filter_expr로 호출부가 결정한다.
     읽기 전용(entries.list). 반환: (entry_dict | None, error | None).
-    로그가 없는 경우는 정상 상태이므로 (None, None)을 반환한다(에러 아님).
+
+    ★ 페이징 처리: entries.list는 검색을 다 끝내지 못하면 entries=[] 인데도 nextPageToken을
+      돌려준다(공식 문서). 이때 토큰으로 계속 넘겨야 실제 로그를 만난다. 첫 페이지가 비었다고
+      바로 "로그없음"으로 단정하면 실제 로그가 있는 유저를 놓친다. 따라서 entries가 채워진
+      페이지를 만나거나(→ 최신 1건 반환), nextPageToken이 사라질 때까지(→ 진짜 로그없음) 넘긴다.
+    - 진짜 로그가 없으면(빈 페이지 + 토큰 없음) (None, None) — 정상 상태(에러 아님).
+    - 빈 페이지 상한(max_empty_pages)을 넘도록 토큰이 계속 남으면, 검색이 미완결이라
+      "로그없음"으로 단정할 수 없으므로 에러로 반환한다(false negative 방지).
     """
+    if max_empty_pages is None:
+        max_empty_pages = GCP_MAX_EMPTY_PAGES
+
     body = {
         "resourceNames": [f"projects/{project}"],
         "filter": filter_expr,
@@ -61,16 +80,38 @@ def fetch_recent_log_entry(logging_service, project, filter_expr):
 
     try:
         from googleapiclient.errors import HttpError
+    except ImportError:
+        HttpError = None
 
-        resp = logging_service.entries().list(body=body).execute()
-    except HttpError as exc:
-        status = getattr(getattr(exc, "resp", None), "status", "?")
-        return None, f"HTTP {status}"
-    except Exception as exc:  # noqa: BLE001
-        return None, str(exc)
+    empty_pages = 0
+    page_token = None
+    while True:
+        if page_token:
+            body["pageToken"] = page_token
+        else:
+            body.pop("pageToken", None)
 
-    entries = resp.get("entries", [])
-    return (entries[0], None) if entries else (None, None)
+        try:
+            resp = logging_service.entries().list(body=body).execute()
+        except Exception as exc:  # noqa: BLE001
+            if HttpError is not None and isinstance(exc, HttpError):
+                status = getattr(getattr(exc, "resp", None), "status", "?")
+                return None, f"HTTP {status}"
+            return None, str(exc)
+
+        entries = resp.get("entries", [])
+        if entries:
+            return entries[0], None
+
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            # 빈 페이지 + 토큰 없음 = 검색 완료, 실제로 로그 없음
+            return None, None
+
+        empty_pages += 1
+        if empty_pages >= max_empty_pages:
+            # 토큰이 계속 남아 검색이 미완결 → "로그없음"으로 단정 불가. 불확실로 반환한다.
+            return None, f"empty pages exhausted (>{max_empty_pages}, nextPageToken 잔존)"
 
 
 def fetch_recent_shop_click_log(logging_service, project, log_name, uuid):
@@ -87,24 +128,11 @@ def fetch_recent_shop_click_log(logging_service, project, log_name, uuid):
         f'AND jsonPayload._user_id="{uuid}" '
         f'AND jsonPayload.SUB_CATEGORY="log_shop_click"'
     )
-    body = {
-        "resourceNames": [f"projects/{project}"],
-        "filter": filt,
-        "orderBy": "timestamp desc",
-        "pageSize": 1,
-    }
 
-    try:
-        from googleapiclient.errors import HttpError
-
-        resp = logging_service.entries().list(body=body).execute()
-    except HttpError as exc:
-        status = getattr(getattr(exc, "resp", None), "status", "?")
-        return None, f"HTTP {status}"
-    except Exception as exc:  # noqa: BLE001
-        return None, str(exc)
-
-    entries = resp.get("entries", [])
-    if not entries:
+    # fetch_recent_log_entry가 nextPageToken 페이징(빈 페이지+토큰)을 처리하므로 재사용한다.
+    entry, err = fetch_recent_log_entry(logging_service, project, filt)
+    if err:
+        return None, err
+    if entry is None:
         return None, "해당 유저의 log_shop_click 로그 없음"
-    return entries[0], None
+    return entry, None
