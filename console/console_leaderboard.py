@@ -107,6 +107,27 @@ LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS = [
 
 
 
+def _is_visible(locator) -> bool:
+    try:
+        return locator.count() > 0 and locator.first.is_visible()
+    except Exception:
+        return False
+
+
+def _leaderboard_nav_source(page) -> str:
+    if _is_visible(page.locator("input[name='leaderboardName']")):
+        return "list"
+    if _is_visible(page.locator("input[name='value']")):
+        return "detail"
+    return "other"
+
+
+def _leaderboard_nav_step_name(page, nav_context: str) -> str:
+    if nav_context == "board_loop":
+        return f"leaderboard_nav_{nav_context}_{_leaderboard_nav_source(page)}_pre"
+    return f"leaderboard_nav_{nav_context}_pre"
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Leaderboard PvPRank extractor")
     parser.add_argument("--profile", default=DEFAULT_PROFILE)
@@ -158,7 +179,7 @@ def open_leaderboard_page(page, nav_context: str = "initial"):
     )
     record_step_dump(
         page,
-        f"leaderboard_nav_{nav_context}_pre",
+        _leaderboard_nav_step_name(page, nav_context),
         ignore_patterns=ignore_patterns,
     )
     link.click()
