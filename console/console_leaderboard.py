@@ -89,6 +89,7 @@ ACCOUNT_NEW_HOURS = int(os.environ.get("ACCOUNT_NEW_HOURS", "240"))  # 계정 �
 RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계 대상 건수
 GCP_QUERY_MAX_RETRIES = max(1, int(os.environ.get("GCP_QUERY_MAX_RETRIES", "10")))
 GCP_QUERY_RETRY_WAIT_MS = max(0, int(os.environ.get("GCP_QUERY_RETRY_WAIT_MS", "1000")))
+LEADERBOARD_ENTER_MAX_RETRIES = max(1, int(os.environ.get("LEADERBOARD_ENTER_MAX_RETRIES", "3")))
 RANK_COL_WIDTH = 4
 UUID_COL_WIDTH = 36
 ACCOUNT_TYPE_COL_WIDTH = 16  # 계정상태 고정폭 — 조회실패(...) 예외 메시지는 이 폭에서 말줄임 처리됨
@@ -359,6 +360,26 @@ def enter_leaderboard_detail(page, board_name: str):
         return
 
     raise RuntimeError(f"'{board_name}' 상세 페이지 진입을 확인하지 못했습니다.")
+
+
+def enter_leaderboard_detail_with_retry(page, keyword: str, board_name: str):
+    """진입 확인 실패 시 목록 화면을 다시 열고 재클릭 — 클릭이 씹혀 화면 전환이 안 되는 경우 대응."""
+    last_exc = None
+    for attempt in range(1, LEADERBOARD_ENTER_MAX_RETRIES + 1):
+        try:
+            enter_leaderboard_detail(page, board_name)
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt >= LEADERBOARD_ENTER_MAX_RETRIES:
+                break
+            print(
+                f"    [진입 재시도] '{board_name}' {attempt}/{LEADERBOARD_ENTER_MAX_RETRIES} 실패: {exc} "
+                f"-> 목록을 다시 열고 재시도합니다."
+            )
+            open_leaderboard_list_and_search(page, keyword, nav_context="return")
+
+    raise last_exc
 
 
 def _row_cells(row_el) -> list:
@@ -922,7 +943,7 @@ def run(
                 print("[7-retry] 다음 리더보드를 위해 목록 화면을 다시 엽니다.")
                 open_leaderboard_list_and_search(page, keyword, nav_context="return")
 
-            enter_leaderboard_detail(page, board_name)
+            enter_leaderboard_detail_with_retry(page, keyword, board_name)
             set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
             board_rows = extract_top_ranks(page, board_name)
 
