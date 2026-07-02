@@ -128,6 +128,10 @@ def _leaderboard_nav_step_name(page, nav_context: str) -> str:
     return f"leaderboard_nav_{nav_context}_pre"
 
 
+def _leaderboard_open_step_name() -> str:
+    return "leaderboard_open_list_pre"
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Leaderboard PvPRank extractor")
     parser.add_argument("--profile", default=DEFAULT_PROFILE)
@@ -368,16 +372,17 @@ def open_leaderboard_list_and_search_with_retry(page, keyword: str, start_url: s
 
 
 def _click_board_from_list(page, board_name: str):
+    open_step_name = _leaderboard_open_step_name()
     rows = get_data_rows(page)
     row = rows.filter(has_text=board_name).first
     if wait_for_visible(row, 2_000):
         row.scroll_into_view_if_needed()
         exact_label = find_exact_text_match(row.get_by_text(board_name, exact=True), board_name)
         if exact_label is not None and wait_for_visible(exact_label, 1_000):
-            record_step_dump(page, f"leaderboard_open_{board_name}_pre")
+            record_step_dump(page, open_step_name)
             exact_label.click()
         else:
-            record_step_dump(page, f"leaderboard_open_{board_name}_pre")
+            record_step_dump(page, open_step_name)
             row.click()
         return
 
@@ -386,7 +391,7 @@ def _click_board_from_list(page, board_name: str):
         raise RuntimeError(f"목록에서 '{board_name}'를 찾지 못했습니다.")
 
     exact_text.scroll_into_view_if_needed()
-    record_step_dump(page, f"leaderboard_open_{board_name}_pre")
+    record_step_dump(page, open_step_name)
     exact_text.click()
 
 
