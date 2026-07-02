@@ -142,6 +142,26 @@ def get_step_wait_ms() -> int:
     return DEFAULT_STEP_WAIT_MS
 
 
+ANSI_RED = "\033[91m"
+ANSI_RESET = "\033[0m"
+
+
+def _supports_color() -> bool:
+    # 예약 실행 래퍼(run_*_scheduled.ps1)는 `*>> $LogFile`로 표준출력을 파일 리다이렉트한다.
+    # 이때 stdout은 터미널이 아니므로(isatty()=False) 색상 코드를 넣지 않아야
+    # 로그 파일에 이스케이프 문자가 그대로 남지 않는다.
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _red(text: str) -> str:
+    if not _supports_color():
+        return text
+    return f"{ANSI_RED}{text}{ANSI_RESET}"
+
+
 def configure_console_output() -> str:
     encoding = "utf-8"
     if os.name == "nt":
@@ -149,6 +169,14 @@ def configure_console_output() -> str:
             kernel32 = ctypes.windll.kernel32
             kernel32.SetConsoleCP(65001)
             kernel32.SetConsoleOutputCP(65001)
+            # ANSI 색상 코드가 이스케이프 문자 그대로 찍히지 않고 실제 색으로
+            # 렌더링되도록 콘솔 가상 터미널 처리를 켠다(구형 conhost 대응).
+            STD_OUTPUT_HANDLE = -11
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            mode = ctypes.c_uint32()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
         except Exception:
             pass
 
@@ -425,12 +453,12 @@ def snap_and_check_ui(
         kept_diffs, ignored_diffs = _split_ignored_diffs(diffs, ignore_patterns=ignore_patterns)
         if kept_diffs:
             changed = True
-            print(f"  [UI change] '{name}' changed.")
+            print(_red(f"  [UI change] '{name}' changed."))
             for diff in kept_diffs:
-                print(diff)
+                print(_red(diff))
             if ignored_diffs:
                 print(f"  [UI ignore] {len(ignored_diffs)} whitelisted diffs skipped.")
-            print("  -> See console/ui_fingerprints/ui_change_log.txt")
+            print(_red("  -> See console/ui_fingerprints/ui_change_log.txt"))
             _append_change_log(name, kept_diffs, ignored_diffs)
         else:
             print(f"  [UI monitor] '{name}' unchanged.")
