@@ -389,31 +389,6 @@ def enter_leaderboard_detail(page, board_name: str):
     raise RuntimeError(f"'{board_name}' 상세 페이지 진입을 확인하지 못했습니다.")
 
 
-def enter_leaderboard_detail_with_retry(page, keyword: str, board_name: str, start_url: str, project_name: str):
-    """진입 확인 실패 시 콘솔 초기화면(start_url)으로 재접속한 뒤 목록을 다시 열고 재클릭한다.
-
-    다른 재시도 지점(open_leaderboard_list_and_search_with_retry)과 동일하게
-    복구 동작은 항상 초기화면 재접속으로 통일한다 — "가벼운 조치를 먼저 해보고
-    안 되면 무거운 조치로 넘어간다"는 단계적 판단을 이 함수가 임의로 하지 않는다.
-    """
-    def _recover():
-        prepare_console_project(
-            page=page,
-            explicit_project_base="",
-            start_url=start_url,
-            project_name=project_name,
-        )
-        open_leaderboard_list_and_search(page, keyword, nav_context="return")
-
-    retry_with_recovery(
-        action=lambda: enter_leaderboard_detail(page, board_name),
-        recovery=_recover,
-        label=f"진입 재시도 '{board_name}'",
-        recovery_desc=f"콘솔 초기화면({start_url})으로 재접속 후 목록을 다시 열고 재시도합니다.",
-        max_retries=RETRY_MAX_RETRIES,
-    )
-
-
 def _row_cells(row_el) -> list:
     cells = row_el.locator("[role='gridcell'], [role='cell'], td")
     count = cells.count()
@@ -971,18 +946,32 @@ def run(
             print(f"    검색어 '{keyword}'로 리더보드를 찾지 못했습니다 — 건너뜁니다.")
             continue
 
-        for index, board_name in enumerate(board_names):
-            try:
-                if index > 0:
-                    print("[7-retry] 다음 리더보드를 위해 목록 화면을 다시 엽니다.")
-                    open_leaderboard_list_and_search_with_retry(page, keyword, start_url, project_name, nav_context="return")
-
-                enter_leaderboard_detail_with_retry(page, keyword, board_name, start_url, project_name)
+        for board_name in board_names:
+            def _process_board(board_name=board_name):
+                # 매 시도(첫 시도 포함) 항상 이 키워드의 목록 화면부터 다시 연다.
+                # 복구(초기화면 재접속) 뒤에는 항상 프로젝트 홈에 있으므로 "목록 화면이
+                # 이미 열려 있다"고 가정하지 않는다 — 절차 전체를 하나의 단위로 재시도한다.
+                open_leaderboard_list_and_search(page, keyword, nav_context="return")
+                enter_leaderboard_detail(page, board_name)
                 set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
                 board_rows = extract_top_ranks(page, board_name)
-
                 # 각 보드 추출 직후 GCP 최근 로그(종류 무관)로 계정 생성일 보강
                 enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, now_utc)
+                return board_rows
+
+            try:
+                board_rows = retry_with_recovery(
+                    action=_process_board,
+                    recovery=lambda: prepare_console_project(
+                        page=page,
+                        explicit_project_base="",
+                        start_url=start_url,
+                        project_name=project_name,
+                    ),
+                    label=f"'{board_name}' 조회 재시도",
+                    recovery_desc=f"콘솔 초기화면({start_url})으로 재접속 후 재시도합니다.",
+                    max_retries=RETRY_MAX_RETRIES,
+                )
             except Exception as exc:  # noqa: BLE001 — 개별 보드 최종 실패가 전체 실행을 막지 않게
                 print(f"    [스킵] '{board_name}' 조회 최종 실패 — 다음 리더보드로 넘어갑니다: {exc}")
                 skipped_boards.append({"keyword": keyword, "leaderboard": board_name, "error": str(exc)})
