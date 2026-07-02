@@ -48,6 +48,18 @@ TEST_CHART_NAME = os.environ.get("TEST_CHART_NAME", "Shop")
 STEP_WAIT_MS = int(os.environ.get("STEP_WAIT_MS", "1000"))
 
 
+def _apply_env_override(args, field: str, default_value: str, env_key: str) -> None:
+    # project_name과 동일한 패턴: CLI에서 명시적으로 값을 바꾸지 않아 스크립트 기본값
+    # 그대로인 경우에만 env 값으로 덮어쓴다. --field로 명시한 값은 그대로 유지한다.
+    if not hasattr(args, field):
+        return
+    if getattr(args, field, "") != default_value:
+        return
+    env_value = os.environ.get(env_key, "").strip()
+    if env_value:
+        setattr(args, field, env_value)
+
+
 def apply_title_profile(
     args,
     *,
@@ -57,6 +69,8 @@ def apply_title_profile(
     include_gcp: bool = False,
     default_block_reason: str = "",
     include_block_reason: bool = False,
+    default_leaderboard_keywords: str = "",
+    include_leaderboard_keywords: bool = False,
 ):
     if getattr(args, "gametitle", False) and not getattr(args, "title", ""):
         args.title = "gametitle"
@@ -107,11 +121,12 @@ def apply_title_profile(
                 os.environ.get(f"{prefix}_LOGNAME", "").strip(),
             )
 
-    if include_block_reason and hasattr(args, "reason"):
-        current_reason = getattr(args, "reason", "")
-        if current_reason == default_block_reason:
-            reason_env = os.environ.get(f"{prefix}_BLOCK_REASON", "").strip()
-            if reason_env:
-                setattr(args, "reason", reason_env)
+    if include_block_reason:
+        _apply_env_override(args, "reason", default_block_reason, f"{prefix}_BLOCK_REASON")
+
+    if include_leaderboard_keywords:
+        _apply_env_override(
+            args, "keywords", default_leaderboard_keywords, f"{prefix}_LEADERBOARD_KEYWORDS"
+        )
 
     return args

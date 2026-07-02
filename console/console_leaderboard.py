@@ -6,7 +6,7 @@ Scope:
 - Open the Console console
 - Select the target project
 - Open the leaderboard page from the side menu
-- Search visible PvPRank_* leaderboards
+- Search visible <keyword>_* leaderboards for each configured keyword (project별 env로 관리, 복수 지정 가능)
 - Open each leaderboard from the on-screen list
 - Read every player within rank <= 30 from the detail table (ties included)
 - Save CSV and debug artifacts
@@ -73,7 +73,7 @@ from cs_gcp_logging import (  # noqa: E402
 
 DEFAULT_OUTPUT = "dumps_console_leaderboard"
 LEADERBOARD_OUT_DIR = PAYMENT_DOCS_DIR / "leaderboard"
-SEARCH_KEYWORD = "PvPRank"
+DEFAULT_SEARCH_KEYWORDS = "PvPRank"  # 콤마 구분, 복수 지정 가능. --title/--gametitle 사용 시 {TITLE}_LEADERBOARD_KEYWORDS env로 대체 가능
 MAX_RANK = 30
 LIST_ROWS_PER_PAGE = 100
 DETAIL_ROWS_PER_PAGE = 50
@@ -83,7 +83,6 @@ UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.I,
 )
-BOARD_NAME_RE = re.compile(rf"{SEARCH_KEYWORD}_[A-Za-z0-9_]+")
 PAYITEM_ITEM_RE = re.compile(r"(?:^|_)payitem_(\d+)$", re.I)
 ACCOUNT_NEW_HOURS = int(os.environ.get("ACCOUNT_NEW_HOURS", "240"))  # 계정 생성 후 N시간 이내 → 신규
 RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계 대상 건수
@@ -117,12 +116,22 @@ def parse_args():
     parser.add_argument("--gcp-project", default="", help="GCP 프로젝트 ID (직접 지정)")
     parser.add_argument("--gcp-log", default="", help="GCP 로그 이름 (직접 지정)")
     parser.add_argument(
+        "--keywords",
+        default=DEFAULT_SEARCH_KEYWORDS,
+        help=(
+            "검색할 리더보드 이름 키워드(콤마 구분, 복수 지정 가능). "
+            "키워드마다 검색 후 나온 리더보드를 모두 조회한 뒤 다음 키워드로 넘어감 "
+            f"(default: {DEFAULT_SEARCH_KEYWORDS})"
+        ),
+    )
+    parser.add_argument(
         "--title",
         default="",
         metavar="NAME",
         help=(
             "타이틀 이름 (예: gametitle). "
-            "env에서 {NAME}_KEY_FILE / {NAME}_GCP_PROJECT / {NAME}_LOGNAME / {NAME}_PROJECT_NAME 을 일괄 적용."
+            "env에서 {NAME}_KEY_FILE / {NAME}_GCP_PROJECT / {NAME}_LOGNAME / "
+            "{NAME}_PROJECT_NAME / {NAME}_LEADERBOARD_KEYWORDS 를 일괄 적용."
         ),
     )
     parser.add_argument("--gametitle", action="store_true", help="--title gametitle 단축키")
@@ -159,13 +168,13 @@ def open_leaderboard_page(page, nav_context: str = "initial"):
     )
 
 
-def search_pvp_rank(page):
-    print(f"[5] 검색창에 '{SEARCH_KEYWORD}'를 입력하고 검색합니다.")
+def search_pvp_rank(page, keyword: str):
+    print(f"[5] 검색창에 '{keyword}'를 입력하고 검색합니다.")
     search_input = page.locator("input[name='leaderboardName']").first
     search_input.wait_for(state="visible", timeout=10_000)
     record_step_dump(page, "leaderboard_search_input_pre")
     search_input.fill("")
-    search_input.fill(SEARCH_KEYWORD)
+    search_input.fill(keyword)
 
     search_button = page.get_by_role("button", name="검색", exact=True).first
     search_button.wait_for(state="visible", timeout=10_000)
@@ -269,8 +278,9 @@ def set_rows_per_page(page, target: int, label: str, verify_prefix: str = "", co
     raise RuntimeError(f"{label} 전환 결과가 기대와 다릅니다: expected='{target_text}'")
 
 
-def collect_visible_board_names(page) -> list:
-    print("[6] 현재 목록 페이지에서 PvPRank_* 리더보드 이름을 수집합니다.")
+def collect_visible_board_names(page, keyword: str) -> list:
+    print(f"[6] 현재 목록 페이지에서 '{keyword}_*' 리더보드 이름을 수집합니다.")
+    board_name_re = re.compile(rf"{re.escape(keyword)}_[A-Za-z0-9_]+")
     wait_for_data_rows(page)
     rows = get_data_rows(page)
     count = rows.count()
@@ -285,7 +295,7 @@ def collect_visible_board_names(page) -> list:
         if not row_text:
             continue
 
-        match = BOARD_NAME_RE.search(row_text)
+        match = board_name_re.search(row_text)
         if match is None:
             continue
 
@@ -299,9 +309,9 @@ def collect_visible_board_names(page) -> list:
     return board_names
 
 
-def open_leaderboard_list_and_search(page):
-    open_leaderboard_page(page, nav_context="initial")
-    search_pvp_rank(page)
+def open_leaderboard_list_and_search(page, keyword: str, nav_context: str = "initial"):
+    open_leaderboard_page(page, nav_context=nav_context)
+    search_pvp_rank(page, keyword)
     print(f"[7] 목록을 {LIST_ROWS_PER_PAGE}개씩 보기로 맞춥니다.")
     list_footer = page.locator(".MuiDataGrid-footerContainer").first
     set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows", container=list_footer)
@@ -1169,6 +1179,7 @@ def run(
     explicit_project_base,
     start_url,
     project_name,
+    keywords,
     credentials=None,
     gcp_project="",
     gcp_log="",
@@ -1184,67 +1195,80 @@ def run(
     now_utc = datetime.datetime.utcnow()
     week_start_utc = get_week_start_utc()
 
-    open_leaderboard_list_and_search(page)
-    board_names = collect_visible_board_names(page)
-    if not board_names:
-        raise RuntimeError("PvPRank_* 리더보드를 찾지 못했습니다. 검색 결과를 확인해 주세요.")
-
     all_rows = []
-    for index, board_name in enumerate(board_names):
-        if index > 0:
-            print("[7-retry] 다음 리더보드를 위해 목록 화면을 다시 엽니다.")
-            open_leaderboard_page(page, nav_context="return")
-            search_pvp_rank(page)
-            print(f"[7] 목록을 {LIST_ROWS_PER_PAGE}개씩 보기로 맞춥니다.")
-            list_footer = page.locator(".MuiDataGrid-footerContainer").first
-            set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows", container=list_footer)
+    found_any_board = False
+    is_first_open = True
 
-        enter_leaderboard_detail(page, board_name)
-        set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
-        board_rows = extract_top_ranks(page, board_name)
+    # 키워드마다: 검색 -> 검색된 리더보드 전부 조회 -> 다음 키워드로 넘어감.
+    for keyword in keywords:
+        print(f"\n=== 검색어 '{keyword}' ===")
+        if is_first_open:
+            open_leaderboard_list_and_search(page, keyword, nav_context="initial")
+            is_first_open = False
+        else:
+            print(f"[7-retry] 다음 검색어('{keyword}')를 위해 목록 화면을 다시 엽니다.")
+            open_leaderboard_list_and_search(page, keyword, nav_context="return")
 
-        # 각 보드 추출 직후 GCP pvp_match 로그로 계정 상태 보강
-        enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, week_start_utc, now_utc)
+        board_names = collect_visible_board_names(page, keyword)
+        if not board_names:
+            print(f"    검색어 '{keyword}'로 리더보드를 찾지 못했습니다 — 건너뜁니다.")
+            continue
 
-        # 보드별 통합 출력
-        print(f"\n  == {board_name} ==")
-        print(
-            "  "
-            + _format_board_row(
-                "순위",
-                "UUID",
-                "닉네임",
-                "계정상태",
-                "최고티켓",
-                "로그수",
-            )
-        )
-        print(
-            "  "
-            + "  ".join(
-                [
-                    "-" * RANK_COL_WIDTH,
-                    "-" * UUID_COL_WIDTH,
-                    "-" * NICKNAME_COL_WIDTH,
-                    "-" * ACCOUNT_TYPE_COL_WIDTH,
-                    "-" * MAX_TICKET_COL_WIDTH,
-                    "-" * LOG_COUNT_COL_WIDTH,
-                ]
-            )
-        )
-        for r in board_rows:
+        for index, board_name in enumerate(board_names):
+            if index > 0:
+                print("[7-retry] 다음 리더보드를 위해 목록 화면을 다시 엽니다.")
+                open_leaderboard_list_and_search(page, keyword, nav_context="return")
+
+            enter_leaderboard_detail(page, board_name)
+            set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
+            board_rows = extract_top_ranks(page, board_name)
+
+            # 각 보드 추출 직후 GCP pvp_match 로그로 계정 상태 보강
+            enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, week_start_utc, now_utc)
+
+            # 보드별 통합 출력
+            print(f"\n  == {board_name} ==")
             print(
                 "  "
                 + _format_board_row(
-                    f"{r['rank']}위",
-                    r["uuid"],
-                    r["nickname"],
-                    r.get("account_type", ""),
-                    str(r.get("max_pvp_ticket", "")),
-                    str(r.get("pvp_log_count", "")),
+                    "순위",
+                    "UUID",
+                    "닉네임",
+                    "계정상태",
+                    "최고티켓",
+                    "로그수",
                 )
             )
-        all_rows.extend(board_rows)
+            print(
+                "  "
+                + "  ".join(
+                    [
+                        "-" * RANK_COL_WIDTH,
+                        "-" * UUID_COL_WIDTH,
+                        "-" * NICKNAME_COL_WIDTH,
+                        "-" * ACCOUNT_TYPE_COL_WIDTH,
+                        "-" * MAX_TICKET_COL_WIDTH,
+                        "-" * LOG_COUNT_COL_WIDTH,
+                    ]
+                )
+            )
+            for r in board_rows:
+                print(
+                    "  "
+                    + _format_board_row(
+                        f"{r['rank']}위",
+                        r["uuid"],
+                        r["nickname"],
+                        r.get("account_type", ""),
+                        str(r.get("max_pvp_ticket", "")),
+                        str(r.get("pvp_log_count", "")),
+                    )
+                )
+            all_rows.extend(board_rows)
+            found_any_board = True
+
+    if not found_any_board:
+        raise RuntimeError(f"다음 검색어로 리더보드를 찾지 못했습니다: {', '.join(keywords)}")
 
     step_and_verify_ui(page, "leaderboard_complete")
 
@@ -1313,7 +1337,12 @@ def main():
         require_project_name=True,
         include_key_file=True,
         include_gcp=True,
+        default_leaderboard_keywords=DEFAULT_SEARCH_KEYWORDS,
+        include_leaderboard_keywords=True,
     )
+    keyword_list = [k.strip() for k in args.keywords.split(",") if k.strip()]
+    if not keyword_list:
+        raise SystemExit("[오류] --keywords 값이 비어 있습니다.")
     sync_playwright, _timeout_error = load_playwright()
     profile_dir = BASE_DIR / args.profile
     out_dir = BASE_DIR / args.out
@@ -1344,6 +1373,7 @@ def main():
     print(" Leaderboard PvPRank extractor")
     print("=" * 55)
     print(f"프로필   : {profile_dir.name}")
+    print(f"검색어   : {', '.join(keyword_list)}")
     print(f"출력     : {out_dir.name}")
     print(f"CSV 저장 : {LEADERBOARD_OUT_DIR}")
     print(f"덤프     : {out_dir} (30일 초과 자동 삭제)")
@@ -1370,6 +1400,7 @@ def main():
                 explicit_project_base=args.project_base,
                 start_url=args.start_url,
                 project_name=args.project_name,
+                keywords=keyword_list,
                 credentials=credentials,
                 gcp_project=args.gcp_project,
                 gcp_log=args.gcp_log,
