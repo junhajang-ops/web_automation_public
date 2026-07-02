@@ -17,8 +17,10 @@ from pathlib import Path
 
 from console_step_verify import (
     configure_console_output,
+    get_retry_max_retries,
     init_dump_dir,
     record_step_dump,
+    retry_with_recovery,
     save_page_artifacts,
     step_and_verify_ui,
     wait_until,
@@ -46,6 +48,7 @@ POLL_WAIT_MS = 1_000
 GRID_SCROLL_STEP_PX = 900
 GRID_SCROLL_IDLE_LIMIT = 3
 PAYITEM_ITEM_RE = re.compile(r"(?:^|_)payitem_(\d+)$", re.I)
+RETRY_MAX_RETRIES = get_retry_max_retries()
 
 
 def parse_args():
@@ -464,12 +467,23 @@ def main():
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page = select_target_page(context, page)
-            summary = run_webshop_history_lookup(
-                page,
-                args.uuid,
-                args.project_base,
-                args.start_url,
-                args.project_name,
+            summary = retry_with_recovery(
+                action=lambda: run_webshop_history_lookup(
+                    page,
+                    args.uuid,
+                    args.project_base,
+                    args.start_url,
+                    args.project_name,
+                ),
+                recovery=lambda: prepare_console_project(
+                    page=page,
+                    explicit_project_base=args.project_base,
+                    start_url=args.start_url,
+                    project_name=args.project_name,
+                ),
+                label=f"지급내역 UUID {args.uuid} 조회 재시도",
+                recovery_desc=f"콘솔 초기화면({args.start_url})/프로젝트 선택부터 다시 준비합니다.",
+                max_retries=RETRY_MAX_RETRIES,
             )
             print(
                 f"  [{args.uuid}] "

@@ -20,8 +20,10 @@ from pathlib import Path
 # Windows PowerShell 한국어 깨짐 방지
 from console_step_verify import (
     configure_console_output,
+    get_retry_max_retries,
     init_dump_dir,
     record_step_dump,
+    retry_with_recovery,
     save_page_artifacts,
     step_and_verify_ui,
     step_pause,
@@ -39,6 +41,7 @@ DEFAULT_START_URL = "https://console.example.io/ko"
 DEFAULT_HOLD_SECONDS = 15
 DEFAULT_PROJECT_NAME = "게임타이틀"
 LOGIN_SKIP = ("/login", "/signin", "/oauth", "/logout", "about:blank")
+RETRY_MAX_RETRIES = get_retry_max_retries()
 
 
 def parse_args():
@@ -600,13 +603,24 @@ def main():
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page = select_target_page(context, page)
-            lookup_status = run_search(
-                page=page,
-                uuid_value=args.uuid,
-                explicit_project_base=args.project_base,
-                start_url=args.start_url,
-                project_name=args.project_name,
-                timeout_error=timeout_error,
+            lookup_status = retry_with_recovery(
+                action=lambda: run_search(
+                    page=page,
+                    uuid_value=args.uuid,
+                    explicit_project_base=args.project_base,
+                    start_url=args.start_url,
+                    project_name=args.project_name,
+                    timeout_error=timeout_error,
+                ),
+                recovery=lambda: prepare_console_project(
+                    page=page,
+                    explicit_project_base=args.project_base,
+                    start_url=args.start_url,
+                    project_name=args.project_name,
+                ),
+                label=f"UUID {args.uuid} 조회 재시도",
+                recovery_desc=f"콘솔 초기화면({args.start_url})/프로젝트 선택부터 다시 준비합니다.",
+                max_retries=RETRY_MAX_RETRIES,
             )
             succeeded = True
             hold_browser_open(page, args.hold_seconds, lookup_status)

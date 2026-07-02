@@ -21,8 +21,10 @@ from pathlib import Path
 
 from console_step_verify import (
     configure_console_output,
+    get_retry_max_retries,
     init_dump_dir,
     record_step_dump,
+    retry_with_recovery,
     save_page_artifacts,
     step_and_verify_ui,
     wait_until,
@@ -50,6 +52,7 @@ DEFAULT_TABLE_NAME = TEST_TABLE_NAME
 DEFAULT_PURCHASE_CODE = TEST_PURCHASE_CODE
 POLL_WAIT_MS = 1_000
 HIGHLIGHT_WAIT_MS = 3_000
+RETRY_MAX_RETRIES = get_retry_max_retries()
 
 
 def parse_args():
@@ -822,15 +825,26 @@ def main():
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page = select_target_page(context, page)
-            result_summary = run_shopdata_lookup(
-                page=page,
-                uuid_value=args.uuid,
-                table_name=args.table_name,
-                purchase_code=args.purchase_code,
-                explicit_project_base=args.project_base,
-                start_url=args.start_url,
-                project_name=args.project_name,
-                timeout_error=timeout_error,
+            result_summary = retry_with_recovery(
+                action=lambda: run_shopdata_lookup(
+                    page=page,
+                    uuid_value=args.uuid,
+                    table_name=args.table_name,
+                    purchase_code=args.purchase_code,
+                    explicit_project_base=args.project_base,
+                    start_url=args.start_url,
+                    project_name=args.project_name,
+                    timeout_error=timeout_error,
+                ),
+                recovery=lambda: prepare_console_project(
+                    page=page,
+                    explicit_project_base=args.project_base,
+                    start_url=args.start_url,
+                    project_name=args.project_name,
+                ),
+                label=f"ShopData UUID {args.uuid} 조회 재시도",
+                recovery_desc=f"콘솔 초기화면({args.start_url})/프로젝트 선택부터 다시 준비합니다.",
+                max_retries=RETRY_MAX_RETRIES,
             )
             succeeded = True
             hold_browser_open(page, args.hold_seconds)

@@ -13,14 +13,15 @@ Warning:
 import argparse
 import csv
 import datetime
-import os
 import sys
 from pathlib import Path
 
 from console_step_verify import (
     configure_console_output,
+    get_retry_max_retries,
     init_dump_dir,
     record_step_dump,
+    retry_with_recovery,
     save_page_artifacts,
     step_and_verify_ui,
     wait_until,
@@ -45,8 +46,7 @@ DEFAULT_BLOCK_REASON = "UserBlock/Permanent_DataHack_Desc"
 DEFAULT_BLOCK_PERIOD_DAYS = 9999
 DEFAULT_DEVICE_BAN_COUNT = 3
 # console_leaderboard.py의 진입 재시도(RETRY_MAX_RETRIES)와 동일한 env로 공용 관리.
-DEFAULT_RETRIES = max(1, int(os.environ.get("RETRY_MAX_RETRIES", "3")))
-RETRY_BACKOFF_MS = 2_000
+DEFAULT_RETRIES = get_retry_max_retries()
 
 TEXT_USER_ACCESS = "\uc720\uc800 \uc811\uadfc"
 TEXT_DENY_TAB = "\uc811\uadfc \ucc28\ub2e8"
@@ -821,38 +821,57 @@ def main():
                 # 따라서 페이지 로딩 지연·값 불일치 등 개별 오류는 이 UUID의 절차 전체
                 # 재시도로 흡수하고, 재시도를 모두 소진해도 이 UUID만 건너뛰고
                 # 다음 UUID로 계속 진행한다(하나의 실패가 전체 배치를 막지 않는다).
-                max_attempts = max(1, args.retries)
-                for attempt in range(1, max_attempts + 1):
-                    try:
-                        if attempt > 1:
-                            print(f"\n[재시도 {attempt}/{max_attempts}] uuid={uuid_value} 절차를 처음부터 다시 시작합니다.")
-                        uuid_result_summary = run_user_block(
-                            page=page,
-                            uuid_value=uuid_value,
-                            reason_text=args.reason,
-                            period_days=args.period_days,
-                            remove_rank=not args.skip_rank_delete,
-                            explicit_project_base=args.project_base,
-                            start_url=args.start_url,
-                            project_name=args.project_name,
-                            project_key=project_key,
-                            skip_device_block=args.skip_device_block,
-                            device_ban_count=args.device_ban_count,
+                attempt_counter = {"count": 0}
+
+                def _run_uuid_block():
+                    attempt_counter["count"] += 1
+                    if attempt_counter["count"] > 1:
+                        print(
+                            f"\n[재시도 {attempt_counter['count']}/{max(1, args.retries)}] "
+                            f"uuid={uuid_value} 절차를 처음부터 다시 시작합니다."
                         )
-                        uuid_succeeded = True
-                        uuid_error = ""
-                        if attempt > 1:
-                            uuid_result_summary["attempts_used"] = attempt
-                        break
-                    except Exception as exc:
-                        uuid_error = str(exc)
-                        print(f"\n[오류] uuid={uuid_value} 시도 {attempt}/{max_attempts} 실패: {uuid_error}")
-                        if attempt >= max_attempts:
-                            print(f"[스킵] uuid={uuid_value}: 재시도를 모두 소진해 이 UUID는 건너뛰고 다음 UUID로 진행합니다.")
-                            break
-                        print(f"  {RETRY_BACKOFF_MS}ms 대기 후 재시도합니다.")
-                        page = select_target_page(context, page)
-                        page.wait_for_timeout(RETRY_BACKOFF_MS)
+                    return run_user_block(
+                        page=page,
+                        uuid_value=uuid_value,
+                        reason_text=args.reason,
+                        period_days=args.period_days,
+                        remove_rank=not args.skip_rank_delete,
+                        explicit_project_base=args.project_base,
+                        start_url=args.start_url,
+                        project_name=args.project_name,
+                        project_key=project_key,
+                        skip_device_block=args.skip_device_block,
+                        device_ban_count=args.device_ban_count,
+                    )
+
+                def _recover_uuid_block():
+                    nonlocal page
+                    page = select_target_page(context, page)
+                    prepare_console_project(
+                        page=page,
+                        explicit_project_base=args.project_base,
+                        start_url=args.start_url,
+                        project_name=args.project_name,
+                    )
+
+                try:
+                    uuid_result_summary = retry_with_recovery(
+                        action=_run_uuid_block,
+                        recovery=_recover_uuid_block,
+                        label=f"uuid={uuid_value} 차단 절차 재시도",
+                        recovery_desc=f"콘솔 초기화면({args.start_url})/프로젝트 선택부터 다시 준비합니다.",
+                        max_retries=max(1, args.retries),
+                    )
+                    uuid_succeeded = True
+                    uuid_error = ""
+                    if attempt_counter["count"] > 1:
+                        uuid_result_summary["attempts_used"] = attempt_counter["count"]
+                except Exception as exc:
+                    uuid_error = str(exc)
+                    print(
+                        f"[스킵] uuid={uuid_value}: 재시도를 모두 소진해 "
+                        f"이 UUID는 건너뛰고 다음 UUID로 진행합니다. ({uuid_error})"
+                    )
 
                 if uuid_succeeded:
                     print(f"\n=== uuid={uuid_value} 완료 ===")

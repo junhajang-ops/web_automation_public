@@ -280,6 +280,15 @@ def retry_with_recovery(action, recovery, label: str, recovery_desc: str, max_re
     raise last_exc
 
 
+def get_retry_max_retries(env_key: str = "RETRY_MAX_RETRIES", default: int = 3) -> int:
+    """Return the shared whole-procedure retry budget from env."""
+    raw_value = os.environ.get(env_key, str(default))
+    try:
+        return max(1, int(raw_value))
+    except ValueError as exc:
+        raise RuntimeError(f"{env_key} must be an integer: {raw_value}") from exc
+
+
 def init_dump_dir(path: Path) -> None:
     _dump_dir[0] = path
     path.mkdir(parents=True, exist_ok=True)

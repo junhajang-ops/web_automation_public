@@ -31,7 +31,13 @@ _CS_DIR = BASE_DIR.parent / "cs"
 if str(_CS_DIR) not in sys.path:
     sys.path.insert(0, str(_CS_DIR))
 
-from console_step_verify import configure_console_output, init_dump_dir, save_page_artifacts
+from console_step_verify import (
+    configure_console_output,
+    get_retry_max_retries,
+    init_dump_dir,
+    retry_with_recovery,
+    save_page_artifacts,
+)
 from console_user_search import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
@@ -39,6 +45,7 @@ from console_user_search import (
     DEFAULT_START_URL,
     hold_open_loop,
     load_playwright,
+    prepare_console_project,
     select_target_page,
 )
 from console_receipt_verification import run_receipt_verification
@@ -62,6 +69,7 @@ DEFAULT_UUID = TEST_UUID
 DEFAULT_TABLE_NAME = TEST_TABLE_NAME
 DEFAULT_BRAND = "Gametitle_Raid(en)"
 PURCHASE_CODE_NULL = "PurchaseCodeNull"
+RETRY_MAX_RETRIES = get_retry_max_retries()
 # subprocess 호출자(cs co-pilot)가 결과를 회수할 때 쓰는 마커.
 # cs_copilot.py 의 PAYMENT_ERROR_JSON_MARKER 와 반드시 같아야 한다.
 PAYMENT_ERROR_JSON_MARKER = "===PAYMENT_ERROR_JSON==="
@@ -352,16 +360,27 @@ def main():
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page = select_target_page(context, page)
-            result = judge_nonpayment(
-                page,
-                args.uuid,
-                args.brand,
-                order_id=args.order_id or None,
-                table_name=args.table_name,
-                logging_service=logging_service,
-                start_url=args.start_url,
-                project_name=args.project_name,
-                timeout_error=timeout_error,
+            result = retry_with_recovery(
+                action=lambda: judge_nonpayment(
+                    page,
+                    args.uuid,
+                    args.brand,
+                    order_id=args.order_id or None,
+                    table_name=args.table_name,
+                    logging_service=logging_service,
+                    start_url=args.start_url,
+                    project_name=args.project_name,
+                    timeout_error=timeout_error,
+                ),
+                recovery=lambda: prepare_console_project(
+                    page=page,
+                    explicit_project_base="",
+                    start_url=args.start_url,
+                    project_name=args.project_name,
+                ),
+                label=f"미지급 판정 UUID {args.uuid} 재시도",
+                recovery_desc=f"콘솔 초기화면({args.start_url})/프로젝트 선택부터 다시 준비합니다.",
+                max_retries=RETRY_MAX_RETRIES,
             )
             succeeded = True
             print_result(result)
