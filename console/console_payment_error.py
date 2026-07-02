@@ -20,10 +20,8 @@ console_payment_error.py — 미지급(결제오류) 판정 (설계서 3-B)
 """
 
 import argparse
-import datetime
 import json
 import sys
-import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -33,12 +31,13 @@ _CS_DIR = BASE_DIR.parent / "cs"
 if str(_CS_DIR) not in sys.path:
     sys.path.insert(0, str(_CS_DIR))
 
-from console_step_verify import configure_console_output, init_dump_dir
-from console_user_search_test import (
+from console_step_verify import configure_console_output, init_dump_dir, save_page_artifacts
+from console_user_search import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
     DEFAULT_PROJECT_NAME,
     DEFAULT_START_URL,
+    hold_open_loop,
     load_playwright,
     select_target_page,
 )
@@ -265,17 +264,6 @@ def emit_json_result(result, succeeded, error_message):
 
 
 def save_artifacts(page, out_dir, uuid_value, succeeded, result=None, error_message=""):
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = out_dir / f"console_payment_error_{ts}"
-    try:
-        page.screenshot(path=f"{stem}.png", full_page=True)
-    except Exception as exc:
-        print(f"  (스크린샷 저장 실패: {exc})")
-    try:
-        Path(f"{stem}.html").write_text(page.content(), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (HTML 저장 실패: {exc})")
-
     lines = [f"success={succeeded}", f"uuid={uuid_value}", f"url={page.url}"]
     if result:
         lines.append(f"verdict={result.get('verdict')}")
@@ -289,19 +277,14 @@ def save_artifacts(page, out_dir, uuid_value, succeeded, result=None, error_mess
             lines.append(f"note={note}")
     if error_message:
         lines.append(f"error={error_message}")
-    try:
-        Path(f"{stem}.txt").write_text("\n".join(lines), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (요약 저장 실패: {exc})")
-    print(f"\n아티팩트 저장 완료: {stem}.png / .html / .txt")
+    save_page_artifacts(page, out_dir, "console_payment_error", lines)
 
 
 def hold_browser_open(page, hold_seconds):
     if hold_seconds <= 0:
         return
-    deadline = time.time() + hold_seconds
-    while time.time() < deadline:
-        page.wait_for_timeout(1_000)
+    print(f"현재 화면을 {hold_seconds}초 동안 유지합니다.")
+    hold_open_loop(page, hold_seconds)
 
 
 def parse_args():

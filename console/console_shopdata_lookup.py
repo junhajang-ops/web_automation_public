@@ -14,27 +14,27 @@ Scope:
 """
 
 import argparse
-import datetime
 import json
 import re
 import sys
-import time
 from pathlib import Path
 
 from console_step_verify import (
     configure_console_output,
     init_dump_dir,
     record_step_dump,
+    save_page_artifacts,
     step_and_verify_ui,
     wait_until,
 )
-from console_user_search_test import (
+from console_user_search import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
     DEFAULT_PROJECT_NAME,
     DEFAULT_START_URL,
     click_login_if_needed,
     ensure_uuid_dropdown,
+    hold_open_loop,
     load_playwright,
     prepare_console_project,
     safe_wait_for_load,
@@ -746,22 +746,6 @@ def save_artifacts(
     result_summary=None,
     error_message="",
 ):
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = out_dir / f"console_shopdata_lookup_{ts}"
-    screenshot_path = f"{stem}.png"
-    html_path = f"{stem}.html"
-    txt_path = f"{stem}.txt"
-
-    try:
-        page.screenshot(path=screenshot_path, full_page=True)
-    except Exception as exc:
-        print(f"  (스크린샷 저장 실패: {exc})")
-
-    try:
-        Path(html_path).write_text(page.content(), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (HTML 저장 실패: {exc})")
-
     summary_lines = [
         f"success={succeeded}",
         f"uuid={uuid_value}",
@@ -786,12 +770,7 @@ def save_artifacts(
     if error_message:
         summary_lines.append(f"error={error_message}")
 
-    try:
-        Path(txt_path).write_text("\n".join(summary_lines), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (요약 저장 실패: {exc})")
-
-    print(f"\n아티팩트 저장 완료: {stem}.png / .html / .txt")
+    save_page_artifacts(page, out_dir, "console_shopdata_lookup", summary_lines)
 
 
 def hold_browser_open(page, hold_seconds):
@@ -799,9 +778,7 @@ def hold_browser_open(page, hold_seconds):
         return
 
     print(f"[10] 조회 화면을 {hold_seconds}초 동안 유지합니다.")
-    deadline = time.time() + hold_seconds
-    while time.time() < deadline:
-        page.wait_for_timeout(POLL_WAIT_MS)
+    hold_open_loop(page, hold_seconds, POLL_WAIT_MS)
 
 
 def main():

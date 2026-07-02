@@ -590,7 +590,7 @@ class ConsoleJudgeWorker:
             from playwright.sync_api import sync_playwright as console_sync_playwright
 
             from console_payment_error import judge_nonpayment
-            from console_user_search_test import (
+            from console_user_search import (
                 DEFAULT_PROFILE as CONSOLE_PROFILE_NAME,
                 DEFAULT_PROJECT_NAME as CONSOLE_PROJECT_NAME,
                 DEFAULT_START_URL as CONSOLE_START_URL,

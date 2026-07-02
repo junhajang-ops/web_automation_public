@@ -25,7 +25,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from console_user_search_test import (
+from console_user_search import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
     DEFAULT_PROJECT_NAME,
@@ -53,6 +53,7 @@ from console_step_verify import (
     pad_display,
     init_dump_dir,
     record_step_dump,
+    save_page_artifacts,
     step_and_verify_ui,
     wait_until,
 )
@@ -83,7 +84,6 @@ UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.I,
 )
-PAYITEM_ITEM_RE = re.compile(r"(?:^|_)payitem_(\d+)$", re.I)
 ACCOUNT_NEW_HOURS = int(os.environ.get("ACCOUNT_NEW_HOURS", "240"))  # 계정 생성 후 N시간 이내 → 신규
 RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계 대상 건수
 GCP_QUERY_MAX_RETRIES = max(1, int(os.environ.get("GCP_QUERY_MAX_RETRIES", "5")))
@@ -736,259 +736,6 @@ def summarize_recent_payments(page, uuid_value, start_url, project_name, timeout
     }
 
 
-def open_webshop_history_menu(page):
-    print("[11] 사이드 메뉴에서 '지급 내역'으로 이동합니다.")
-    history_link = page.locator("a#webshopHistory, a[href*='/webshopHistory']").first
-    history_link.wait_for(state="visible", timeout=15_000)
-    history_link.scroll_into_view_if_needed()
-    record_step_dump(page, "webshop_history_nav_pre")
-    history_link.click()
-    click_login_if_needed(page)
-    safe_wait_for_load(page, "domcontentloaded", 15_000)
-    safe_wait_for_load(page, "networkidle", 5_000)
-    page.locator("input#searchValue").first.wait_for(state="visible", timeout=15_000)
-    wait_for_webshop_history_page_render_stable(page)
-
-
-def _read_visible_role_signature(page):
-    return page.evaluate(
-        """() => [...new Set(
-            [...document.querySelectorAll('[role]')]
-              .map(el => el.getAttribute('role'))
-              .filter(Boolean)
-        )].sort().join('|')"""
-    )
-
-
-def wait_for_webshop_history_page_render_stable(page, timeout_ms: int = 6_000, stable_rounds: int = 2):
-    print("[11-1] 지급 내역 페이지 렌더가 안정될 때까지 기다립니다.")
-    page.locator("input#searchValue").first.wait_for(state="visible", timeout=15_000)
-
-    previous_signature = ""
-    stable_count = 0
-
-    def _render_stable():
-        nonlocal previous_signature, stable_count
-        current_signature = _read_visible_role_signature(page)
-        if current_signature and current_signature == previous_signature:
-            stable_count += 1
-        else:
-            previous_signature = current_signature
-            stable_count = 1 if current_signature else 0
-
-        if stable_count >= stable_rounds:
-            return True
-        return None
-
-    if wait_until(page, _render_stable, timeout_ms=timeout_ms, wait_ms=POLL_WAIT_MS):
-        return
-
-    print("    (지급 내역 렌더 구성이 완전히 고정되진 않았지만 최신 상태로 진행합니다.)")
-
-
-def _wait_webshop_grid_not_loading(page, timeout_ms: int = 10_000):
-    progressbar = page.locator("[role='progressbar']").first
-
-    def _not_loading():
-        try:
-            return not progressbar.is_visible()
-        except Exception:
-            return True
-
-    wait_until(page, _not_loading, timeout_ms=timeout_ms, wait_ms=POLL_WAIT_MS)
-
-
-def ensure_webshop_buyer_search_type(page):
-    search_type = page.locator("input[name='searchType']").first
-    search_type.wait_for(state="attached", timeout=10_000)
-    current_value = (search_type.input_value() or "").strip().lower()
-    if current_value == "buyer":
-        return
-    raise RuntimeError(f"지급 내역 검색 기준이 buyer(결제한 UUID)가 아닙니다: current='{current_value}'")
-
-
-def fill_webshop_uuid_search(page, uuid_value):
-    print(f"[12] 지급 내역 검색 UUID 입력: {uuid_value}")
-    ensure_webshop_buyer_search_type(page)
-    search_input = page.locator("input#searchValue").first
-    search_input.wait_for(state="visible", timeout=15_000)
-    search_input.scroll_into_view_if_needed()
-    _wait_webshop_grid_not_loading(page)
-    record_step_dump(page, "webshop_history_uuid_input_pre")
-    search_input.fill("")
-    search_input.fill(uuid_value)
-
-
-def click_webshop_search_button(page):
-    print("[13] 지급 내역 검색 버튼을 클릭합니다.")
-    search_button = page.get_by_role("button", name="검색", exact=True).first
-    search_button.wait_for(state="visible", timeout=15_000)
-    search_button.scroll_into_view_if_needed()
-    record_step_dump(page, "webshop_history_search_submit_pre")
-    search_button.click()
-    safe_wait_for_load(page, "networkidle", 5_000)
-    _wait_webshop_grid_not_loading(page)
-
-
-def _read_grid_field(row, field_name: str) -> str:
-    try:
-        title_node = row.locator(f"[data-field='{field_name}'] [title]").first
-        title_value = title_node.get_attribute("title")
-        if title_value is not None:
-            return title_value.strip()
-    except Exception:
-        pass
-
-    try:
-        return row.locator(f"[data-field='{field_name}']").first.inner_text().strip()
-    except Exception:
-        return ""
-
-
-def _collect_current_webshop_page_rows(page) -> list:
-    collected = {}
-    idle_rounds = 0
-
-    while idle_rounds < 3:
-        rows = page.locator("div.MuiDataGrid-row")
-        visible_count = rows.count()
-        added_this_round = 0
-
-        for index in range(visible_count):
-            row = rows.nth(index)
-            row_data = {
-                "key": _read_grid_field(row, "key"),
-                "webshop": _read_grid_field(row, "webshop"),
-                "orderId": _read_grid_field(row, "orderId"),
-                "itemId": _read_grid_field(row, "itemId"),
-                "quantity": _read_grid_field(row, "quantity"),
-                "price": _read_grid_field(row, "price"),
-                "buyer": _read_grid_field(row, "buyer"),
-                "receiver": _read_grid_field(row, "receiver"),
-                "senderNickname": _read_grid_field(row, "senderNickname"),
-                "receiverNickname": _read_grid_field(row, "receiverNickname"),
-                "sentAt": _read_grid_field(row, "sentAt"),
-                "receivedAt": _read_grid_field(row, "receivedAt"),
-            }
-            row_key = "||".join(
-                [
-                    row_data.get("orderId", ""),
-                    row_data.get("itemId", ""),
-                    row_data.get("buyer", ""),
-                    row_data.get("sentAt", ""),
-                ]
-            )
-            if row_key in collected:
-                continue
-            collected[row_key] = row_data
-            added_this_round += 1
-
-        before_state = page.evaluate(
-            """() => {
-              const el = document.querySelector('.MuiDataGrid-virtualScroller');
-              if (!el) return null;
-              return {
-                scrollTop: el.scrollTop,
-                clientHeight: el.clientHeight,
-                scrollHeight: el.scrollHeight
-              };
-            }"""
-        )
-        if before_state is None:
-            break
-
-        if added_this_round == 0:
-            idle_rounds += 1
-        else:
-            idle_rounds = 0
-
-        reached_bottom = (
-            before_state["scrollTop"] + before_state["clientHeight"]
-            >= before_state["scrollHeight"] - 4
-        )
-        if reached_bottom and idle_rounds > 0:
-            break
-
-        scroller = page.locator(".MuiDataGrid-virtualScroller").first
-        if not wait_for_visible(scroller, 5_000):
-            break
-        box = scroller.bounding_box()
-        if not box:
-            break
-
-        page.mouse.move(box["x"] + (box["width"] / 2), box["y"] + (box["height"] / 2))
-        record_step_dump(page, "webshop_history_scroll_pre")
-        page.mouse.wheel(0, GRID_SCROLL_STEP_PX)
-        page.wait_for_timeout(POLL_WAIT_MS)
-
-        after_state = page.evaluate(
-            """() => {
-              const el = document.querySelector('.MuiDataGrid-virtualScroller');
-              if (!el) return null;
-              return {
-                scrollTop: el.scrollTop,
-                clientHeight: el.clientHeight,
-                scrollHeight: el.scrollHeight
-              };
-            }"""
-        )
-        if after_state is not None and before_state["scrollTop"] == after_state["scrollTop"]:
-            idle_rounds += 1
-
-    return list(collected.values())
-
-
-def collect_all_webshop_rows(page) -> list:
-    no_result_locator = page.get_by_text("검색 결과가 없습니다.", exact=False).first
-    row_locator = page.locator("div.MuiDataGrid-row")
-    _wait_webshop_grid_not_loading(page)
-    if wait_for_visible(no_result_locator, 3_000):
-        return []
-    if not wait_for_visible(row_locator.first, 8_000):
-        return []
-
-    return _collect_current_webshop_page_rows(page)
-
-
-def _parse_payitem_value(item_id: str) -> int | None:
-    item_text = (item_id or "").strip()
-    if not item_text:
-        return None
-    if "mission" in item_text.lower():
-        return None
-    match = PAYITEM_ITEM_RE.search(item_text)
-    if match is None:
-        return None
-    return int(match.group(1))
-
-
-def _legacy_summarize_payitem_history_unused(page, uuid_value):
-    open_webshop_history_menu(page)
-    fill_webshop_uuid_search(page, uuid_value)
-    click_webshop_search_button(page)
-    step_and_verify_ui(page, "webshop_history_results")
-
-    rows = collect_all_webshop_rows(page)
-    matched_rows = 0
-    quantity_total = 0
-    item_value_sum = 0
-
-    for row in rows:
-        item_value = _parse_payitem_value(row.get("itemId", ""))
-        if item_value is None:
-            continue
-        quantity = int(re.sub(r"[^\d]", "", row.get("quantity", "")) or "1")
-        matched_rows += 1
-        quantity_total += quantity
-        item_value_sum += item_value * quantity
-
-    return {
-        "payitem_match_count": matched_rows,
-        "payitem_quantity_total": quantity_total,
-        "payitem_item_value_sum": item_value_sum,
-    }
-
-
 def enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error):
     """all_rows 중 '계정 신규 생성' 유저에 영수증검증 최근 결제 합계를 in-place 추가.
 
@@ -1304,15 +1051,6 @@ def save_csv(rows: list, out_dir: Path) -> Path:
 
 
 def save_artifacts(page, out_dir: Path, succeeded: bool, rows: list, error_message: str):
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = out_dir / f"console_leaderboard_{ts}"
-    png_path = stem.with_suffix(".png")
-    html_path = stem.with_suffix(".html")
-    txt_path = stem.with_suffix(".txt")
-
-    page.screenshot(path=str(png_path), full_page=True)
-    html_path.write_text(page.content(), encoding="utf-8")
-
     unique_boards = sorted({row["leaderboard"] for row in rows})
     lines = [
         f"succeeded={succeeded}",
@@ -1324,8 +1062,7 @@ def save_artifacts(page, out_dir: Path, succeeded: bool, rows: list, error_messa
     if error_message:
         lines.append(f"error={error_message}")
 
-    txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"\n아티팩트 저장 완료: {png_path} / {html_path} / {txt_path}")
+    save_page_artifacts(page, out_dir, "console_leaderboard", lines)
 
 
 def main():

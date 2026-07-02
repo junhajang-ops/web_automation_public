@@ -18,7 +18,6 @@ This script is intentionally read-only. It does not click any mutation action.
 
 import argparse
 import csv as csv_mod
-import datetime
 import sys
 import time
 from pathlib import Path
@@ -27,15 +26,18 @@ from console_step_verify import (
     configure_console_output,
     init_dump_dir,
     record_step_dump,
+    save_page_artifacts,
     step_and_verify_ui,
     wait_until,
 )
-from console_user_search_test import (
+from console_user_search import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
     DEFAULT_PROJECT_NAME,
     DEFAULT_START_URL,
     click_login_if_needed,
+    find_exact_text_match,
+    hold_open_loop,
     load_playwright,
     prepare_console_project,
     safe_wait_for_load,
@@ -202,18 +204,6 @@ def set_chart_list_rows_per_page(page, rows_per_page):
     )
 
 
-def find_exact_text_match(items, target_text):
-    count = items.count()
-    for idx in range(count):
-        item = items.nth(idx)
-        try:
-            if item.inner_text().strip() == target_text:
-                return item
-        except Exception:
-            continue
-    return None
-
-
 def build_chart_link_locator(page, chart_name):
     return find_exact_text_match(page.locator("table tbody tr td a"), chart_name)
 
@@ -323,6 +313,25 @@ def find_chart_across_pages(page, chart_name):
         page_number += 1
 
 
+def find_column_index_by_header(table, header_text: str) -> int:
+    """table의 thead에서 header_text와 정확히 일치하는 컬럼 인덱스를 반환(없으면 -1).
+
+    콘솔(Semantic UI) 표는 앞뒤에 텍스트가 빈 collapsing th(체크박스/액션 열)를
+    두므로, 보이는 헤더 순서만으로는 td 인덱스와 어긋난다. thead의 모든 th(빈 것
+    포함)를 세면 같은 행의 td.nth()와 인덱스가 일치한다. 컬럼 순서가 바뀌어도
+    헤더명 기준으로 안전하게 찾기 위한 헬퍼(고정 nth 상수 대체).
+    """
+    headers = table.locator("thead th")
+    count = headers.count()
+    for i in range(count):
+        try:
+            if headers.nth(i).inner_text().strip() == header_text:
+                return i
+        except Exception:
+            continue
+    return -1
+
+
 def open_chart_detail(page, chart_name):
     locate_result = find_chart_across_pages(page, chart_name)
     if locate_result["lookup_status"] != "found":
@@ -338,9 +347,12 @@ def open_chart_detail(page, chart_name):
 
     chart_link = locate_result["chart_link"]
     result_row = chart_link.locator("xpath=ancestor::tr[1]").first
+    result_table = result_row.locator("xpath=ancestor::table[1]")
     row_cells = result_row.locator("td")
-    chart_number = row_cells.nth(1).inner_text().strip()
-    applied_chart = row_cells.nth(3).inner_text().strip()
+    number_idx = find_column_index_by_header(result_table, "번호")
+    applied_idx = find_column_index_by_header(result_table, "적용된 차트")
+    chart_number = row_cells.nth(number_idx).inner_text().strip() if number_idx >= 0 else ""
+    applied_chart = row_cells.nth(applied_idx).inner_text().strip() if applied_idx >= 0 else ""
 
     print(f"[8] '{chart_name}' 차트 링크를 클릭합니다.")
     record_step_dump(page, "chart_detail_link_pre")
@@ -384,10 +396,14 @@ def find_applied_chart_file_row(page):
 
 
 def get_applied_file_id(page) -> str:
-    """파일 이력 테이블에서 현재 적용 중인 행의 파일 ID(td.nth(3))를 반환합니다."""
+    """파일 이력 테이블에서 현재 적용 중인 행의 파일 ID를 반환합니다(헤더 '파일 ID' 기준)."""
     row = find_applied_chart_file_row(page)
+    table = row.locator("xpath=ancestor::table[1]")
+    idx = find_column_index_by_header(table, "파일 ID")
+    if idx < 0:
+        return ""
     try:
-        return row.locator("td").nth(3).inner_text().strip()
+        return row.locator("td").nth(idx).inner_text().strip()
     except Exception:
         return ""
 
@@ -602,22 +618,6 @@ def save_artifacts(
     result_summary=None,
     error_message="",
 ):
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = out_dir / f"console_chart_lookup_{ts}"
-    screenshot_path = f"{stem}.png"
-    html_path = f"{stem}.html"
-    txt_path = f"{stem}.txt"
-
-    try:
-        page.screenshot(path=screenshot_path, full_page=True)
-    except Exception as exc:
-        print(f"  (스크린샷 저장 실패: {exc})")
-
-    try:
-        Path(html_path).write_text(page.content(), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (HTML 저장 실패: {exc})")
-
     summary_lines = [
         f"success={succeeded}",
         f"chart_name={chart_name}",
@@ -642,12 +642,7 @@ def save_artifacts(
     if error_message:
         summary_lines.append(f"error={error_message}")
 
-    try:
-        Path(txt_path).write_text("\n".join(summary_lines), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (요약 저장 실패: {exc})")
-
-    print(f"\n아티팩트 저장 완료: {stem}.png / .html / .txt")
+    save_page_artifacts(page, out_dir, "console_chart_lookup", summary_lines)
 
 
 def hold_browser_open(page, hold_seconds):
@@ -655,9 +650,7 @@ def hold_browser_open(page, hold_seconds):
         return
 
     print(f"[13] 현재 화면을 {hold_seconds}초 동안 유지합니다.")
-    deadline = time.time() + hold_seconds
-    while time.time() < deadline:
-        page.wait_for_timeout(POLL_WAIT_MS)
+    hold_open_loop(page, hold_seconds, POLL_WAIT_MS)
 
 
 def main():

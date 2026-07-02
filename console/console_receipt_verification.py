@@ -13,26 +13,26 @@ DOM mapping basis: console_20260623_121712~121753.txt (field_dump 2026-06-23)
 """
 
 import argparse
-import datetime
 import re
 import sys
-import time
 from pathlib import Path
 
 from console_step_verify import (
     configure_console_output,
     init_dump_dir,
     record_step_dump,
+    save_page_artifacts,
     step_and_verify_ui,
     wait_until,
 )
-from console_user_search_test import (
+from console_user_search import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
     DEFAULT_PROJECT_NAME,
     DEFAULT_START_URL,
     click_login_if_needed,
     find_exact_text_match,
+    hold_open_loop,
     load_playwright,
     prepare_console_project,
     safe_wait_for_load,
@@ -380,19 +380,6 @@ def collect_result(page, uuid_value, timeout_error, ensure_rows_per_page=True):
 
 
 def save_artifacts(page, out_dir, uuid_value, succeeded, result_summary=None, error_message=""):
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = out_dir / f"console_receipt_{ts}"
-
-    try:
-        page.screenshot(path=f"{stem}.png", full_page=True)
-    except Exception as exc:
-        print(f"  (스크린샷 저장 실패: {exc})")
-
-    try:
-        Path(f"{stem}.html").write_text(page.content(), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (HTML 저장 실패: {exc})")
-
     summary_lines = [
         f"success={succeeded}",
         f"uuid={uuid_value}",
@@ -410,21 +397,14 @@ def save_artifacts(page, out_dir, uuid_value, succeeded, result_summary=None, er
     if error_message:
         summary_lines.append(f"error={error_message}")
 
-    try:
-        Path(f"{stem}.txt").write_text("\n".join(summary_lines), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (요약 저장 실패: {exc})")
-
-    print(f"\n아티팩트 저장 완료: {stem}.png / .html / .txt")
+    save_page_artifacts(page, out_dir, "console_receipt", summary_lines)
 
 
 def hold_browser_open(page, hold_seconds):
     if hold_seconds <= 0:
         return
     print(f"[8] 화면을 {hold_seconds}초 동안 유지합니다.")
-    deadline = time.time() + hold_seconds
-    while time.time() < deadline:
-        page.wait_for_timeout(POLL_WAIT_MS)
+    hold_open_loop(page, hold_seconds, POLL_WAIT_MS)
 
 
 def run_receipt_verification(

@@ -12,11 +12,10 @@ CSV 필수 열: posttitle, postbody, chart category, item, value, uuid
 """
 
 import csv
-import datetime
 import sys
 from pathlib import Path
 
-from console_user_search_test import (
+from console_user_search import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
     DEFAULT_PROJECT_NAME,
@@ -29,6 +28,7 @@ from console_step_verify import (
     configure_console_output,
     init_dump_dir,
     record_step_dump,
+    save_page_artifacts,
     step_and_verify_ui,
 )
 from console_post_register import (
@@ -265,19 +265,6 @@ def run_post_bulk(page, rows, explicit_project_base, start_url, project_name):
 # ── 아티팩트 저장 ──────────────────────────────────────────────────────────────
 
 def save_artifacts(page, out_dir, result):
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = out_dir / f"console_post_bulk_{ts}"
-
-    try:
-        page.screenshot(path=f"{stem}.png", full_page=True)
-    except Exception as exc:
-        print(f"  (스크린샷 저장 실패: {exc})")
-
-    try:
-        Path(f"{stem}.html").write_text(page.content(), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (HTML 저장 실패: {exc})")
-
     lines = [
         f"ok={result['ok']}",
         f"fail={result['fail']}",
@@ -286,12 +273,7 @@ def save_artifacts(page, out_dir, result):
         uuids_str = ",".join(fg.get("failed_uuids", []))
         lines.append(f"fail_group={fg['group']}  error={fg['error']}  uuids={uuids_str}")
 
-    try:
-        Path(f"{stem}.txt").write_text("\n".join(lines), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (요약 저장 실패: {exc})")
-
-    print(f"\n아티팩트 저장 완료: {stem}.png / .html / .txt")
+    save_page_artifacts(page, out_dir, "console_post_bulk", lines)
 
 
 # ── 메인 ─────────────────────────────────────────────────────────────────────

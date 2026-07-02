@@ -17,14 +17,16 @@ from console_step_verify import (
     configure_console_output,
     init_dump_dir,
     record_step_dump,
+    save_page_artifacts,
     step_and_verify_ui,
     wait_until,
 )
-from console_user_search_test import (
+from console_user_search import (
     DEFAULT_HOLD_SECONDS,
     DEFAULT_PROFILE,
     DEFAULT_START_URL,
     click_login_if_needed,
+    find_exact_text_match,
     load_playwright,
     prepare_console_project,
     safe_wait_for_load,
@@ -134,18 +136,6 @@ def get_visible_dialog_by_title(page, title_text):
         except Exception:
             continue
     return page.locator("[role='dialog']").filter(has_text=title_text).first
-
-
-def find_exact_text_match(items, target_text):
-    count = items.count()
-    for index in range(count):
-        item = items.nth(index)
-        try:
-            if item.inner_text().strip() == target_text:
-                return item
-        except Exception:
-            continue
-    return None
 
 
 def open_user_access_page(page):
@@ -706,19 +696,6 @@ def run_user_block(
 
 
 def save_artifacts(page, out_dir, succeeded, result_summary=None, error_message=""):
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = out_dir / f"console_user_block_{ts}"
-
-    try:
-        page.screenshot(path=f"{stem}.png", full_page=True)
-    except Exception as exc:
-        print(f"  (스크린샷 저장 실패: {exc})")
-
-    try:
-        Path(f"{stem}.html").write_text(page.content(), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (HTML 저장 실패: {exc})")
-
     lines = [
         f"success={succeeded}",
         f"url={page.url}",
@@ -730,12 +707,7 @@ def save_artifacts(page, out_dir, succeeded, result_summary=None, error_message=
     if error_message:
         lines.append(f"error={error_message}")
 
-    try:
-        Path(f"{stem}.txt").write_text("\n".join(lines), encoding="utf-8")
-    except Exception as exc:
-        print(f"  (요약 저장 실패: {exc})")
-
-    print(f"\n아티팩트 저장 완료: {stem}.png / .html / .txt")
+    save_page_artifacts(page, out_dir, "console_user_block", lines)
 
 
 def main():

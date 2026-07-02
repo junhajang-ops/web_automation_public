@@ -507,3 +507,34 @@ def step_and_verify_ui(
         name=name,
         ignore_patterns=ignore_patterns,
     )
+
+
+def save_page_artifacts(page, out_dir, basename, summary_lines=None):
+    """최종 화면 아티팩트(전체 스크린샷 + HTML + 요약 txt)를 out_dir에 저장한다.
+
+    각 console 스크립트가 공통으로 갖고 있던 저장 보일러플레이트(스크린샷/HTML/
+    요약 txt/완료 출력)를 한 곳으로 모은 것. 요약 내용은 화면마다 다르므로
+    호출부가 summary_lines(문자열 리스트)로 만들어 넘긴다(None이면 txt 생략).
+    반환: 확장자 없는 저장 경로 stem(Path).
+    """
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem = out_dir / f"{basename}_{ts}"
+
+    try:
+        page.screenshot(path=f"{stem}.png", full_page=True)
+    except Exception as exc:
+        print(f"  (스크린샷 저장 실패: {exc})")
+
+    try:
+        Path(f"{stem}.html").write_text(page.content(), encoding="utf-8")
+    except Exception as exc:
+        print(f"  (HTML 저장 실패: {exc})")
+
+    if summary_lines is not None:
+        try:
+            Path(f"{stem}.txt").write_text("\n".join(summary_lines), encoding="utf-8")
+        except Exception as exc:
+            print(f"  (요약 저장 실패: {exc})")
+
+    print(f"\n아티팩트 저장 완료: {stem}.png / .html / .txt")
+    return stem
