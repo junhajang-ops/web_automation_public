@@ -97,15 +97,20 @@ UUID_COL_WIDTH = 36
 ACCOUNT_TYPE_COL_WIDTH = 16  # 계정상태 고정폭 — 조회실패(...) 예외 메시지는 이 폭에서 말줄임 처리됨
 NICKNAME_HEADER = "닉네임"
 CREATE_DATE_HEADER = "계정생성일"
-# 리더보드 목록/상세 화면 공통: 보상 우편 제목 위젯(FALLBACK/한국어 탭 포함 여부)이
+# 리더보드 목록/상세 화면 공통: 보상 우편 제목 위젯(FALLBACK/한국어 탭 포함 여부)과
+# 순위 현황 위젯(즉시 초기화 버튼 + 과거 기록/현재 순위 탭 + 아이템/순위 구간/수량 컬럼)이
 # 화면 조작과 무관하게 비동기로 깜빡이며 구조 지문을 오탐시킨다. 여러 화면/단계에서
 # 재사용하므로 화면 국소가 아닌 위젯 단위 이름으로 둔다.
 LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS = [
     r"button: .*FALLBACK\|type=button$",
     r"button: 한국어\|type=button$",
+    r"button: 즉시 초기화\|type=button$",
+    r"role: tab$",
+    r"role: tablist$",
     r"role: tabpanel$",
     r"structural_text: label:보상 우편 제목(?: \(deprecated\))?$",
-    r"structural_text: tab:(?:.*FALLBACK|한국어)$",
+    r"structural_text: tab:(?:.*FALLBACK|한국어|과거 기록|현재 순위)$",
+    r"structural_text: col:(?:수량|순위 구간|아이템)$",
 ]
 
 
@@ -1112,7 +1117,7 @@ def run(
     if not found_any_board:
         raise RuntimeError(f"다음 검색어로 리더보드를 찾지 못했습니다: {', '.join(keywords)}")
 
-    step_and_verify_ui(page, "leaderboard_complete")
+    step_and_verify_ui(page, "leaderboard_complete", ignore_patterns=LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS)
 
     # 신규 유저(계정 240시간 이내)만 영수증검증으로 최근 결제액 합계 점검
     enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error)

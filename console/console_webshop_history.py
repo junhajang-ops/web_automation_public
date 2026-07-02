@@ -49,6 +49,13 @@ GRID_SCROLL_STEP_PX = 900
 GRID_SCROLL_IDLE_LIMIT = 3
 PAYITEM_ITEM_RE = re.compile(r"(?:^|_)payitem_(\d+)$", re.I)
 RETRY_MAX_RETRIES = get_retry_max_retries()
+# UUID별 지급 내역 조회 결과 유무(0건/N건)에 따라 그리드의 gridcell/rowgroup role 존재 여부가
+# 바뀐다. 여러 UUID를 순회하며 같은 스텝 이름으로 지문을 비교하므로, 이 role 유무 차이는
+# 실제 UI 구조 변경이 아니라 검색 결과 데이터 차이일 뿐이다.
+WEBSHOP_HISTORY_GRID_IGNORE_PATTERNS = [
+    r"role: gridcell$",
+    r"role: rowgroup$",
+]
 
 
 def parse_args():
@@ -142,7 +149,7 @@ def fill_webshop_uuid_search(page, uuid_value):
     search_input.wait_for(state="visible", timeout=15_000)
     search_input.scroll_into_view_if_needed()
     _wait_webshop_grid_not_loading(page)
-    record_step_dump(page, "webshop_history_uuid_input_pre")
+    record_step_dump(page, "webshop_history_uuid_input_pre", ignore_patterns=WEBSHOP_HISTORY_GRID_IGNORE_PATTERNS)
     search_input.fill("")
     search_input.fill(uuid_value)
 
@@ -153,7 +160,7 @@ def click_webshop_search_button(page):
     search_button.wait_for(state="visible", timeout=15_000)
     search_button.scroll_into_view_if_needed()
     _wait_webshop_grid_not_loading(page)
-    record_step_dump(page, "webshop_history_search_submit_pre")
+    record_step_dump(page, "webshop_history_search_submit_pre", ignore_patterns=WEBSHOP_HISTORY_GRID_IGNORE_PATTERNS)
     search_button.click()
     safe_wait_for_load(page, "networkidle", 5_000)
     _wait_webshop_grid_not_loading(page)
@@ -358,7 +365,7 @@ def summarize_payitem_history(
 
     fill_webshop_uuid_search(page, uuid_value)
     click_webshop_search_button(page)
-    step_and_verify_ui(page, "webshop_history_results")
+    step_and_verify_ui(page, "webshop_history_results", ignore_patterns=WEBSHOP_HISTORY_GRID_IGNORE_PATTERNS)
     rows = collect_all_webshop_rows(page)
 
     matched_rows = 0
