@@ -55,6 +55,8 @@ def apply_title_profile(
     require_project_name: bool = False,
     include_key_file: bool = False,
     include_gcp: bool = False,
+    default_block_reason: str = "",
+    include_block_reason: bool = False,
 ):
     if getattr(args, "gametitle", False) and not getattr(args, "title", ""):
         args.title = "gametitle"
@@ -104,5 +106,12 @@ def apply_title_profile(
                 "gcp_log",
                 os.environ.get(f"{prefix}_LOGNAME", "").strip(),
             )
+
+    if include_block_reason and hasattr(args, "reason"):
+        current_reason = getattr(args, "reason", "")
+        if current_reason == default_block_reason:
+            reason_env = os.environ.get(f"{prefix}_BLOCK_REASON", "").strip()
+            if reason_env:
+                setattr(args, "reason", reason_env)
 
     return args

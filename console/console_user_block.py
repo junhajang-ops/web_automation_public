@@ -745,6 +745,8 @@ def main():
         args,
         default_project_name=DEFAULT_PROJECT_NAME,
         require_project_name=True,
+        default_block_reason=DEFAULT_BLOCK_REASON,
+        include_block_reason=True,
     )
     import re as _re
     project_key = args.title.strip() if args.title.strip() else _re.sub(r"[^\w가-힣]", "_", args.project_name).strip("_")
