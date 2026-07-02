@@ -153,7 +153,7 @@ def open_leaderboard_page(page, nav_context: str = "initial"):
     link.scroll_into_view_if_needed()
     ignore_patterns = (
         LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS
-        if nav_context == "return"
+        if nav_context in ("return", "board_loop")
         else None
     )
     record_step_dump(
@@ -952,7 +952,9 @@ def run(
                 # 매 시도(첫 시도 포함) 항상 이 키워드의 목록 화면부터 다시 연다.
                 # 복구(초기화면 재접속) 뒤에는 항상 프로젝트 홈에 있으므로 "목록 화면이
                 # 이미 열려 있다"고 가정하지 않는다 — 절차 전체를 하나의 단위로 재시도한다.
-                open_leaderboard_list_and_search(page, keyword, nav_context="return")
+                # nav_context="board_loop": 이 호출 직전 화면은 항상 "직전 보드의 상세 페이지"이고,
+                # 키워드 전환용 "return"(직전 화면=목록 페이지)과는 실제 화면이 달라 지문 이름을 분리한다.
+                open_leaderboard_list_and_search(page, keyword, nav_context="board_loop")
                 enter_leaderboard_detail(page, board_name)
                 set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
                 board_rows = extract_top_ranks(page, board_name)
