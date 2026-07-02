@@ -50,6 +50,7 @@ from console_receipt_verification import (
 from console_webshop_history import summarize_payitem_history as summarize_payitem_history_lookup
 from console_step_verify import (
     configure_console_output,
+    display_width,
     pad_display,
     init_dump_dir,
     record_step_dump,
@@ -90,9 +91,9 @@ GCP_QUERY_MAX_RETRIES = max(1, int(os.environ.get("GCP_QUERY_MAX_RETRIES", "5"))
 GCP_QUERY_RETRY_WAIT_MS = max(0, int(os.environ.get("GCP_QUERY_RETRY_WAIT_MS", "1000")))
 RANK_COL_WIDTH = 4
 UUID_COL_WIDTH = 36
-NICKNAME_COL_WIDTH = 24
-ACCOUNT_TYPE_COL_WIDTH = 16
-CREATE_DATE_COL_WIDTH = 26
+ACCOUNT_TYPE_COL_WIDTH = 16  # 계정상태 고정폭 — 조회실패(...) 예외 메시지는 이 폭에서 말줄임 처리됨
+NICKNAME_HEADER = "닉네임"
+CREATE_DATE_HEADER = "계정생성일"
 LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS = [
     r"button: .*FALLBACK\|type=button$",
     r"button: 한국어\|type=button$",
@@ -860,14 +861,19 @@ def extract_top_ranks(page, board_name: str) -> list:
     return results
 
 
-def _format_board_row(rank, uuid_value, nickname, account_type, create_date) -> str:
+def _column_width_for(header: str, values) -> int:
+    """헤더 라벨과 실제 값 중 가장 넓은 표시폭 — 잘림 없이 불필요한 여백만 줄인다."""
+    return max([display_width(header)] + [display_width(v) for v in values])
+
+
+def _format_board_row(rank, uuid_value, nickname, account_type, create_date, nickname_width, create_date_width) -> str:
     return "  ".join(
         [
             pad_display(rank, RANK_COL_WIDTH, align="right"),
             pad_display(uuid_value, UUID_COL_WIDTH),
-            pad_display(nickname, NICKNAME_COL_WIDTH),
+            pad_display(nickname, nickname_width),
             pad_display(account_type, ACCOUNT_TYPE_COL_WIDTH),
-            pad_display(create_date, CREATE_DATE_COL_WIDTH),
+            pad_display(create_date, create_date_width),
         ]
     )
 
@@ -923,16 +929,22 @@ def run(
             # 각 보드 추출 직후 GCP 최근 로그(종류 무관)로 계정 생성일 보강
             enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, now_utc)
 
-            # 보드별 통합 출력
+            # 보드별 통합 출력 — 닉네임/계정생성일은 실제 값 기준 최소폭으로 계산해 여백 낭비를 줄인다.
+            nickname_width = _column_width_for(NICKNAME_HEADER, [r["nickname"] for r in board_rows])
+            create_date_width = _column_width_for(
+                CREATE_DATE_HEADER, [r.get("create_account_date", "") for r in board_rows]
+            )
             print(f"\n  == {board_name} ==")
             print(
                 "  "
                 + _format_board_row(
                     "순위",
                     "UUID",
-                    "닉네임",
+                    NICKNAME_HEADER,
                     "계정상태",
-                    "계정생성일",
+                    CREATE_DATE_HEADER,
+                    nickname_width,
+                    create_date_width,
                 )
             )
             print(
@@ -941,9 +953,9 @@ def run(
                     [
                         "-" * RANK_COL_WIDTH,
                         "-" * UUID_COL_WIDTH,
-                        "-" * NICKNAME_COL_WIDTH,
+                        "-" * nickname_width,
                         "-" * ACCOUNT_TYPE_COL_WIDTH,
-                        "-" * CREATE_DATE_COL_WIDTH,
+                        "-" * create_date_width,
                     ]
                 )
             )
@@ -956,6 +968,8 @@ def run(
                         r["nickname"],
                         r.get("account_type", ""),
                         r.get("create_account_date", ""),
+                        nickname_width,
+                        create_date_width,
                     )
                 )
             all_rows.extend(board_rows)
