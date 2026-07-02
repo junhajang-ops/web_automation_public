@@ -62,13 +62,13 @@ from test_config import apply_title_profile
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# cs 공용 GCP helper (build_logging_service, fetch_recent_pvp_match_log)
+# cs 공용 GCP helper (build_logging_service, fetch_recent_log_entry)
 _CS_DIR = BASE_DIR.parent / "cs"
 if str(_CS_DIR) not in sys.path:
     sys.path.insert(0, str(_CS_DIR))
 from cs_gcp_logging import (  # noqa: E402
     build_logging_service_from_credentials,
-    fetch_recent_pvp_match_log,
+    fetch_recent_log_entry,
     load_logging_credentials,
 )
 
@@ -491,11 +491,24 @@ def _is_retryable_gcp_error(err_text: str) -> bool:
     )
 
 
+def _build_pvp_match_filter(project: str, log_name: str, uuid: str) -> str:
+    log_path = f"projects/{project}/logs/{log_name}"
+    return (
+        f'logName="{log_path}" '
+        f'AND jsonPayload._user_id="{uuid}" '
+        f'AND jsonPayload.SUB_CATEGORY="log_pvp_match"'
+    )
+
+
 def _fetch_recent_pvp_match_log_with_retry(logging_service, project, log_name, uuid):
+    if not (project and log_name and uuid):
+        return None, "project/log_name/uuid 부족"
+
+    filter_expr = _build_pvp_match_filter(project, log_name, uuid)
     last_err = None
 
     for attempt in range(1, GCP_QUERY_MAX_RETRIES + 1):
-        entry, err = fetch_recent_pvp_match_log(logging_service, project, log_name, uuid)
+        entry, err = fetch_recent_log_entry(logging_service, project, filter_expr)
         if not err:
             return entry, None
 

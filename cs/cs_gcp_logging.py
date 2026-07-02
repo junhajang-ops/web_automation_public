@@ -45,24 +45,16 @@ def build_logging_service(key_path):
     return build_logging_service_from_credentials(load_logging_credentials(key_path))
 
 
-def fetch_recent_pvp_match_log(logging_service, project, log_name, uuid):
-    """해당 유저(uuid)의 가장 최근 log_pvp_match 로그 1건 조회.
+def fetch_recent_log_entry(logging_service, project, filter_expr):
+    """filter_expr 조건에 맞는 가장 최근 로그 1건 조회 (orderBy timestamp desc, pageSize 1).
 
+    로그 종류·SUB_CATEGORY 등 세부 조회 조건은 filter_expr로 호출부가 결정한다.
     읽기 전용(entries.list). 반환: (entry_dict | None, error | None).
     로그가 없는 경우는 정상 상태이므로 (None, None)을 반환한다(에러 아님).
     """
-    if not (project and log_name and uuid):
-        return None, "project/log_name/uuid 부족"
-
-    log_path = f"projects/{project}/logs/{log_name}"
-    filt = (
-        f'logName="{log_path}" '
-        f'AND jsonPayload._user_id="{uuid}" '
-        f'AND jsonPayload.SUB_CATEGORY="log_pvp_match"'
-    )
     body = {
         "resourceNames": [f"projects/{project}"],
-        "filter": filt,
+        "filter": filter_expr,
         "orderBy": "timestamp desc",
         "pageSize": 1,
     }
