@@ -857,14 +857,33 @@ def enrich_new_users_with_webshop_history(page, all_rows, start_url, project_nam
     webshop_session = {
         "initialized": False,
     }
+
+    def _recover_webshop_session():
+        # 세션이 초기화된 상태에서 UUID 하나가 실패해도, 다음 시도가 여전히 초기화된
+        # 것으로 착각해 fill_webshop_uuid_search를 바로 재시도하지 않도록 초기화 플래그를
+        # 되돌리고 콘솔 초기화면부터 다시 준비한다(prepare_console_project 재사용).
+        webshop_session["initialized"] = False
+        prepare_console_project(
+            page=page,
+            explicit_project_base="",
+            start_url=start_url,
+            project_name=project_name,
+        )
+
     for uuid_value in new_uuids:
         try:
-            summary = summarize_payitem_history_lookup(
-                page,
-                uuid_value,
-                start_url=start_url,
-                project_name=project_name,
-                session=webshop_session,
+            summary = retry_with_recovery(
+                action=lambda uuid_value=uuid_value: summarize_payitem_history_lookup(
+                    page,
+                    uuid_value,
+                    start_url=start_url,
+                    project_name=project_name,
+                    session=webshop_session,
+                ),
+                recovery=_recover_webshop_session,
+                label=f"지급내역 [{uuid_value}] 조회 재시도",
+                recovery_desc=f"콘솔 초기화면({start_url})으로 재접속 후 재시도합니다.",
+                max_retries=RETRY_MAX_RETRIES,
             )
             print(
                 f"    [{uuid_value}] "
@@ -872,8 +891,8 @@ def enrich_new_users_with_webshop_history(page, all_rows, start_url, project_nam
                 f"qty={summary['payitem_quantity_total']} "
                 f"sum={summary['payitem_item_value_sum']:,}"
             )
-        except Exception as exc:  # noqa: BLE001
-            print(f"    [{uuid_value}] 지급 내역 조회 실패: {exc}")
+        except Exception as exc:  # noqa: BLE001 — 재시도 소진 후에도 한 명 실패가 전체를 막지 않게
+            print(f"    [{uuid_value}] 지급 내역 조회 실패(재시도 소진) — 다음 UUID로 넘어갑니다: {exc}")
             summary = {
                 "payitem_match_count": "",
                 "payitem_quantity_total": "",
