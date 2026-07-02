@@ -40,6 +40,8 @@ DEFAULT_PROJECT_NAME = "\ud5cc\ud130 \ud0a4\uc6b0\uae30"
 DEFAULT_BLOCK_REASON = "UserBlock/Permanent_DataHack_Desc"
 DEFAULT_BLOCK_PERIOD_DAYS = 9999
 DEFAULT_DEVICE_BAN_COUNT = 3
+DEFAULT_RETRIES = 3
+RETRY_BACKOFF_MS = 2_000
 
 TEXT_USER_ACCESS = "\uc720\uc800 \uc811\uadfc"
 TEXT_DENY_TAB = "\uc811\uadfc \ucc28\ub2e8"
@@ -115,6 +117,15 @@ def parse_args():
     )
     parser.add_argument("--gametitle", action="store_true", help="Shortcut for --title gametitle")
     parser.add_argument("--hold-seconds", type=int, default=DEFAULT_HOLD_SECONDS)
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help=(
+            "페이지 로딩 실패 등 개별 오류 발생 시, 유저/디바이스 차단 절차 전체를 "
+            f"처음부터 다시 시도할 최대 횟수 (default: {DEFAULT_RETRIES})"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -233,6 +244,11 @@ def fill_device_search_uuid(page, dialog, uuid_value):
     record_step_dump(page, "device_block_uuid_fill_pre")
     uuid_input.fill("")
     uuid_input.fill(uuid_value)
+    actual_value = uuid_input.input_value()
+    if actual_value != uuid_value:
+        raise RuntimeError(
+            f"디바이스 조회 UUID 입력이 반영되지 않았습니다: expected='{uuid_value}', actual='{actual_value}'"
+        )
 
 
 def click_device_search_button(page, dialog):
@@ -352,6 +368,11 @@ def fill_block_uuid(page, dialog, uuid_value):
     record_step_dump(page, "user_block_uuid_fill_pre")
     uuid_input.fill("")
     uuid_input.fill(uuid_value)
+    actual_value = uuid_input.input_value()
+    if actual_value != uuid_value:
+        raise RuntimeError(
+            f"차단 대상 UUID 입력이 반영되지 않았습니다: expected='{uuid_value}', actual='{actual_value}'"
+        )
 
 
 def fill_block_period(page, dialog, period_days: int):
@@ -362,6 +383,11 @@ def fill_block_period(page, dialog, period_days: int):
     record_step_dump(page, "user_block_period_fill_pre")
     period_input.fill("")
     period_input.fill(str(period_days))
+    actual_value = period_input.input_value()
+    if actual_value != str(period_days):
+        raise RuntimeError(
+            f"차단 기간 입력이 반영되지 않았습니다: expected='{period_days}', actual='{actual_value}'"
+        )
 
 
 def set_rank_delete_checkbox(page, dialog, enabled: bool):
@@ -391,6 +417,11 @@ def fill_block_reason(page, dialog, reason_text, step_name="user_block_reason_fi
     record_step_dump(page, step_name)
     reason_input.fill("")
     reason_input.fill(reason_text)
+    actual_value = reason_input.input_value()
+    if actual_value != reason_text:
+        raise RuntimeError(
+            f"차단 사유 입력이 반영되지 않았습니다: expected='{reason_text}', actual='{actual_value}'"
+        )
 
 
 def submit_block_registration(page, dialog, step_name="user_block_submit_pre"):
@@ -444,6 +475,10 @@ def confirm_result_popup(page) -> str:
         print(f"[15] 차단 등록 성공. '{TEXT_CONFIRM}'을 누릅니다.")
         dialog.locator(f"text={TEXT_RESULT_SUCCESS}").first.wait_for(state="visible", timeout=5_000)
     else:
+        # 다이얼로그 제목 '안내'는 다른 오류 팝업에도 쓰이는 범용 텍스트이므로,
+        # 제목만으로 '이미 등록됨'으로 단정하지 않고 본문 문구까지 확인한다.
+        # 본문이 다르면 여기서 타임아웃 예외가 발생해 오판을 막는다.
+        dialog.locator(f"text={TEXT_ALREADY_BLOCKED_MSG}").first.wait_for(state="visible", timeout=5_000)
         print(f"[15] 이미 차단된 유저입니다. '{TEXT_CONFIRM}'을 누릅니다.")
 
     confirm_button = dialog.get_by_role("button", name=TEXT_CONFIRM, exact=True).first
@@ -741,6 +776,7 @@ def main():
     print(f"디바이스 차단: {not args.skip_device_block} (최하단 {args.device_ban_count}개)")
     print(f"시작 URL   : {args.start_url}")
     print(f"프로젝트명 : {args.project_name}")
+    print(f"최대 재시도: {args.retries}회 (개별 오류 시 절차 전체를 처음부터 재시도)")
 
     succeeded = False
     error_message = ""
@@ -757,20 +793,43 @@ def main():
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page = select_target_page(context, page)
-            result_summary = run_user_block(
-                page=page,
-                uuid_value=args.uuid,
-                reason_text=args.reason,
-                period_days=args.period_days,
-                remove_rank=not args.skip_rank_delete,
-                explicit_project_base=args.project_base,
-                start_url=args.start_url,
-                project_name=args.project_name,
-                project_key=project_key,
-                skip_device_block=args.skip_device_block,
-                device_ban_count=args.device_ban_count,
-            )
-            succeeded = True
+
+            # 유저/디바이스 차단은 '이미 등록됨' 판정이 실제 화면 문구까지 확인하므로
+            # 멱등적이다: 이전 시도가 등록 이후 단계(예: 결과 팝업 대기)에서 실패해도
+            # 재시도가 처음부터(prepare_console_project의 page.goto) 다시 진행하며
+            # 이미 등록된 항목은 '이미 등록됨'으로 정확히 인식하고 넘어간다.
+            # 따라서 페이지 로딩 지연 등 개별 오류는 절차 전체 재시도로 흡수한다.
+            max_attempts = max(1, args.retries)
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    if attempt > 1:
+                        print(f"\n[재시도 {attempt}/{max_attempts}] 절차를 처음부터 다시 시작합니다.")
+                    result_summary = run_user_block(
+                        page=page,
+                        uuid_value=args.uuid,
+                        reason_text=args.reason,
+                        period_days=args.period_days,
+                        remove_rank=not args.skip_rank_delete,
+                        explicit_project_base=args.project_base,
+                        start_url=args.start_url,
+                        project_name=args.project_name,
+                        project_key=project_key,
+                        skip_device_block=args.skip_device_block,
+                        device_ban_count=args.device_ban_count,
+                    )
+                    succeeded = True
+                    error_message = ""
+                    if attempt > 1:
+                        result_summary["attempts_used"] = attempt
+                    break
+                except Exception as exc:
+                    error_message = str(exc)
+                    print(f"\n[오류] 시도 {attempt}/{max_attempts} 실패: {error_message}")
+                    if attempt >= max_attempts:
+                        raise
+                    print(f"  {RETRY_BACKOFF_MS}ms 대기 후 재시도합니다.")
+                    page = select_target_page(context, page)
+                    page.wait_for_timeout(RETRY_BACKOFF_MS)
 
             print("\n=== 완료 ===")
             for key, value in result_summary.items():
@@ -782,7 +841,7 @@ def main():
 
         except Exception as exc:
             error_message = str(exc)
-            print(f"\n[오류] {error_message}")
+            print(f"\n[오류] 재시도를 모두 소진했습니다: {error_message}")
         finally:
             try:
                 page = select_target_page(context, page)
