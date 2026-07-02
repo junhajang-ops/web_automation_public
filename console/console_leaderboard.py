@@ -825,6 +825,19 @@ def enrich_new_users_with_webshop_history(page, all_rows, start_url, project_nam
             row.update(summary_by_uuid[row["uuid"]])
 
 
+def compute_total_payment_sum(all_rows):
+    """recent_payment_sum(영수증검증) + payitem_item_value_sum(지급내역) 합산 → 총 결제액 파악.
+
+    둘 다 정상 조회(정수)된 행에만 total_payment_sum을 채운다.
+    조회 실패로 빈 문자열이 섞인 경우는 합산하지 않고 비워 둔다(잘못된 합계 노출 방지).
+    """
+    for row in all_rows:
+        recent = row.get("recent_payment_sum")
+        payitem = row.get("payitem_item_value_sum")
+        if isinstance(recent, int) and isinstance(payitem, int):
+            row["total_payment_sum"] = recent + payitem
+
+
 def extract_top_ranks(page, board_name: str) -> list:
     print(f"[9] '{board_name}' 상세에서 {MAX_RANK}위 이내(공동순위 전원) 데이터를 읽습니다.")
     wait_for_leaderboard_rank_rows(page)
@@ -1022,6 +1035,17 @@ def run(
     # 신규 유저(계정 240시간 이내)만 영수증검증으로 최근 결제액 합계 점검
     enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error)
     enrich_new_users_with_webshop_history(page, all_rows, start_url, project_name)
+    compute_total_payment_sum(all_rows)
+
+    printed_uuids = set()
+    for row in all_rows:
+        uuid_value = row["uuid"]
+        if "total_payment_sum" not in row or uuid_value in printed_uuids:
+            continue
+        printed_uuids.add(uuid_value)
+        print(
+            f"    [{uuid_value}] 총 결제액(영수증검증+지급내역) = {row['total_payment_sum']:,}"
+        )
 
     return all_rows
 
@@ -1033,14 +1057,17 @@ def save_csv(rows: list, out_dir: Path) -> Path:
     gcp_fields = ["account_type", "max_pvp_ticket", "create_account_date", "pvp_log_count"]
     payment_fields = ["recent_payment_count", "recent_payment_sum"]
     webshop_fields = ["payitem_match_count", "payitem_quantity_total", "payitem_item_value_sum"]
+    total_fields = ["total_payment_sum"]
     has_gcp = any(row.get("account_type") for row in rows)
     has_payment = any("recent_payment_sum" in row for row in rows)
     has_webshop = any("payitem_item_value_sum" in row for row in rows)
+    has_total = any("total_payment_sum" in row for row in rows)
     fieldnames = (
         base_fields
         + (gcp_fields if has_gcp else [])
         + (payment_fields if has_payment else [])
         + (webshop_fields if has_webshop else [])
+        + (total_fields if has_total else [])
     )
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as file_obj:
         writer = csv.DictWriter(file_obj, fieldnames=fieldnames, extrasaction="ignore")
