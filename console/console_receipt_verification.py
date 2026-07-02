@@ -406,16 +406,24 @@ def collect_result(page, uuid_value, timeout_error, ensure_rows_per_page=True):
     print("[7] 영수증 검증 결과를 수집합니다.")
 
     no_result_locator = page.locator("text=검색 결과가 없습니다.").first
-    if wait_for_visible(no_result_locator, 5_000):
+    row_locator = page.locator("div.MuiDataGrid-row")
+
+    def _no_result_or_rows():
+        if no_result_locator.is_visible():
+            return "no_result"
+        if row_locator.first.is_visible():
+            return "rows"
+        return None
+
+    outcome = wait_until(page, _no_result_or_rows, timeout_ms=10_000)
+    if outcome == "no_result":
         print("    결과 없음.")
         return {
             "has_results": False,
             "row_count": 0,
             "rows": [],
         }
-
-    row_locator = page.locator("div.MuiDataGrid-row")
-    if not wait_for_visible(row_locator.first, 10_000):
+    if outcome != "rows":
         raise timeout_error(f"영수증 검증 결과 행이 나타나지 않았습니다: {uuid_value}")
 
     if ensure_rows_per_page:
