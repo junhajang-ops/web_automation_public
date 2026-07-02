@@ -47,3 +47,6 @@ finally {
     # 실행이 끝나면 평소 전원 관리 설정으로 되돌린다.
     [PowerHelper]::SetThreadExecutionState([PowerHelper+EXECUTION_STATE]::ES_CONTINUOUS) | Out-Null
 }
+
+# 창이 뜨자마자 바로 닫혀 결과를 못 보는 것을 막기 위해 잠깐 유지한다.
+Start-Sleep -Seconds 5
