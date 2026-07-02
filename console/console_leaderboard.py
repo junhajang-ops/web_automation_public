@@ -62,13 +62,13 @@ from test_config import apply_title_profile
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# cs 공용 GCP helper (build_logging_service, fetch_pvp_match_logs)
+# cs 공용 GCP helper (build_logging_service, fetch_recent_pvp_match_log)
 _CS_DIR = BASE_DIR.parent / "cs"
 if str(_CS_DIR) not in sys.path:
     sys.path.insert(0, str(_CS_DIR))
 from cs_gcp_logging import (  # noqa: E402
     build_logging_service_from_credentials,
-    fetch_pvp_match_logs,
+    fetch_recent_pvp_match_log,
     load_logging_credentials,
 )
 
@@ -92,8 +92,6 @@ RANK_COL_WIDTH = 4
 UUID_COL_WIDTH = 36
 NICKNAME_COL_WIDTH = 24
 ACCOUNT_TYPE_COL_WIDTH = 16
-MAX_TICKET_COL_WIDTH = 8
-LOG_COUNT_COL_WIDTH = 6
 LEADERBOARD_NAV_RETURN_IGNORE_PATTERNS = [
     r"button: .*FALLBACK\|type=button$",
     r"button: 한국어\|type=button$",
@@ -469,26 +467,6 @@ def _extract_rank_from_row(row) -> int | None:
     return None
 
 
-def get_week_start_utc() -> datetime.datetime:
-    """이번 주 월요일 05:00 KST → UTC naive datetime.
-
-    월요일 00:00~04:59 KST는 시즌 전환 시간대 → RuntimeError.
-    그 외(월 05:00 ~ 일 23:59)는 해당 주 월요일 05:00 KST를 반환.
-    """
-    KST = datetime.timezone(datetime.timedelta(hours=9))
-    now_kst = datetime.datetime.now(KST)
-    if now_kst.weekday() == 0 and now_kst.hour < 5:
-        raise RuntimeError(
-            f"월요일 00:00~04:59 KST는 시즌 전환 시간대입니다. "
-            f"현재 시각: {now_kst.strftime('%H:%M')} KST — 05:00 이후 재시도해 주세요."
-        )
-    days_since_monday = now_kst.weekday()
-    monday_kst = (now_kst - datetime.timedelta(days=days_since_monday)).replace(
-        hour=5, minute=0, second=0, microsecond=0
-    )
-    return monday_kst.astimezone(datetime.timezone.utc).replace(tzinfo=None)
-
-
 def _is_retryable_gcp_error(err_text: str) -> bool:
     text = (err_text or "").strip()
     if not text:
@@ -513,26 +491,17 @@ def _is_retryable_gcp_error(err_text: str) -> bool:
     )
 
 
-def _fetch_pvp_match_logs_with_retry(logging_service, project, log_name, uuid, since_iso, until_iso):
-    last_entries = []
+def _fetch_recent_pvp_match_log_with_retry(logging_service, project, log_name, uuid):
     last_err = None
 
     for attempt in range(1, GCP_QUERY_MAX_RETRIES + 1):
-        entries, err = fetch_pvp_match_logs(
-            logging_service,
-            project,
-            log_name,
-            uuid,
-            since_iso,
-            until_iso,
-        )
+        entry, err = fetch_recent_pvp_match_log(logging_service, project, log_name, uuid)
         if not err:
-            return entries, None
+            return entry, None
 
-        last_entries = entries
         last_err = err
         if not _is_retryable_gcp_error(err) or attempt >= GCP_QUERY_MAX_RETRIES:
-            return entries, err
+            return None, err
 
         wait_seconds = (GCP_QUERY_RETRY_WAIT_MS * attempt) / 1000
         print(
@@ -541,46 +510,19 @@ def _fetch_pvp_match_logs_with_retry(logging_service, project, log_name, uuid, s
         )
         time.sleep(wait_seconds)
 
-    return last_entries, last_err
+    return None, last_err
 
 
-def query_pvp_stats(logging_service, project, log_name, uuid, week_start_utc, now_utc) -> dict:
-    """GCP log_pvp_match 조회 → account_type / max_pvp_ticket 반환."""
-    since_iso = week_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    until_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-    entries, err = _fetch_pvp_match_logs_with_retry(
-        logging_service,
-        project,
-        log_name,
-        uuid,
-        since_iso,
-        until_iso,
-    )
+def query_pvp_stats(logging_service, project, log_name, uuid, now_utc) -> dict:
+    """유저의 가장 최근 log_pvp_match 로그 1건에서 계정 생성일(_create_account_date)만 읽는다."""
+    entry, err = _fetch_recent_pvp_match_log_with_retry(logging_service, project, log_name, uuid)
 
-    if err and not entries:
-        return {
-            "account_type": f"조회실패({err})",
-            "max_pvp_ticket": "",
-            "create_account_date": "",
-            "pvp_log_count": "",
-        }
     if err:
-        return {
-            "account_type": f"부분실패({err})",
-            "max_pvp_ticket": "",
-            "create_account_date": "",
-            "pvp_log_count": "",
-        }
-    if not entries:
-        return {"account_type": "로그없음", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": 0}
+        return {"account_type": f"조회실패({err})", "create_account_date": ""}
+    if entry is None:
+        return {"account_type": "로그없음", "create_account_date": ""}
 
-    # _create_account_date: 유저마다 동일 — 첫 로그에서 읽기
-    create_date_str = ""
-    for entry in entries:
-        val = (entry.get("jsonPayload") or {}).get("_create_account_date", "")
-        if val:
-            create_date_str = val
-            break
+    create_date_str = (entry.get("jsonPayload") or {}).get("_create_account_date", "")
 
     account_type = "기존 유저"
     if create_date_str:
@@ -593,22 +535,9 @@ def query_pvp_stats(logging_service, project, log_name, uuid, week_start_utc, no
     else:
         account_type = "create_date없음"
 
-    max_ticket = None
-    for entry in entries:
-        val = (entry.get("jsonPayload") or {}).get("pvp_match_ticket_after_val")
-        if val is not None:
-            try:
-                v = int(val)
-                if max_ticket is None or v > max_ticket:
-                    max_ticket = v
-            except (TypeError, ValueError):
-                pass
-
     return {
         "account_type": account_type,
-        "max_pvp_ticket": "" if max_ticket is None else max_ticket,
         "create_account_date": create_date_str,
-        "pvp_log_count": len(entries),
     }
 
 
@@ -644,22 +573,21 @@ def shutdown_gcp_executor():
         _gcp_executor = None
 
 
-def enrich_board_with_gcp(board_rows, credentials, project, log_name, week_start_utc, now_utc):
-    """board_rows 각 행에 GCP pvp_match 통계를 in-place로 추가.
+def enrich_board_with_gcp(board_rows, credentials, project, log_name, now_utc):
+    """board_rows 각 행에 GCP pvp_match 최근 로그 1건 기준 계정 생성일을 in-place로 추가.
     credentials는 공유, service만 스레드별. 스레드풀은 보드 간 재사용한다."""
     if not credentials or not project or not log_name:
         for row in board_rows:
-            row.update({"account_type": "GCP미설정", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": ""})
+            row.update({"account_type": "GCP미설정", "create_account_date": ""})
         return
-    print(f"    [GCP] {len(board_rows)}명 pvp_match 로그 병렬 조회 중 "
-          f"(기간: {week_start_utc.strftime('%m/%d %H:%MUTC')} ~ 현재)...")
+    print(f"    [GCP] {len(board_rows)}명 pvp_match 최근 로그 1건씩 계정 생성일 조회 중...")
 
     def _work(uuid_value):
         # 스레드별 service로 조회 → SSL 연결 공유 충돌 방지
         service = _thread_logging_service(credentials)
         if service is None:
             raise RuntimeError("logging service build 실패(credentials 확인)")
-        return query_pvp_stats(service, project, log_name, uuid_value, week_start_utc, now_utc)
+        return query_pvp_stats(service, project, log_name, uuid_value, now_utc)
 
     executor = _get_gcp_executor()
     futures = {executor.submit(_work, row["uuid"]): row for row in board_rows}
@@ -668,7 +596,7 @@ def enrich_board_with_gcp(board_rows, credentials, project, log_name, week_start
         try:
             row.update(future.result())
         except Exception as exc:
-            row.update({"account_type": f"조회실패({exc})", "max_pvp_ticket": "", "create_account_date": "", "pvp_log_count": ""})
+            row.update({"account_type": f"조회실패({exc})", "create_account_date": ""})
 
 
 def _parse_price_to_int(text: str) -> int:
@@ -921,15 +849,13 @@ def extract_top_ranks(page, board_name: str) -> list:
     return results
 
 
-def _format_board_row(rank, uuid_value, nickname, account_type, max_ticket, log_count) -> str:
+def _format_board_row(rank, uuid_value, nickname, account_type) -> str:
     return "  ".join(
         [
             pad_display(rank, RANK_COL_WIDTH, align="right"),
             pad_display(uuid_value, UUID_COL_WIDTH),
             pad_display(nickname, NICKNAME_COL_WIDTH),
             pad_display(account_type, ACCOUNT_TYPE_COL_WIDTH),
-            pad_display(max_ticket, MAX_TICKET_COL_WIDTH, align="right"),
-            pad_display(log_count, LOG_COUNT_COL_WIDTH, align="right"),
         ]
     )
 
@@ -953,7 +879,6 @@ def run(
     )
 
     now_utc = datetime.datetime.utcnow()
-    week_start_utc = get_week_start_utc()
 
     all_rows = []
     found_any_board = False
@@ -983,8 +908,8 @@ def run(
             set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
             board_rows = extract_top_ranks(page, board_name)
 
-            # 각 보드 추출 직후 GCP pvp_match 로그로 계정 상태 보강
-            enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, week_start_utc, now_utc)
+            # 각 보드 추출 직후 GCP pvp_match 최근 로그로 계정 생성일 보강
+            enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, now_utc)
 
             # 보드별 통합 출력
             print(f"\n  == {board_name} ==")
@@ -995,8 +920,6 @@ def run(
                     "UUID",
                     "닉네임",
                     "계정상태",
-                    "최고티켓",
-                    "로그수",
                 )
             )
             print(
@@ -1007,8 +930,6 @@ def run(
                         "-" * UUID_COL_WIDTH,
                         "-" * NICKNAME_COL_WIDTH,
                         "-" * ACCOUNT_TYPE_COL_WIDTH,
-                        "-" * MAX_TICKET_COL_WIDTH,
-                        "-" * LOG_COUNT_COL_WIDTH,
                     ]
                 )
             )
@@ -1020,8 +941,6 @@ def run(
                         r["uuid"],
                         r["nickname"],
                         r.get("account_type", ""),
-                        str(r.get("max_pvp_ticket", "")),
-                        str(r.get("pvp_log_count", "")),
                     )
                 )
             all_rows.extend(board_rows)
@@ -1054,7 +973,7 @@ def save_csv(rows: list, out_dir: Path) -> Path:
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = out_dir / f"leaderboard_pvprank_{ts}.csv"
     base_fields = ["leaderboard", "rank", "uuid", "nickname"]
-    gcp_fields = ["account_type", "max_pvp_ticket", "create_account_date", "pvp_log_count"]
+    gcp_fields = ["account_type", "create_account_date"]
     payment_fields = ["recent_payment_count", "recent_payment_sum"]
     webshop_fields = ["payitem_match_count", "payitem_quantity_total", "payitem_item_value_sum"]
     total_fields = ["total_payment_sum"]

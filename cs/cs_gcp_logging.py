@@ -45,48 +45,40 @@ def build_logging_service(key_path):
     return build_logging_service_from_credentials(load_logging_credentials(key_path))
 
 
-def fetch_pvp_match_logs(logging_service, project, log_name, uuid, since_utc_iso, until_utc_iso):
-    """기간 내 해당 유저의 log_pvp_match 로그 전체 조회 (페이지네이션 포함).
+def fetch_recent_pvp_match_log(logging_service, project, log_name, uuid):
+    """해당 유저(uuid)의 가장 최근 log_pvp_match 로그 1건 조회.
 
-    반환: (entries_list, error | None)
+    읽기 전용(entries.list). 반환: (entry_dict | None, error | None).
+    로그가 없는 경우는 정상 상태이므로 (None, None)을 반환한다(에러 아님).
     """
     if not (project and log_name and uuid):
-        return [], "project/log_name/uuid 부족"
+        return None, "project/log_name/uuid 부족"
 
     log_path = f"projects/{project}/logs/{log_name}"
     filt = (
         f'logName="{log_path}" '
         f'AND jsonPayload._user_id="{uuid}" '
-        f'AND jsonPayload.SUB_CATEGORY="log_pvp_match" '
-        f'AND timestamp >= "{since_utc_iso}" '
-        f'AND timestamp <= "{until_utc_iso}"'
+        f'AND jsonPayload.SUB_CATEGORY="log_pvp_match"'
     )
+    body = {
+        "resourceNames": [f"projects/{project}"],
+        "filter": filt,
+        "orderBy": "timestamp desc",
+        "pageSize": 1,
+    }
 
-    all_entries = []
-    page_token = None
     try:
         from googleapiclient.errors import HttpError
-        while True:
-            body = {
-                "resourceNames": [f"projects/{project}"],
-                "filter": filt,
-                "orderBy": "timestamp desc",
-                "pageSize": 1000,
-            }
-            if page_token:
-                body["pageToken"] = page_token
-            resp = logging_service.entries().list(body=body).execute()
-            all_entries.extend(resp.get("entries", []))
-            page_token = resp.get("nextPageToken")
-            if not page_token:
-                break
+
+        resp = logging_service.entries().list(body=body).execute()
     except HttpError as exc:
         status = getattr(getattr(exc, "resp", None), "status", "?")
-        return all_entries, f"HTTP {status}"
+        return None, f"HTTP {status}"
     except Exception as exc:  # noqa: BLE001
-        return all_entries, str(exc)
+        return None, str(exc)
 
-    return all_entries, None
+    entries = resp.get("entries", [])
+    return (entries[0], None) if entries else (None, None)
 
 
 def fetch_recent_shop_click_log(logging_service, project, log_name, uuid):
