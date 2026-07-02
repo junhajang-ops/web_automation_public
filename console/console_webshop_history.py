@@ -149,6 +149,7 @@ def click_webshop_search_button(page):
     search_button = page.get_by_role("button", name="검색", exact=True).first
     search_button.wait_for(state="visible", timeout=15_000)
     search_button.scroll_into_view_if_needed()
+    _wait_webshop_grid_not_loading(page)
     record_step_dump(page, "webshop_history_search_submit_pre")
     search_button.click()
     safe_wait_for_load(page, "networkidle", 5_000)
