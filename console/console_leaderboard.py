@@ -491,20 +491,17 @@ def _is_retryable_gcp_error(err_text: str) -> bool:
     )
 
 
-def _build_pvp_match_filter(project: str, log_name: str, uuid: str) -> str:
+def _build_recent_user_log_filter(project: str, log_name: str, uuid: str) -> str:
+    # SUB_CATEGORY 제한 없음 — 해당 유저의 로그 종류를 가리지 않고 가장 최근 생성된 것을 조회한다.
     log_path = f"projects/{project}/logs/{log_name}"
-    return (
-        f'logName="{log_path}" '
-        f'AND jsonPayload._user_id="{uuid}" '
-        f'AND jsonPayload.SUB_CATEGORY="log_pvp_match"'
-    )
+    return f'logName="{log_path}" AND jsonPayload._user_id="{uuid}"'
 
 
-def _fetch_recent_pvp_match_log_with_retry(logging_service, project, log_name, uuid):
+def _fetch_recent_user_log_with_retry(logging_service, project, log_name, uuid):
     if not (project and log_name and uuid):
         return None, "project/log_name/uuid 부족"
 
-    filter_expr = _build_pvp_match_filter(project, log_name, uuid)
+    filter_expr = _build_recent_user_log_filter(project, log_name, uuid)
     last_err = None
 
     for attempt in range(1, GCP_QUERY_MAX_RETRIES + 1):
@@ -526,9 +523,9 @@ def _fetch_recent_pvp_match_log_with_retry(logging_service, project, log_name, u
     return None, last_err
 
 
-def query_pvp_stats(logging_service, project, log_name, uuid, now_utc) -> dict:
-    """유저의 가장 최근 log_pvp_match 로그 1건에서 계정 생성일(_create_account_date)만 읽는다."""
-    entry, err = _fetch_recent_pvp_match_log_with_retry(logging_service, project, log_name, uuid)
+def query_account_creation_info(logging_service, project, log_name, uuid, now_utc) -> dict:
+    """유저의 가장 최근 로그(종류 무관) 1건에서 계정 생성일(_create_account_date)만 읽는다."""
+    entry, err = _fetch_recent_user_log_with_retry(logging_service, project, log_name, uuid)
 
     if err:
         return {"account_type": f"조회실패({err})", "create_account_date": ""}
@@ -554,7 +551,7 @@ def query_pvp_stats(logging_service, project, log_name, uuid, now_utc) -> dict:
     }
 
 
-# pvp_match 병렬 조회용. credentials는 1회 로드해 공유하고(thread-safe),
+# GCP 로그 병렬 조회용. credentials는 1회 로드해 공유하고(thread-safe),
 # httplib2/SSL을 품은 service(회선)만 스레드별로 build한다.
 # 스레드풀은 전체 조회가 끝날 때까지 재사용 → service build가 총 max_workers회로 끝난다.
 _gcp_tls = threading.local()
@@ -571,7 +568,7 @@ def _thread_logging_service(credentials):
 
 
 def _get_gcp_executor():
-    """pvp_match 병렬 조회용 공용 스레드풀. 보드마다 새로 만들지 않고 재사용한다."""
+    """GCP 로그 병렬 조회용 공용 스레드풀. 보드마다 새로 만들지 않고 재사용한다."""
     global _gcp_executor
     if _gcp_executor is None:
         _gcp_executor = ThreadPoolExecutor(max_workers=4)  # 동시 요청 burst 완화(429 감소)
@@ -587,20 +584,20 @@ def shutdown_gcp_executor():
 
 
 def enrich_board_with_gcp(board_rows, credentials, project, log_name, now_utc):
-    """board_rows 각 행에 GCP pvp_match 최근 로그 1건 기준 계정 생성일을 in-place로 추가.
+    """board_rows 각 행에 GCP 최근 로그(종류 무관) 1건 기준 계정 생성일을 in-place로 추가.
     credentials는 공유, service만 스레드별. 스레드풀은 보드 간 재사용한다."""
     if not credentials or not project or not log_name:
         for row in board_rows:
             row.update({"account_type": "GCP미설정", "create_account_date": ""})
         return
-    print(f"    [GCP] {len(board_rows)}명 pvp_match 최근 로그 1건씩 계정 생성일 조회 중...")
+    print(f"    [GCP] {len(board_rows)}명 최근 로그 1건씩 계정 생성일 조회 중...")
 
     def _work(uuid_value):
         # 스레드별 service로 조회 → SSL 연결 공유 충돌 방지
         service = _thread_logging_service(credentials)
         if service is None:
             raise RuntimeError("logging service build 실패(credentials 확인)")
-        return query_pvp_stats(service, project, log_name, uuid_value, now_utc)
+        return query_account_creation_info(service, project, log_name, uuid_value, now_utc)
 
     executor = _get_gcp_executor()
     futures = {executor.submit(_work, row["uuid"]): row for row in board_rows}
@@ -921,7 +918,7 @@ def run(
             set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
             board_rows = extract_top_ranks(page, board_name)
 
-            # 각 보드 추출 직후 GCP pvp_match 최근 로그로 계정 생성일 보강
+            # 각 보드 추출 직후 GCP 최근 로그(종류 무관)로 계정 생성일 보강
             enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, now_utc)
 
             # 보드별 통합 출력
@@ -1063,7 +1060,7 @@ def main():
     if args.key:
         credentials = load_logging_credentials(args.key)
         if credentials is None:
-            print("[경고] GCP 서비스계정 로드 실패. pvp_match 로그 조회 없이 진행합니다.")
+            print("[경고] GCP 서비스계정 로드 실패. 계정 생성일 로그 조회 없이 진행합니다.")
 
     print("=" * 55)
     print(" Leaderboard PvPRank extractor")
