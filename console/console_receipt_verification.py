@@ -52,6 +52,11 @@ GRID_SCROLL_IDLE_LIMIT = 3
 RECEIPT_IGNORE_PATTERNS = [
     r"button: badge\|type=button$",
 ]
+# 'receipt_results' 전용: 검색 직후 DataGrid 로딩 스피너(progressbar) 유무는
+# 이전 실행 baseline과의 타이밍 차이일 뿐 실제 화면 구조 변경이 아니다(오탐).
+RECEIPT_RESULTS_IGNORE_PATTERNS = RECEIPT_IGNORE_PATTERNS + [
+    r"role: progressbar$",
+]
 RETRY_MAX_RETRIES = get_retry_max_retries()
 
 # (data-field, 화면 컬럼명) — dump console_20260623_121712.html 확인
@@ -490,7 +495,7 @@ def run_receipt_verification(
     wait_for_receipt_page_render_stable(page)
     fill_uuid_search(page, uuid_value)
     click_search_button(page)
-    step_and_verify_ui(page, "receipt_results", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
+    step_and_verify_ui(page, "receipt_results", ignore_patterns=RECEIPT_RESULTS_IGNORE_PATTERNS)
     return collect_result(page, uuid_value, timeout_error, ensure_rows_per_page=True)
 
 
