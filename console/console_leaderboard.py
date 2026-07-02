@@ -390,14 +390,26 @@ def enter_leaderboard_detail(page, board_name: str):
 
 
 def enter_leaderboard_detail_with_retry(page, keyword: str, board_name: str, start_url: str, project_name: str):
-    """진입 확인 실패 시 목록 화면을 다시 열고 재클릭 — 클릭이 씹혀 화면 전환이 안 되는 경우 대응."""
+    """진입 확인 실패 시 콘솔 초기화면(start_url)으로 재접속한 뒤 목록을 다시 열고 재클릭한다.
+
+    다른 재시도 지점(open_leaderboard_list_and_search_with_retry)과 동일하게
+    복구 동작은 항상 초기화면 재접속으로 통일한다 — "가벼운 조치를 먼저 해보고
+    안 되면 무거운 조치로 넘어간다"는 단계적 판단을 이 함수가 임의로 하지 않는다.
+    """
+    def _recover():
+        prepare_console_project(
+            page=page,
+            explicit_project_base="",
+            start_url=start_url,
+            project_name=project_name,
+        )
+        open_leaderboard_list_and_search(page, keyword, nav_context="return")
+
     retry_with_recovery(
         action=lambda: enter_leaderboard_detail(page, board_name),
-        recovery=lambda: open_leaderboard_list_and_search_with_retry(
-            page, keyword, start_url, project_name, nav_context="return"
-        ),
+        recovery=_recover,
         label=f"진입 재시도 '{board_name}'",
-        recovery_desc="목록을 다시 열고 재시도합니다.",
+        recovery_desc=f"콘솔 초기화면({start_url})으로 재접속 후 목록을 다시 열고 재시도합니다.",
         max_retries=RETRY_MAX_RETRIES,
     )
 
