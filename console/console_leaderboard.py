@@ -171,6 +171,14 @@ def parse_args():
         action="store_true",
         help="예약 실행용: 오류 발생 시 Enter 입력 대기 없이 즉시 종료",
     )
+    parser.add_argument(
+        "--test-single-board",
+        action="store_true",
+        help=(
+            "테스트용: 검색된 리더보드 중 1개만 조회한 뒤 나머지 키워드/리더보드는 "
+            "건너뛰고 바로 다음 단계(신규유저 영수증검증 등)로 진행합니다."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -973,6 +981,7 @@ def run(
     gcp_project="",
     gcp_log="",
     timeout_error=Exception,
+    single_board_test=False,
 ) -> tuple:
     prepare_console_project(
         page=page,
@@ -1002,6 +1011,10 @@ def run(
         if not board_names:
             print(f"    검색어 '{keyword}'로 리더보드를 찾지 못했습니다 — 건너뜁니다.")
             continue
+
+        if single_board_test:
+            print(f"    [테스트 모드] 리더보드 1개만 조회하고 다음 단계로 넘어갑니다: {board_names[0]}")
+            board_names = board_names[:1]
 
         for board_name in board_names:
             def _process_board(board_name=board_name):
@@ -1087,6 +1100,9 @@ def run(
                 )
             all_rows.extend(board_rows)
             found_any_board = True
+
+        if single_board_test:
+            break
 
     if skipped_boards:
         print(f"\n[요약] 스킵된 리더보드 {len(skipped_boards)}건:")
@@ -1213,6 +1229,8 @@ def main():
     print(f"덤프     : {out_dir} (30일 초과 자동 삭제)")
     gcp_ready = credentials and args.gcp_project and args.gcp_log
     print(f"GCP 조회 : {'활성 (' + args.gcp_project + ' / ' + args.gcp_log + ')' if gcp_ready else '비활성 (--key / --gcp-project / --gcp-log 미지정)'}")
+    if args.test_single_board:
+        print("테스트   : --test-single-board 활성 — 리더보드 1개만 조회 후 다음 단계로 진행")
 
     succeeded = False
     all_rows = []
@@ -1240,6 +1258,7 @@ def main():
                 gcp_project=args.gcp_project,
                 gcp_log=args.gcp_log,
                 timeout_error=_timeout_error,
+                single_board_test=args.test_single_board,
             )
             save_csv(all_rows, LEADERBOARD_OUT_DIR)
 
