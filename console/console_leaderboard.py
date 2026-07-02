@@ -909,7 +909,7 @@ def run(
     gcp_project="",
     gcp_log="",
     timeout_error=Exception,
-) -> list:
+) -> tuple:
     prepare_console_project(
         page=page,
         explicit_project_base=explicit_project_base,
@@ -920,6 +920,7 @@ def run(
     now_utc = datetime.datetime.utcnow()
 
     all_rows = []
+    skipped_boards = []
     found_any_board = False
     is_first_open = True
 
@@ -943,12 +944,17 @@ def run(
                 print("[7-retry] 다음 리더보드를 위해 목록 화면을 다시 엽니다.")
                 open_leaderboard_list_and_search(page, keyword, nav_context="return")
 
-            enter_leaderboard_detail_with_retry(page, keyword, board_name)
-            set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
-            board_rows = extract_top_ranks(page, board_name)
+            try:
+                enter_leaderboard_detail_with_retry(page, keyword, board_name)
+                set_rows_per_page(page, DETAIL_ROWS_PER_PAGE, "리더보드 상세 표시 개수", verify_prefix=f"detail_rows_{board_name}")
+                board_rows = extract_top_ranks(page, board_name)
 
-            # 각 보드 추출 직후 GCP 최근 로그(종류 무관)로 계정 생성일 보강
-            enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, now_utc)
+                # 각 보드 추출 직후 GCP 최근 로그(종류 무관)로 계정 생성일 보강
+                enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, now_utc)
+            except Exception as exc:  # noqa: BLE001 — 개별 보드 최종 실패가 전체 실행을 막지 않게
+                print(f"    [스킵] '{board_name}' 조회 최종 실패 — 다음 리더보드로 넘어갑니다: {exc}")
+                skipped_boards.append({"keyword": keyword, "leaderboard": board_name, "error": str(exc)})
+                continue
 
             # 보드별 통합 출력 — 닉네임/계정생성일은 실제 값 기준 최소폭으로 계산해 여백 낭비를 줄인다.
             nickname_width = _column_width_for(NICKNAME_HEADER, [r["nickname"] for r in board_rows])
@@ -996,6 +1002,11 @@ def run(
             all_rows.extend(board_rows)
             found_any_board = True
 
+    if skipped_boards:
+        print(f"\n[요약] 스킵된 리더보드 {len(skipped_boards)}건:")
+        for skipped in skipped_boards:
+            print(f"    - [{skipped['keyword']}] {skipped['leaderboard']}: {skipped['error']}")
+
     if not found_any_board:
         raise RuntimeError(f"다음 검색어로 리더보드를 찾지 못했습니다: {', '.join(keywords)}")
 
@@ -1016,7 +1027,7 @@ def run(
             f"    [{uuid_value}] 총 결제액(영수증검증+지급내역) = {row['total_payment_sum']:,}"
         )
 
-    return all_rows
+    return all_rows, skipped_boards
 
 
 def save_csv(rows: list, out_dir: Path) -> Path:
@@ -1046,7 +1057,7 @@ def save_csv(rows: list, out_dir: Path) -> Path:
     return csv_path
 
 
-def save_artifacts(page, out_dir: Path, succeeded: bool, rows: list, error_message: str):
+def save_artifacts(page, out_dir: Path, succeeded: bool, rows: list, error_message: str, skipped_boards: list = None):
     unique_boards = sorted({row["leaderboard"] for row in rows})
     lines = [
         f"succeeded={succeeded}",
@@ -1055,6 +1066,10 @@ def save_artifacts(page, out_dir: Path, succeeded: bool, rows: list, error_messa
         f"board_count={len(unique_boards)}",
         f"boards={', '.join(unique_boards[:20])}",
     ]
+    if skipped_boards:
+        lines.append(f"skipped_count={len(skipped_boards)}")
+        for skipped in skipped_boards:
+            lines.append(f"skipped=[{skipped['keyword']}] {skipped['leaderboard']}: {skipped['error']}")
     if error_message:
         lines.append(f"error={error_message}")
 
@@ -1115,6 +1130,7 @@ def main():
 
     succeeded = False
     all_rows = []
+    skipped_boards = []
     error_message = ""
     page = None
 
@@ -1128,7 +1144,7 @@ def main():
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page = select_target_page(context, page)
-            all_rows = run(
+            all_rows, skipped_boards = run(
                 page=page,
                 explicit_project_base=args.project_base,
                 start_url=args.start_url,
@@ -1143,6 +1159,8 @@ def main():
 
             board_count = len(set(row["leaderboard"] for row in all_rows))
             print(f"\n=== 완료: {board_count}개 리더보드, 총 {len(all_rows)}행 ===")
+            if skipped_boards:
+                print(f"    (스킵된 리더보드 {len(skipped_boards)}건 — 상세는 위 [요약]/artifacts 참고)")
             succeeded = True
 
             if args.hold_seconds > 0:
@@ -1166,6 +1184,7 @@ def main():
                         succeeded=succeeded,
                         rows=all_rows,
                         error_message=error_message,
+                        skipped_boards=skipped_boards,
                     )
             finally:
                 context.close()
