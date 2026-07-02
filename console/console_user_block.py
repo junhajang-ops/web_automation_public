@@ -5,6 +5,9 @@ Console console user block helper.
 Warning:
 - Running this script performs an actual mutation in the Console console.
 - It opens the user-access page, registers a block, and confirms the result.
+- --uuid accepts a comma-separated list. Each UUID is processed independently
+  with its own retry budget (--retries); a UUID that exhausts its retries is
+  skipped and the batch continues with the next UUID.
 """
 
 import argparse
@@ -75,7 +78,11 @@ def parse_args():
     parser.add_argument(
         "--uuid",
         default=TEST_UUID,
-        help=f"Target user UUID (default: {TEST_UUID})",
+        help=(
+            "Target user UUID(s). 콤마로 여러 개 지정 가능(예: uuid1,uuid2) — "
+            "각 UUID는 독립적으로 처리되며 한 UUID가 재시도를 모두 소진해도 "
+            f"다음 UUID로 계속 진행합니다 (default: {TEST_UUID})"
+        ),
     )
     parser.add_argument(
         "--reason",
@@ -759,6 +766,10 @@ def main():
     project_key = args.title.strip() if args.title.strip() else _re.sub(r"[^\w가-힣]", "_", args.project_name).strip("_")
     sync_playwright, _timeout_error = load_playwright()
 
+    uuid_list = [u.strip() for u in args.uuid.split(",") if u.strip()]
+    if not uuid_list:
+        raise SystemExit("[오류] --uuid 값이 비어 있습니다.")
+
     profile_dir = BASE_DIR / args.profile
     out_dir = BASE_DIR / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -769,18 +780,16 @@ def main():
     print("=" * 60)
     print(f"프로필 폴더: {profile_dir.name}")
     print(f"출력 폴더  : {out_dir.name}")
-    print(f"대상 UUID  : {args.uuid}")
+    print(f"대상 UUID  : {len(uuid_list)}건 — {', '.join(uuid_list)}")
     print(f"차단 기간  : {args.period_days}")
     print(f"차단 사유  : {args.reason}")
     print(f"리더보드 삭제: {not args.skip_rank_delete}")
     print(f"디바이스 차단: {not args.skip_device_block} (최하단 {args.device_ban_count}개)")
     print(f"시작 URL   : {args.start_url}")
     print(f"프로젝트명 : {args.project_name}")
-    print(f"최대 재시도: {args.retries}회 (개별 오류 시 절차 전체를 처음부터 재시도)")
+    print(f"최대 재시도: {args.retries}회/UUID (개별 오류 시 해당 UUID 절차 전체를 처음부터 재시도, 소진 시 다음 UUID로 진행)")
 
-    succeeded = False
-    error_message = ""
-    result_summary = None
+    batch_results = []  # [{"uuid", "succeeded", "error", "result_summary"}]
 
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
@@ -790,73 +799,122 @@ def main():
             args=["--start-maximized"],
         )
 
+        page = context.pages[0] if context.pages else context.new_page()
+        page = select_target_page(context, page)
+
         try:
-            page = context.pages[0] if context.pages else context.new_page()
-            page = select_target_page(context, page)
+            for uuid_index, uuid_value in enumerate(uuid_list, start=1):
+                print(f"\n{'=' * 60}")
+                print(f" [{uuid_index}/{len(uuid_list)}] UUID={uuid_value} 처리 시작")
+                print("=" * 60)
 
-            # 유저/디바이스 차단은 '이미 등록됨' 판정이 실제 화면 문구까지 확인하므로
-            # 멱등적이다: 이전 시도가 등록 이후 단계(예: 결과 팝업 대기)에서 실패해도
-            # 재시도가 처음부터(prepare_console_project의 page.goto) 다시 진행하며
-            # 이미 등록된 항목은 '이미 등록됨'으로 정확히 인식하고 넘어간다.
-            # 따라서 페이지 로딩 지연 등 개별 오류는 절차 전체 재시도로 흡수한다.
-            max_attempts = max(1, args.retries)
-            for attempt in range(1, max_attempts + 1):
+                uuid_succeeded = False
+                uuid_error = ""
+                uuid_result_summary = None
+
+                # 유저/디바이스 차단은 '이미 등록됨' 판정이 실제 화면 문구까지 확인하므로
+                # 멱등적이다: 이전 시도가 등록 이후 단계(예: 결과 팝업 대기)에서 실패해도
+                # 재시도가 처음부터(prepare_console_project의 page.goto) 다시 진행하며
+                # 이미 등록된 항목은 '이미 등록됨'으로 정확히 인식하고 넘어간다.
+                # 따라서 페이지 로딩 지연·값 불일치 등 개별 오류는 이 UUID의 절차 전체
+                # 재시도로 흡수하고, 재시도를 모두 소진해도 이 UUID만 건너뛰고
+                # 다음 UUID로 계속 진행한다(하나의 실패가 전체 배치를 막지 않는다).
+                max_attempts = max(1, args.retries)
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        if attempt > 1:
+                            print(f"\n[재시도 {attempt}/{max_attempts}] uuid={uuid_value} 절차를 처음부터 다시 시작합니다.")
+                        uuid_result_summary = run_user_block(
+                            page=page,
+                            uuid_value=uuid_value,
+                            reason_text=args.reason,
+                            period_days=args.period_days,
+                            remove_rank=not args.skip_rank_delete,
+                            explicit_project_base=args.project_base,
+                            start_url=args.start_url,
+                            project_name=args.project_name,
+                            project_key=project_key,
+                            skip_device_block=args.skip_device_block,
+                            device_ban_count=args.device_ban_count,
+                        )
+                        uuid_succeeded = True
+                        uuid_error = ""
+                        if attempt > 1:
+                            uuid_result_summary["attempts_used"] = attempt
+                        break
+                    except Exception as exc:
+                        uuid_error = str(exc)
+                        print(f"\n[오류] uuid={uuid_value} 시도 {attempt}/{max_attempts} 실패: {uuid_error}")
+                        if attempt >= max_attempts:
+                            print(f"[스킵] uuid={uuid_value}: 재시도를 모두 소진해 이 UUID는 건너뛰고 다음 UUID로 진행합니다.")
+                            break
+                        print(f"  {RETRY_BACKOFF_MS}ms 대기 후 재시도합니다.")
+                        page = select_target_page(context, page)
+                        page.wait_for_timeout(RETRY_BACKOFF_MS)
+
+                if uuid_succeeded:
+                    print(f"\n=== uuid={uuid_value} 완료 ===")
+                    for key, value in uuid_result_summary.items():
+                        print(f"  {key}: {value}")
+
+                batch_results.append(
+                    {
+                        "uuid": uuid_value,
+                        "succeeded": uuid_succeeded,
+                        "error": uuid_error,
+                        "result_summary": uuid_result_summary,
+                    }
+                )
+
                 try:
-                    if attempt > 1:
-                        print(f"\n[재시도 {attempt}/{max_attempts}] 절차를 처음부터 다시 시작합니다.")
-                    result_summary = run_user_block(
-                        page=page,
-                        uuid_value=args.uuid,
-                        reason_text=args.reason,
-                        period_days=args.period_days,
-                        remove_rank=not args.skip_rank_delete,
-                        explicit_project_base=args.project_base,
-                        start_url=args.start_url,
-                        project_name=args.project_name,
-                        project_key=project_key,
-                        skip_device_block=args.skip_device_block,
-                        device_ban_count=args.device_ban_count,
-                    )
-                    succeeded = True
-                    error_message = ""
-                    if attempt > 1:
-                        result_summary["attempts_used"] = attempt
-                    break
-                except Exception as exc:
-                    error_message = str(exc)
-                    print(f"\n[오류] 시도 {attempt}/{max_attempts} 실패: {error_message}")
-                    if attempt >= max_attempts:
-                        raise
-                    print(f"  {RETRY_BACKOFF_MS}ms 대기 후 재시도합니다.")
                     page = select_target_page(context, page)
-                    page.wait_for_timeout(RETRY_BACKOFF_MS)
+                    save_artifacts(
+                        page=page,
+                        out_dir=out_dir,
+                        succeeded=uuid_succeeded,
+                        result_summary=uuid_result_summary,
+                        error_message=uuid_error,
+                    )
+                except Exception as exc:
+                    print(f"  (uuid={uuid_value} 아티팩트 저장 중 오류: {exc})")
 
-            print("\n=== 완료 ===")
-            for key, value in result_summary.items():
-                print(f"  {key}: {value}")
+            success_count = sum(1 for r in batch_results if r["succeeded"])
+            fail_count = len(batch_results) - success_count
+            print(f"\n{'=' * 60}")
+            print(f" 전체 배치 완료: 성공 {success_count}건 / 실패(스킵) {fail_count}건")
+            print("=" * 60)
+            for r in batch_results:
+                status = "성공" if r["succeeded"] else "실패(스킵)"
+                line = f"  [{status}] {r['uuid']}"
+                if not r["succeeded"] and r["error"]:
+                    line += f" — {r['error']}"
+                print(line)
 
             if args.hold_seconds > 0:
-                print(f"[16] {args.hold_seconds}초 대기 후 종료합니다.")
+                print(f"\n[16] {args.hold_seconds}초 대기 후 종료합니다.")
                 page.wait_for_timeout(args.hold_seconds * 1_000)
 
         except Exception as exc:
-            error_message = str(exc)
-            print(f"\n[오류] 재시도를 모두 소진했습니다: {error_message}")
-        finally:
+            # 개별 UUID 처리 루프 바깥(예: 브라우저/컨텍스트 초기화)에서 발생한
+            # 예기치 못한 예외 — 배치 전체를 계속할 수 없는 경우만 여기로 온다.
+            print(f"\n[오류] 배치 처리 중 예기치 못한 오류로 중단되었습니다: {exc}")
             try:
                 page = select_target_page(context, page)
                 save_artifacts(
                     page=page,
                     out_dir=out_dir,
-                    succeeded=succeeded,
-                    result_summary=result_summary,
-                    error_message=error_message,
+                    succeeded=False,
+                    result_summary=None,
+                    error_message=str(exc),
                 )
-            except Exception as exc:
-                print(f"  (아티팩트 저장 중 오류: {exc})")
+            except Exception as save_exc:
+                print(f"  (아티팩트 저장 중 오류: {save_exc})")
             context.close()
+            sys.exit(1)
 
-    if not succeeded:
+        context.close()
+
+    if not batch_results or any(not r["succeeded"] for r in batch_results):
         sys.exit(1)
 
 
