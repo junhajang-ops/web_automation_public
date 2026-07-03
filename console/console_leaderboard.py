@@ -1514,9 +1514,9 @@ def run(
     return all_rows, skipped_boards
 
 
-def save_csv(rows: list, out_dir: Path) -> Path:
+def save_csv(rows: list, out_dir: Path, project_key: str) -> Path:
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = out_dir / f"leaderboard_pvprank_{ts}.csv"
+    csv_path = out_dir / f"leaderboard_{project_key}_{ts}.csv"
     base_fields = ["leaderboard", "rank", "uuid", "nickname"]
     gcp_fields = ["account_type", "create_account_date"]
     payment_fields = ["recent_payment_count", "recent_payment_sum"]
@@ -1695,7 +1695,7 @@ def main():
                 not r["succeeded"] for r in block_outcome["results"]
             )
 
-            save_csv(all_rows, LEADERBOARD_OUT_DIR)
+            save_csv(all_rows, LEADERBOARD_OUT_DIR, project_key)
 
             board_count = len(set(row["leaderboard"] for row in all_rows))
             print(f"\n=== 완료: {board_count}개 리더보드, 총 {len(all_rows)}행 ===")
