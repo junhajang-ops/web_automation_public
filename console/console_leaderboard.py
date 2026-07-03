@@ -84,6 +84,11 @@ from cs_gcp_logging import (  # noqa: E402
     fetch_recent_log_entry,
     load_logging_credentials,
 )
+from cs_bigquery_logging import (  # noqa: E402
+    build_bigquery_client_from_credentials,
+    fetch_min_date_for_user,
+    load_bigquery_credentials,
+)
 
 DEFAULT_OUTPUT = "dumps_console_leaderboard"
 LEADERBOARD_OUT_DIR = PAYMENT_DOCS_DIR / "leaderboard"
@@ -167,8 +172,18 @@ def parse_args():
     parser.add_argument("--project-name", default=DEFAULT_PROJECT_NAME)
     parser.add_argument("--hold-seconds", type=int, default=DEFAULT_HOLD_SECONDS)
     parser.add_argument("--key", default="", help="GCP 서비스계정 JSON 키 경로 (직접 지정)")
-    parser.add_argument("--gcp-project", default="", help="GCP 프로젝트 ID (직접 지정)")
-    parser.add_argument("--gcp-log", default="", help="GCP 로그 이름 (직접 지정)")
+    parser.add_argument("--gcp-project", default="", help="GCP 프로젝트 ID (직접 지정, Cloud Logging용)")
+    parser.add_argument("--gcp-log", default="", help="GCP 로그 이름 (직접 지정, Cloud Logging용)")
+    parser.add_argument(
+        "--log-console",
+        default="",
+        help="계정 생성일 조회 백엔드: cloud_logging(기본) 또는 bigquery (직접 지정, 보통 --title로 env에서 자동 설정)",
+    )
+    parser.add_argument("--bq-project", default="", help="BigQuery GCP 프로젝트 ID (직접 지정)")
+    parser.add_argument("--bq-dataset", default="", help="BigQuery 데이터셋명 (직접 지정)")
+    parser.add_argument("--bq-table", default="", help="BigQuery 테이블명 (직접 지정)")
+    parser.add_argument("--bq-user-col", default="", help="BigQuery 유저 식별 컬럼명 (직접 지정)")
+    parser.add_argument("--bq-date-col", default="", help="BigQuery 계정생성일(가입일) 컬럼명 (직접 지정)")
     parser.add_argument(
         "--keywords",
         default=DEFAULT_SEARCH_KEYWORDS,
@@ -185,10 +200,14 @@ def parse_args():
         help=(
             "타이틀 이름 (예: gametitle). "
             "env에서 {NAME}_KEY_FILE / {NAME}_GCP_PROJECT / {NAME}_LOGNAME / "
-            "{NAME}_PROJECT_NAME / {NAME}_LEADERBOARD_KEYWORDS 를 일괄 적용."
+            "{NAME}_PROJECT_NAME / {NAME}_LEADERBOARD_KEYWORDS 를 일괄 적용. "
+            "{NAME}_LOG_CONSOLE=bigquery 이면 GCP_PROJECT/LOGNAME 대신 "
+            "{NAME}_BQ_PROJECT / _BQ_DATASET / _BQ_TABLE / _BQ_USER_COL / _BQ_DATE_COL 을 사용."
         ),
     )
     parser.add_argument("--gametitle", action="store_true", help="--title gametitle 단축키")
+    parser.add_argument("--dc", action="store_true", help="--title dc 단축키 (게임B)")
+    parser.add_argument("--dk", action="store_true", help="--dc 와 동일 (별칭)")
     parser.add_argument(
         "--unattended",
         action="store_true",
@@ -762,6 +781,105 @@ def enrich_board_with_gcp(board_rows, credentials, project, log_name, now_utc):
             row.update({"account_type": f"조회실패({exc})", "create_account_date": ""})
 
 
+def _is_retryable_bq_error(err_text: str) -> bool:
+    text = (err_text or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in [
+            "429", "500", "502", "503", "504",
+            "timeout", "timed out", "deadline exceeded",
+            "temporarily unavailable", "connection reset",
+            "rate limit", "console error",
+        ]
+    )
+
+
+def _fetch_account_creation_date_with_retry(bq_client, bq_project, dataset, table, user_col, date_col, uuid):
+    last_err = None
+    for attempt in range(1, GCP_QUERY_MAX_RETRIES + 1):
+        min_date, err = fetch_min_date_for_user(bq_client, bq_project, dataset, table, user_col, date_col, uuid)
+        if not err:
+            return min_date, None
+
+        last_err = err
+        if not _is_retryable_bq_error(err) or attempt >= GCP_QUERY_MAX_RETRIES:
+            return None, err
+
+        wait_seconds = (GCP_QUERY_RETRY_WAIT_MS * attempt) / 1000
+        print(
+            f"      [BQ retry] {uuid} {attempt}/{GCP_QUERY_MAX_RETRIES} 실패: {err} "
+            f"-> {wait_seconds:.1f}초 후 재시도"
+        )
+        time.sleep(wait_seconds)
+
+    return None, last_err
+
+
+def query_account_creation_info_bigquery(bq_client, bq_project, dataset, table, user_col, date_col, uuid, now_utc) -> dict:
+    """BigQuery 유저 마스터 테이블(예: dc_all)에서 유저의 가입일(date_col 최솟값)로 신규/기존을 판정한다.
+
+    Cloud Logging 방식(query_account_creation_info)은 "최근 활동 없음=기존 유저"로 판단하지만,
+    이 테이블은 유저당 레코드가 있는 마스터성 테이블이라 그 근거를 쓸 수 없다. 해당 uuid 행
+    자체가 없으면 데이터 미반영/불일치일 수 있으므로 "기존 유저"로 단정하지 않고 별도 상태
+    ("계정정보없음")로 남겨 신규 차단 후보 판정에서 조용히 누락되지 않게 한다.
+    """
+    create_dt, err = _fetch_account_creation_date_with_retry(
+        bq_client, bq_project, dataset, table, user_col, date_col, uuid
+    )
+    if err:
+        return {"account_type": f"조회실패({err})", "create_account_date": ""}
+    if create_dt is None:
+        return {"account_type": "계정정보없음", "create_account_date": ""}
+
+    if create_dt.tzinfo is not None:
+        create_dt = create_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+
+    hours_diff = (now_utc - create_dt).total_seconds() / 3600
+    account_type = "계정 신규 생성" if hours_diff <= ACCOUNT_NEW_HOURS else "기존 유저"
+    return {
+        "account_type": account_type,
+        "create_account_date": create_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def _thread_bigquery_client(bq_credentials, bq_project):
+    """현재 스레드 전용 BigQuery client. 스레드당 1회만 build(credentials는 공유)."""
+    client = getattr(_gcp_tls, "bq_client", None)
+    if client is None:
+        client = build_bigquery_client_from_credentials(bq_credentials, bq_project)
+        _gcp_tls.bq_client = client
+    return client
+
+
+def enrich_board_with_bigquery(board_rows, bq_credentials, bq_project, dataset, table, user_col, date_col, now_utc):
+    """board_rows 각 행에 BigQuery 유저 마스터 테이블 기준 계정 신규 여부를 in-place로 추가.
+    credentials는 공유, client만 스레드별. 스레드풀은 GCP Cloud Logging 조회와 공용(_get_gcp_executor)이다."""
+    if not (bq_credentials and bq_project and dataset and table and user_col and date_col):
+        for row in board_rows:
+            row.update({"account_type": "BQ미설정", "create_account_date": ""})
+        return
+    print(f"    [BQ] {len(board_rows)}명 가입일(BigQuery) 조회 중...")
+
+    def _work(uuid_value):
+        client = _thread_bigquery_client(bq_credentials, bq_project)
+        if client is None:
+            raise RuntimeError("BigQuery client build 실패(credentials 확인)")
+        return query_account_creation_info_bigquery(
+            client, bq_project, dataset, table, user_col, date_col, uuid_value, now_utc
+        )
+
+    executor = _get_gcp_executor()
+    futures = {executor.submit(_work, row["uuid"]): row for row in board_rows}
+    for future in as_completed(futures):
+        row = futures[future]
+        try:
+            row.update(future.result())
+        except Exception as exc:
+            row.update({"account_type": f"조회실패({exc})", "create_account_date": ""})
+
+
 def _parse_price_to_int(text: str) -> int:
     """금액 셀 텍스트에서 숫자만 추출해 정수로. (예: '₩55,000' → 55000)"""
     digits = re.sub(r"[^\d]", "", text or "")
@@ -1232,6 +1350,12 @@ def run(
     credentials=None,
     gcp_project="",
     gcp_log="",
+    bq_credentials=None,
+    bq_project="",
+    bq_dataset="",
+    bq_table="",
+    bq_user_col="",
+    bq_date_col="",
     timeout_error=Exception,
     single_board_test=False,
 ) -> tuple:
@@ -1285,8 +1409,14 @@ def run(
                     ignore_patterns=LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS,
                 )
                 board_rows = extract_top_ranks(page, board_name)
-                # 각 보드 추출 직후 GCP 최근 로그(종류 무관)로 계정 생성일 보강
-                enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, now_utc)
+                # 각 보드 추출 직후 계정 생성일 보강 (Cloud Logging 또는 BigQuery, 프로젝트별 설정에 따름)
+                if bq_credentials is not None:
+                    enrich_board_with_bigquery(
+                        board_rows, bq_credentials, bq_project, bq_dataset, bq_table,
+                        bq_user_col, bq_date_col, now_utc,
+                    )
+                else:
+                    enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, now_utc)
                 return board_rows
 
             try:
@@ -1442,6 +1572,7 @@ def main():
         require_project_name=True,
         include_key_file=True,
         include_gcp=True,
+        include_bigquery=True,
         default_block_reason=DEFAULT_BLOCK_REASON,
         include_block_reason=True,
         default_leaderboard_keywords=DEFAULT_SEARCH_KEYWORDS,
@@ -1459,21 +1590,33 @@ def main():
     LEADERBOARD_OUT_DIR.mkdir(parents=True, exist_ok=True)
     init_dump_dir(out_dir)
 
+    use_bigquery = args.log_console.strip().lower() == "bigquery"
+
     if args.title:
         prefix = args.title.upper()
-        missing = [
-            f"{prefix}_{k}" for k, v in [
-                ("KEY_FILE", args.key),
-                ("GCP_PROJECT", args.gcp_project),
-                ("LOGNAME", args.gcp_log),
-                ("PROJECT_NAME", args.project_name),
-            ] if not v
-        ]
+        required = [("KEY_FILE", args.key), ("PROJECT_NAME", args.project_name)]
+        if use_bigquery:
+            required += [
+                ("BQ_PROJECT", args.bq_project),
+                ("BQ_DATASET", args.bq_dataset),
+                ("BQ_TABLE", args.bq_table),
+                ("BQ_USER_COL", args.bq_user_col),
+                ("BQ_DATE_COL", args.bq_date_col),
+            ]
+        else:
+            required += [("GCP_PROJECT", args.gcp_project), ("LOGNAME", args.gcp_log)]
+        missing = [f"{prefix}_{k}" for k, v in required if not v]
         if missing:
             raise SystemExit(f"[오류] --title {args.title}: 다음 env가 비어 있습니다 — {', '.join(missing)}")
 
     credentials = None
-    if args.key:
+    bq_credentials = None
+    if use_bigquery:
+        if args.key:
+            bq_credentials = load_bigquery_credentials(args.key)
+            if bq_credentials is None:
+                print("[경고] BigQuery 서비스계정 로드 실패. 계정 생성일 조회 없이 진행합니다.")
+    elif args.key:
         credentials = load_logging_credentials(args.key)
         if credentials is None:
             print("[경고] GCP 서비스계정 로드 실패. 계정 생성일 로그 조회 없이 진행합니다.")
@@ -1486,8 +1629,13 @@ def main():
     print(f"출력     : {out_dir.name}")
     print(f"CSV 저장 : {LEADERBOARD_OUT_DIR}")
     print(f"덤프     : {out_dir} (30일 초과 자동 삭제)")
-    gcp_ready = credentials and args.gcp_project and args.gcp_log
-    print(f"GCP 조회 : {'활성 (' + args.gcp_project + ' / ' + args.gcp_log + ')' if gcp_ready else '비활성 (--key / --gcp-project / --gcp-log 미지정)'}")
+    if use_bigquery:
+        bq_ready = bq_credentials and args.bq_project and args.bq_dataset and args.bq_table
+        bq_desc = f"{args.bq_project}.{args.bq_dataset}.{args.bq_table}"
+        print(f"BQ 조회  : {'활성 (' + bq_desc + ')' if bq_ready else '비활성 (--key / --bq-* 미지정)'}")
+    else:
+        gcp_ready = credentials and args.gcp_project and args.gcp_log
+        print(f"GCP 조회 : {'활성 (' + args.gcp_project + ' / ' + args.gcp_log + ')' if gcp_ready else '비활성 (--key / --gcp-project / --gcp-log 미지정)'}")
     if args.test_single_board:
         print("테스트   : --test-single-board 활성 — 리더보드 1개만 조회 후 다음 단계로 진행")
     if args.block_new_users:
@@ -1524,6 +1672,12 @@ def main():
                 credentials=credentials,
                 gcp_project=args.gcp_project,
                 gcp_log=args.gcp_log,
+                bq_credentials=bq_credentials,
+                bq_project=args.bq_project,
+                bq_dataset=args.bq_dataset,
+                bq_table=args.bq_table,
+                bq_user_col=args.bq_user_col,
+                bq_date_col=args.bq_date_col,
                 timeout_error=_timeout_error,
                 single_board_test=args.test_single_board,
             )

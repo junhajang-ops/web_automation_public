@@ -67,6 +67,7 @@ def apply_title_profile(
     require_project_name: bool = False,
     include_key_file: bool = False,
     include_gcp: bool = False,
+    include_bigquery: bool = False,
     default_block_reason: str = "",
     include_block_reason: bool = False,
     default_leaderboard_keywords: str = "",
@@ -74,6 +75,9 @@ def apply_title_profile(
 ):
     if getattr(args, "gametitle", False) and not getattr(args, "title", ""):
         args.title = "gametitle"
+    # 게임B(GCP project: example-project-b). "dc"/"dk" 둘 다 같은 프로필을 가리키는 단축키.
+    if (getattr(args, "dc", False) or getattr(args, "dk", False)) and not getattr(args, "title", ""):
+        args.title = "dc"
 
     title = (getattr(args, "title", "") or "").strip()
     if not title:
@@ -120,6 +124,19 @@ def apply_title_profile(
                 "gcp_log",
                 os.environ.get(f"{prefix}_LOGNAME", "").strip(),
             )
+
+    if include_bigquery:
+        if hasattr(args, "log_console") and not getattr(args, "log_console", ""):
+            setattr(args, "log_console", os.environ.get(f"{prefix}_LOG_CONSOLE", "").strip())
+        for field, env_suffix in (
+            ("bq_project", "BQ_PROJECT"),
+            ("bq_dataset", "BQ_DATASET"),
+            ("bq_table", "BQ_TABLE"),
+            ("bq_user_col", "BQ_USER_COL"),
+            ("bq_date_col", "BQ_DATE_COL"),
+        ):
+            if hasattr(args, field) and not getattr(args, field, ""):
+                setattr(args, field, os.environ.get(f"{prefix}_{env_suffix}", "").strip())
 
     if include_block_reason:
         _apply_env_override(args, "reason", default_block_reason, f"{prefix}_BLOCK_REASON")
