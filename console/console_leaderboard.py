@@ -1335,6 +1335,7 @@ def block_low_payment_new_users(
         f"(디바이스밴 {'생략' if args.skip_device_block else '포함'})을 시작합니다."
     )
     results = []
+    previous_uuid_ok = False
     for idx, c in enumerate(candidates, start=1):
         uuid_value = c["uuid"]
         print(f"\n{'=' * 60}")
@@ -1350,6 +1351,14 @@ def block_low_payment_new_users(
                     f"[재시도 {attempt_counter['count']}/{RETRY_MAX_RETRIES}] "
                     f"uuid={uuid_value} 차단 절차를 처음부터 다시 시작합니다."
                 )
+            # 이 uuid의 첫 시도이고 직전 uuid가 성공해 화면이 '접근 차단' 탭에 남아
+            # 있다고 신뢰할 수 있을 때만 초기화면 재진입을 건너뛴다(console_user_block.py의
+            # 배치 루프와 동일한 절약 — 재시도는 항상 전체 절차를 다시 밟음).
+            skip_navigation = (
+                attempt_counter["count"] == 1
+                and idx > 1
+                and previous_uuid_ok
+            )
             return run_user_block(
                 page=page,
                 uuid_value=uuid_value,
@@ -1362,6 +1371,7 @@ def block_low_payment_new_users(
                 project_key=project_key,
                 skip_device_block=args.skip_device_block,
                 device_ban_count=args.device_ban_count,
+                skip_navigation=skip_navigation,
             )
 
         def _recover():
@@ -1386,10 +1396,12 @@ def block_low_payment_new_users(
             )
             status_by_uuid[uuid_value] = f"차단:{summary['status']}(device={summary['device_block_count']})"
             results.append({"uuid": uuid_value, "succeeded": True, "summary": summary})
+            previous_uuid_ok = True
         except Exception as exc:  # noqa: BLE001 — 한 명 실패가 전체 배치를 막지 않게
             print(f"    [{uuid_value}] 차단 실패(재시도 소진) — 다음 대상으로 넘어갑니다: {exc}")
             status_by_uuid[uuid_value] = f"차단실패({exc})"
             results.append({"uuid": uuid_value, "succeeded": False, "error": str(exc)})
+            previous_uuid_ok = False
 
     _annotate_block_status(all_rows, status_by_uuid)
 
