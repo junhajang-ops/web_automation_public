@@ -512,24 +512,34 @@ def open_leaderboard_list_and_search(page, keyword: str, nav_context: str = "ini
     set_rows_per_page(page, LIST_ROWS_PER_PAGE, "리더보드 목록 표시 개수", verify_prefix="list_rows", container=list_footer)
 
 
-def open_leaderboard_list_and_search_with_retry(page, keyword: str, start_url: str, project_name: str, nav_context: str = "initial"):
-    """목록 진입+검색 실패 시 콘솔 초기화면(start_url)으로 재접속해 재시도한다.
+def open_leaderboard_list_and_collect_with_retry(page, keyword: str, start_url: str, project_name: str, nav_context: str = "initial") -> list:
+    """목록 진입+검색+보드 이름 수집을 하나의 절차로 묶어 재시도한다.
 
     세션 자동 로그아웃뿐 아니라, 이전 동작에서 남은 MUI 메뉴/드롭다운의 보이지 않는
     backdrop이 클릭을 가로막아 사이드바 진입 자체가 반복 실패하는 경우도 있다
     (실측: is_login_page는 False인데도 클릭이 계속 막힘). 로그인 여부만 확인해서는
     이 상태를 벗어나지 못하므로, 기존에 쓰던 start_url로 재접속해 화면을 완전히
     리셋하고 프로젝트를 메뉴로 다시 선택한다(prepare_console_project 재사용).
+
+    검색 결과 목록 읽기(collect_visible_board_names)까지 같은 action에 포함한다 —
+    분리돼 있으면 결과 렌더 지연 같은 일시적 오류가 재시도 한 번 없이 곧장 예외로
+    올라가 호출부의 재시도 범위를 벗어났다(2026-07-03 수정: action은 전체 절차를
+    포함해야 한다는 원칙 위반 — 목록 조회 재시도 소진 여부와 무관하게 결과 읽기
+    타임아웃은 재시도되지 않던 문제).
     """
-    retry_with_recovery(
-        action=lambda: open_leaderboard_list_and_search(page, keyword, nav_context=nav_context),
+    def _action():
+        open_leaderboard_list_and_search(page, keyword, nav_context=nav_context)
+        return collect_visible_board_names(page, keyword)
+
+    return retry_with_recovery(
+        action=_action,
         recovery=lambda: prepare_console_project(
             page=page,
             explicit_project_base="",
             start_url=start_url,
             project_name=project_name,
         ),
-        label="목록 진입 재시도",
+        label=f"검색어 '{keyword}' 목록 조회 재시도",
         recovery_desc=f"콘솔 초기화면({start_url})으로 재접속 후 재시도합니다.",
         max_retries=RETRY_MAX_RETRIES,
     )
@@ -1574,16 +1584,25 @@ def run(
     is_first_open = True
 
     # 키워드마다: 검색 -> 검색된 리더보드 전부 조회 -> 다음 키워드로 넘어감.
+    # 목록 진입+검색+결과 읽기 재시도가 소진돼도 이 키워드만 스킵하고 다음 키워드로
+    # 넘어간다(원칙 5: 배치 중 하나의 실패가 전체를 막지 않게) — 기존에는 보드 단위
+    # 실패만 이렇게 격리됐고, 키워드 단위 실패는 스크립트 전체를 중단시켰다(2026-07-03 수정).
     for keyword in keywords:
         print(f"\n=== 검색어 '{keyword}' ===")
-        if is_first_open:
-            open_leaderboard_list_and_search_with_retry(page, keyword, start_url, project_name, nav_context="initial")
-            is_first_open = False
-        else:
+        nav_context = "initial" if is_first_open else "return"
+        if not is_first_open:
             print(f"[7-retry] 다음 검색어('{keyword}')를 위해 목록 화면을 다시 엽니다.")
-            open_leaderboard_list_and_search_with_retry(page, keyword, start_url, project_name, nav_context="return")
+        is_first_open = False
 
-        board_names = collect_visible_board_names(page, keyword)
+        try:
+            board_names = open_leaderboard_list_and_collect_with_retry(
+                page, keyword, start_url, project_name, nav_context=nav_context,
+            )
+        except Exception as exc:  # noqa: BLE001 — 키워드 하나의 최종 실패가 나머지 키워드를 막지 않게
+            print(f"    [스킵] 검색어 '{keyword}' 리더보드 목록 조회 최종 실패 — 다음 검색어로 넘어갑니다: {exc}")
+            skipped_boards.append({"keyword": keyword, "leaderboard": "(목록조회)", "error": str(exc)})
+            continue
+
         if not board_names:
             print(f"    검색어 '{keyword}'로 리더보드를 찾지 못했습니다 — 건너뜁니다.")
             continue
