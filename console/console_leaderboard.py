@@ -176,7 +176,12 @@ def _leaderboard_nav_source(page) -> str:
 
 
 def _leaderboard_nav_step_name(page, nav_context: str) -> str:
-    if nav_context == "board_loop":
+    # "return"(다음 키워드로 전환)도 "board_loop"와 동일하게 직전 화면이 목록/상세
+    # 둘 다 될 수 있다 — 직전 키워드에서 보드를 하나라도 찾았으면 그 마지막 보드의
+    # 상세 페이지에서 끝나고, 하나도 못 찾았으면(continue) 목록 페이지에서 끝난다.
+    # 화면 종류를 구분하지 않고 이름 하나로 기록하면 서로 다른 화면의 지문이 같은
+    # baseline으로 비교되어 매번 오탐이 발생한다(실측: leaderboard_nav_return_pre).
+    if nav_context in ("board_loop", "return"):
         return f"leaderboard_nav_{nav_context}_{_leaderboard_nav_source(page)}_pre"
     return f"leaderboard_nav_{nav_context}_pre"
 
@@ -1521,7 +1526,8 @@ def run(
                 # 복구(초기화면 재접속) 뒤에는 항상 프로젝트 홈에 있으므로 "목록 화면이
                 # 이미 열려 있다"고 가정하지 않는다 — 절차 전체를 하나의 단위로 재시도한다.
                 # nav_context="board_loop": 이 호출 직전 화면은 항상 "직전 보드의 상세 페이지"이고,
-                # 키워드 전환용 "return"(직전 화면=목록 페이지)과는 실제 화면이 달라 지문 이름을 분리한다.
+                # 키워드 전환용 "return"과 화면이 다를 수 있어 지문 이름을 분리한다(둘 다
+                # _leaderboard_nav_step_name()에서 실제 화면 종류로 세분화됨).
                 open_leaderboard_list_and_search(page, keyword, nav_context="board_loop")
                 enter_leaderboard_detail(page, board_name)
 
