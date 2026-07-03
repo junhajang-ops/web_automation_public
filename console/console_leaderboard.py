@@ -577,8 +577,11 @@ def get_leaderboard_rank_rows(page):
     return grid.locator("div.MuiDataGrid-row, [role='row'][data-id], tbody tr")
 
 
-# 리더보드에 순위 데이터가 아예 없을 때 화면에 뜨는 문구(스크린샷 기준) — 로딩 실패와
-# 구분하는 판정 기준. 이 문구가 뜨면 "빈 결과"이지 "로딩 실패"가 아니므로 재시도 대상이 아니다.
+# 리더보드에 순위 데이터가 아예 없을 때 화면에 뜨는 문구(실제 덤프로 확인: 문장 끝에
+# 마침표가 붙어 "현재 순위가 없습니다."로 표시됨) — 로딩 실패와 구분하는 판정 기준.
+# 이 문구가 뜨면 "빈 결과"이지 "로딩 실패"가 아니므로 재시도 대상이 아니다.
+# 부분 일치(exact=False)로 찾는다 — 마침표 유무 등 사소한 표기 차이에 흔들리지 않기 위함
+# (이 문장 자체가 충분히 구체적이라 다른 텍스트와 오탐될 위험은 낮음).
 LEADERBOARD_EMPTY_TEXT = "현재 순위가 없습니다"
 
 
@@ -586,7 +589,7 @@ def _leaderboard_rank_grid_state(page):
     """행이 로드됐는지, 빈 상태 문구가 떴는지 판정. "rows" | "empty" | None(아직 판정 불가)."""
     if _is_visible(get_leaderboard_rank_rows(page).first):
         return "rows"
-    if _is_visible(page.get_by_text(LEADERBOARD_EMPTY_TEXT, exact=True)):
+    if _is_visible(page.get_by_text(LEADERBOARD_EMPTY_TEXT)):
         return "empty"
     return None
 
