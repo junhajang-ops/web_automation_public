@@ -330,9 +330,32 @@ def _save_dump(page, tag: str) -> None:
         pass
 
 
-def _next_tag(name: str = "") -> str:
+_project_label_provider: list = [None]  # [Callable[[Any], str] | None]
+
+
+def set_project_label_provider(fn) -> None:
+    """스텝 이름에 자동으로 붙일 프로젝트 라벨 제공 함수를 등록한다.
+
+    같은 스크립트를 서로 다른 프로젝트(--title)로 반복 실행하면 화면 구성(사이드바 등)이
+    실제로 다른데도 스텝 이름이 프로젝트와 무관하게 고정돼 있어 baseline이 서로 다른
+    프로젝트끼리 비교되며 오탐한다. fn(page) -> str 을 한 번 등록해두면 이후 모든
+    record_step_dump/step_and_verify_ui 호출에 자동으로 라벨이 반영되어, 개별 호출부마다
+    프로젝트명을 손으로 엮을 필요가 없다.
+    """
+    _project_label_provider[0] = fn
+
+
+def _next_tag(page, name: str = "") -> str:
     tag = name if name else f"step_{_step_seq[0]:03d}"
     _step_seq[0] += 1
+    provider = _project_label_provider[0]
+    if provider is not None:
+        try:
+            label = provider(page)
+        except Exception:
+            label = ""
+        if label:
+            tag = f"{tag}_{label}"
     return tag
 
 
@@ -413,7 +436,21 @@ def _diff_fingerprints(prev: dict, curr: dict) -> list[str]:
     list_diff("role", prev.get("roles", []), curr.get("roles", []))
     list_diff("listbox[name]", prev.get("listboxNames", []), curr.get("listboxNames", []))
     list_diff("accordion", prev.get("accordionTitles", []), curr.get("accordionTitles", []))
-    list_diff("structural_text", prev.get("structuralTexts", []), curr.get("structuralTexts", []))
+
+    def structural_text_key(item):
+        # 사이드바 nav 항목(예: "신고 및 제재")에는 미확인 건수 배지가 텍스트에 그대로
+        # 붙어 나온다("신고 및 제재0" -> "신고 및 제재42"). 실제 구조 변경이 아니라 건수만
+        # 바뀐 것이므로 button 배지 정규화(badge|type=...)와 동일한 취지로 끝자리 숫자를 제거한다.
+        if item.startswith("nav:"):
+            return re.sub(r"\d+$", "", item)
+        return item
+
+    list_diff(
+        "structural_text",
+        prev.get("structuralTexts", []),
+        curr.get("structuralTexts", []),
+        structural_text_key,
+    )
     return changes
 
 
@@ -508,7 +545,7 @@ def record_step_dump(
 ) -> str:
     # 행동(조작) 전 대기: 사람이 현재 화면을 볼 수 있게 한 번만 대기한 뒤 기록/지문 비교.
     # 실제 조작은 이 함수 반환 후 호출부에서 진행된다.
-    tag = _next_tag(name)
+    tag = _next_tag(page, name)
     step_pause(page)
     _save_dump(page, tag)
     snap_and_check_ui(page, name=tag, ignore_patterns=ignore_patterns)
@@ -523,7 +560,7 @@ def record_final_step_state(
     # 마지막 단계 기록: 안정화 고정 대기(step_pause)는 두지 않는다.
     # 조작 후 안정화는 조작 측 폴링(wait_until 등)이 이미 보장한 상태에서 호출되므로
     # 여기서는 기록 덤프와 지문 비교만 수행한다.
-    tag = _next_tag(name)
+    tag = _next_tag(page, name)
     _save_dump(page, tag)
     snap_and_check_ui(page, name=tag, ignore_patterns=ignore_patterns)
     return tag

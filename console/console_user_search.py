@@ -25,6 +25,7 @@ from console_step_verify import (
     record_step_dump,
     retry_with_recovery,
     save_page_artifacts,
+    set_project_label_provider,
     step_and_verify_ui,
     step_pause,
     wait_until,
@@ -249,7 +250,8 @@ def project_fingerprint_label(page) -> str:
     사이드바 카테고리 열림/닫힘 상태와 활성 메뉴는 프로젝트마다 실제로 다르다(다른
     화면이므로 다른 지문이 정상). 스텝 이름이 프로젝트와 무관하게 고정돼 있으면 서로
     다른 프로젝트를 번갈아 실행할 때마다 baseline이 덮어써져 "바뀌었다"는 오탐이 반복된다.
-    프로젝트명을 이름에 포함해 프로젝트별로 별도 baseline을 유지한다.
+    아래 set_project_label_provider 등록을 통해 모든 record_step_dump/step_and_verify_ui
+    호출에 자동으로 반영되므로, 개별 스텝 이름에 직접 엮을 필요는 없다.
     """
     try:
         text = find_project_selector_button(page).inner_text(timeout=2_000).strip()
@@ -259,13 +261,16 @@ def project_fingerprint_label(page) -> str:
     return slug or "unknown"
 
 
+set_project_label_provider(project_fingerprint_label)
+
+
 def ensure_project_menu_open(page):
     if wait_for_visible(page.locator("[role='menuitem']").first, 1_000):
         return
 
     selector_button = find_project_selector_button(page)
     selector_button.wait_for(state="visible", timeout=15_000)
-    record_step_dump(page, f"project_menu_open_{project_fingerprint_label(page)}_pre")
+    record_step_dump(page, "project_menu_open_pre")
     selector_button.click()
     page.locator("[role='menuitem']").first.wait_for(state="visible", timeout=15_000)
 
@@ -304,7 +309,7 @@ def select_project_by_name(page, project_name):
 
     print(f"[3] 프로젝트 선택: {selected_name}")
     selected_item.scroll_into_view_if_needed()
-    record_step_dump(page, f"project_select_{project_fingerprint_label(page)}_pre")
+    record_step_dump(page, "project_select_pre")
     selected_item.click()
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
