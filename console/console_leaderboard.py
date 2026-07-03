@@ -437,7 +437,12 @@ def set_rows_per_page(page, target: int, label: str, verify_prefix: str = "", co
 
 def collect_visible_board_names(page, keyword: str) -> list:
     print(f"[6] 현재 목록 페이지에서 '{keyword}_*' 리더보드 이름을 수집합니다.")
-    board_name_re = re.compile(rf"{re.escape(keyword)}_[A-Za-z0-9_]+")
+    # 뒤에 '_XXX' 접미사가 붙는 접두사 키워드(예: "AllyArena")와, 그 자체가 이미
+    # 완전한 리더보드 이름인 키워드(예: --test-single-board 용 "AllyArena_GO_106")를
+    # 둘 다 지원해야 한다. 접미사를 선택적으로 만들되, "AllyArena_GO_106"이
+    # "AllyArena_GO_1067" 같은 더 긴 이름의 앞부분만 잘못 잘라 매치하지 않도록
+    # 뒤에 단어문자가 이어지면 매치 실패로 처리하는 부정 전방탐색을 둔다.
+    board_name_re = re.compile(rf"{re.escape(keyword)}(?:_[A-Za-z0-9_]+)?(?![A-Za-z0-9_])")
     wait_for_data_rows(page)
     rows = get_data_rows(page)
     count = rows.count()
