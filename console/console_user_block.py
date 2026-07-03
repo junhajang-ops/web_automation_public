@@ -742,17 +742,28 @@ def run_user_block(
     project_key: str = "",
     skip_device_block: bool = False,
     device_ban_count: int = DEFAULT_DEVICE_BAN_COUNT,
+    skip_navigation: bool = False,
 ):
-    prepare_console_project(
-        page=page,
-        explicit_project_base=explicit_project_base,
-        start_url=start_url,
-        project_name=project_name,
-    )
+    """skip_navigation=True면 직전 UUID 처리가 남겨둔 '접근 차단' 탭 화면을 그대로 재사용해
+    초기화면 재진입(prepare_console_project)/유저 접근 이동/탭 전환을 건너뛰고 바로
+    '접근 차단 등록' 버튼부터 클릭한다. 호출부(main)는 이 uuid의 첫 시도에서만, 그리고
+    직전 uuid가 성공했을 때만 True를 넘긴다 — 실패해 재시도로 들어가면 항상 False로
+    전체 절차(초기화면부터)를 다시 밟는다(2026-07-02 원칙 7: retry_with_recovery의
+    action은 재시도 시 메뉴/탭/팝업 열기를 포함한 전체 절차여야 함)."""
+    if skip_navigation:
+        print("[1~5] 직전 UUID 처리 화면('접근 차단' 탭)을 재사용합니다(초기화면 재진입 생략).")
+        dialog = open_block_register_dialog(page)
+    else:
+        prepare_console_project(
+            page=page,
+            explicit_project_base=explicit_project_base,
+            start_url=start_url,
+            project_name=project_name,
+        )
 
-    open_user_access_page(page)
-    open_block_tab(page)
-    dialog = open_block_register_dialog(page)
+        open_user_access_page(page)
+        open_block_tab(page)
+        dialog = open_block_register_dialog(page)
     select_target_type_user(page, dialog)
     select_input_mode_text(page, dialog)
     ensure_uuid_key_selected(page, dialog)
@@ -859,6 +870,8 @@ def main():
         page = context.pages[0] if context.pages else context.new_page()
         page = select_target_page(context, page)
 
+        previous_uuid_ok = False
+
         try:
             for uuid_index, uuid_value in enumerate(uuid_list, start=1):
                 print(f"\n{'=' * 60}")
@@ -885,6 +898,14 @@ def main():
                             f"\n[재시도 {attempt_counter['count']}/{max(1, args.retries)}] "
                             f"uuid={uuid_value} 절차를 처음부터 다시 시작합니다."
                         )
+                    # 이 uuid의 첫 시도이고, 직전 uuid가 성공해 화면이 '접근 차단' 탭에
+                    # 남아 있다고 신뢰할 수 있을 때만 초기화면 재진입을 건너뛴다.
+                    # 재시도(첫 시도 실패 후)는 항상 전체 절차를 다시 밟는다.
+                    skip_navigation = (
+                        attempt_counter["count"] == 1
+                        and uuid_index > 1
+                        and previous_uuid_ok
+                    )
                     return run_user_block(
                         page=page,
                         uuid_value=uuid_value,
@@ -897,6 +918,7 @@ def main():
                         project_key=project_key,
                         skip_device_block=args.skip_device_block,
                         device_ban_count=args.device_ban_count,
+                        skip_navigation=skip_navigation,
                     )
 
                 def _recover_uuid_block():
@@ -932,6 +954,8 @@ def main():
                     print(f"\n=== uuid={uuid_value} 완료 ===")
                     for key, value in uuid_result_summary.items():
                         print(f"  {key}: {value}")
+
+                previous_uuid_ok = uuid_succeeded
 
                 batch_results.append(
                     {
