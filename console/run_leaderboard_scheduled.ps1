@@ -48,7 +48,9 @@ $KeepAwake = ([PowerHelper+EXECUTION_STATE]::ES_CONTINUOUS -bor
 [PowerHelper]::SetThreadExecutionState($KeepAwake) | Out-Null
 
 try {
-    & $Python $Script --title $Title --unattended *>> $LogFile
+    # *>> 로 파일에만 리다이렉트하면 작업 스케줄러 창(있을 경우)에는 아무 출력도 안 보인다.
+    # Tee-Object로 파일 저장과 동시에 터미널에도 그대로 흘려보내 평소 대화식 실행과 동일하게 보이게 한다.
+    & $Python $Script --title $Title --unattended 2>&1 | Tee-Object -FilePath $LogFile -Append
 }
 finally {
     # 실행이 끝나면 평소 전원 관리 설정으로 되돌린다.
