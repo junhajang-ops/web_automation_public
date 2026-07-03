@@ -167,6 +167,24 @@ def safe_wait_for_load(page, state="networkidle", timeout_ms=15_000):
         return False
 
 
+def ensure_sidebar_link_expanded(page, link, step_name):
+    """콘솔 사이드바는 카테고리별 아코디언이며, 프로젝트/세션마다 열림·닫힘 상태가
+    남아있는 채로 유지된다(즐겨찾기 등록 여부와 무관). 목표 링크가 DOM에는 있지만
+    상위 카테고리가 접혀 있어 안 보이면, 그 카테고리 헤더를 직접 클릭해 펼친다.
+    """
+    link.wait_for(state="attached", timeout=15_000)
+    if wait_for_visible(link, 500):
+        return
+    header = link.locator(
+        "xpath=ancestor::div[contains(@class,'MuiCollapse-root')][1]/preceding-sibling::div[1]"
+    ).first
+    header.wait_for(state="visible", timeout=15_000)
+    header.scroll_into_view_if_needed()
+    record_step_dump(page, step_name)
+    header.click()
+    link.wait_for(state="visible", timeout=15_000)
+
+
 def is_login_page(page):
     return (
         wait_for_visible(page.locator("input[name='username']"), 1_500)

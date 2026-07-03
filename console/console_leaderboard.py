@@ -35,6 +35,7 @@ from console_user_search import (
     DEFAULT_PROJECT_NAME,
     DEFAULT_START_URL,
     click_login_if_needed,
+    ensure_sidebar_link_expanded,
     find_exact_text_match,
     load_playwright,
     prepare_console_project,
@@ -263,7 +264,7 @@ def parse_args():
 def open_leaderboard_page(page, nav_context: str = "initial"):
     print("[4] 사이드 메뉴에서 '리더보드' 페이지로 이동합니다.")
     link = page.locator("a#baseRank, a[href*='/baseRank']").first
-    link.wait_for(state="visible", timeout=15_000)
+    ensure_sidebar_link_expanded(page, link, "leaderboard_category_expand_pre")
     link.scroll_into_view_if_needed()
     ignore_patterns = (
         LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS
