@@ -1,7 +1,14 @@
 ﻿# -*- coding: utf-8 -*-
-# Windows 작업 스케줄러가 호출하는 실행 래퍼.
-# console_leaderboard.py 를 --unattended 로 실행하고 출력을 로그 파일에 남긴다.
-# 이 파일 자체를 수정할 필요는 없다 — 스케줄(요일/시각)은 register_leaderboard_schedule.ps1 이 .env 값으로 등록한다.
+# Windows 작업 스케줄러가 호출하는 실행 래퍼(타이틀별 공용 core, -Title 파라미터).
+# console_leaderboard.py 를 --title <Title> --unattended 로 실행하고 출력을 로그 파일에 남긴다.
+# -Title 인자는 작업 스케줄러 등록 시 register_leaderboard_schedule.ps1이 액션 인자로 자동 넣어준다
+# (예: -File run_leaderboard_scheduled.ps1 -Title gametitle). 이 파일을 직접 실행/수정할 필요는 없다 —
+# 스케줄(요일/시각)은 register_leaderboard_schedule_<title>.ps1 이 .env의 {TITLE}_LEADERBOARD_SCHEDULE_*로 등록한다.
+
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$Title
+)
 
 $ErrorActionPreference = "Continue"
 
@@ -15,7 +22,7 @@ if (-not (Test-Path $LogDir)) {
 }
 
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$LogFile = Join-Path $LogDir "leaderboard_$Timestamp.log"
+$LogFile = Join-Path $LogDir "leaderboard_${Title}_$Timestamp.log"
 
 # 화면 잠금(Win+L) 중에도 모니터/GPU 렌더링이 절전으로 내려가지 않도록
 # 이 스크립트가 도는 동안만 Windows에 "화면·시스템을 켜둬라"라고 알려준다.
@@ -41,7 +48,7 @@ $KeepAwake = ([PowerHelper+EXECUTION_STATE]::ES_CONTINUOUS -bor
 [PowerHelper]::SetThreadExecutionState($KeepAwake) | Out-Null
 
 try {
-    & $Python $Script --gametitle --unattended *>> $LogFile
+    & $Python $Script --title $Title --unattended *>> $LogFile
 }
 finally {
     # 실행이 끝나면 평소 전원 관리 설정으로 되돌린다.

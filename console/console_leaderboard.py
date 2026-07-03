@@ -16,8 +16,11 @@ Scope:
 
 By default this script is read-only. Only when --block-new-users is passed does it
 perform a mutation: new accounts whose total payment sum is at or below the env-managed
-threshold (USER_BLOCK_MAX_TOTAL_PAYMENT, default 200,000) are user-blocked (device ban
-included). Without the flag it merely prints the block candidates (dry-run).
+threshold (USER_BLOCK_MAX_TOTAL_PAYMENT, default 200,000; --dc uses recent purchase count
+and USER_BLOCK_MAX_PURCHASE_COUNT instead) are user-blocked (device ban included).
+Both this and ACCOUNT_NEW_HOURS accept a {TITLE}_-prefixed per-project override
+(e.g. GAMETITLE_USER_BLOCK_MAX_TOTAL_PAYMENT, DC_USER_BLOCK_MAX_PURCHASE_COUNT).
+Without the flag it merely prints the block candidates (dry-run).
 """
 
 import argparse
@@ -105,6 +108,11 @@ UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.I,
 )
+# 아래 4개(ACCOUNT_NEW_HOURS/ACCOUNT_LOOKUP_LOOKBACK_HOURS/BLOCK_MAX_TOTAL_PAYMENT/
+# BLOCK_MAX_PURCHASE_COUNT)는 모듈 로드 시 전역 env로 1차 로드하되, main()에서
+# --title/--gametitle/--dc로 프로젝트가 정해진 뒤 {TITLE}_ 접두 env가 있으면 그 값으로
+# 덮어쓴다(_resolve_title_int_env, 프로젝트별 분리 — 2026-07-03). 전역 env가 없으면
+# 아래 하드코딩 기본값이 최종 fallback이다.
 ACCOUNT_NEW_HOURS = int(os.environ.get("ACCOUNT_NEW_HOURS", "240"))  # 계정 생성 후 N시간 이내 → 신규
 # 계정 생성일 조회 시 GCP 로그를 거슬러 볼 시간 범위(하한). 기본값은 신규 계정 기준(ACCOUNT_NEW_HOURS)과 동일.
 # 근거: 진짜 "신규" 계정은 반드시 이 창 안에 로그가 있다(가입 자체가 창 안). 따라서 이 창만 조회해도
@@ -116,8 +124,11 @@ RECENT_PAYMENT_LIMIT = 100  # 신규 유저 영수증검증 최근 결제 합계
 GCP_QUERY_MAX_RETRIES = max(1, int(os.environ.get("GCP_QUERY_MAX_RETRIES", "10")))
 GCP_QUERY_RETRY_WAIT_MS = max(0, int(os.environ.get("GCP_QUERY_RETRY_WAIT_MS", "1000")))
 RETRY_MAX_RETRIES = get_retry_max_retries()  # console_user_block.py와 공용 env — 목록 재진입 재시도도 동일 개념이라 공용
-# 신규 유저 차단 임계값: 총 결제액(영수증검증+지급내역)이 이 값 "이하"면 차단 대상. env로 관리.
+# 신규 유저 차단 임계값(가격 기반, --dc 이외): 총 결제액(영수증검증+지급내역)이 이 값 "이하"면 차단 대상.
 BLOCK_MAX_TOTAL_PAYMENT = max(0, int(os.environ.get("USER_BLOCK_MAX_TOTAL_PAYMENT", "200000")))
+# 신규 유저 차단 임계값(구매 건수 기반, --dc 전용 — 가격 등 조회 불가 정책):
+# 영수증검증 최근 RECENT_PAYMENT_LIMIT건 중 구매 제품 건수(recent_purchase_count)가 이 값 "이하"면 차단 대상.
+BLOCK_MAX_PURCHASE_COUNT = max(0, int(os.environ.get("USER_BLOCK_MAX_PURCHASE_COUNT", "0")))
 RANK_COL_WIDTH = 4
 UUID_COL_WIDTH = 36
 ACCOUNT_TYPE_COL_WIDTH = 16  # 계정상태 고정폭 — 조회실패(...) 예외 메시지는 이 폭에서 말줄임 처리됨
@@ -139,6 +150,14 @@ LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS = [
     r"structural_text: col:(?:수량|순위 구간|아이템)$",
 ]
 
+
+
+def _resolve_title_int_env(prefix: str, suffix: str, default_value: int) -> int:
+    """{prefix}_{suffix} env가 있으면 그 값, 없으면 default_value(전역 fallback) 그대로."""
+    if not prefix:
+        return default_value
+    raw = os.environ.get(f"{prefix}_{suffix}", "").strip()
+    return int(raw) if raw else default_value
 
 
 def _is_visible(locator) -> bool:
@@ -229,7 +248,9 @@ def parse_args():
         action="store_true",
         help=(
             f"신규 유저 중 총 결제액이 임계값(기본 {BLOCK_MAX_TOTAL_PAYMENT:,}원, "
-            "env USER_BLOCK_MAX_TOTAL_PAYMENT) 이하인 대상을 실제로 user_block(디바이스밴 포함)합니다. "
+            "env USER_BLOCK_MAX_TOTAL_PAYMENT, {TITLE}_USER_BLOCK_MAX_TOTAL_PAYMENT로 프로젝트별 override 가능) "
+            "이하인 대상을 실제로 user_block(디바이스밴 포함)합니다. --dc는 가격 대신 최근 구매 건수 "
+            "(env USER_BLOCK_MAX_PURCHASE_COUNT/{TITLE}_USER_BLOCK_MAX_PURCHASE_COUNT) 기준입니다. "
             "지정하지 않으면 후보 목록만 출력하는 드라이런으로 동작합니다(운영 실행 승인 게이트)."
         ),
     )
@@ -1122,15 +1143,20 @@ def compute_total_payment_sum(all_rows):
             row["total_payment_sum"] = recent + payitem
 
 
-def select_block_candidates(all_rows, max_total_payment: int) -> list:
+def select_block_candidates(all_rows, max_total_payment: int, dc_mode: bool = False, max_purchase_count: int = 0) -> list:
     """차단 대상 신규 유저 선정. UUID 기준 중복 제거.
 
-    선정 조건:
-    - account_type == '계정 신규 생성' (기존 유저는 제외).
+    공통 조건: account_type == '계정 신규 생성' (기존 유저는 제외).
+
+    dc_mode=False(기본, 가격 기반):
     - total_payment_sum 이 정수로 존재 — compute_total_payment_sum은 영수증검증·지급내역이
       둘 다 정상 조회(정수)됐을 때만 이 값을 채운다. 하나라도 조회 실패면 키가 없으므로
       여기서 자연히 제외된다("조회했는데 0원"(total==0, 차단 대상)과 "조회 실패"(키 없음, 미진행)를 정확히 분리).
     - total_payment_sum <= max_total_payment (임계값 이하).
+
+    dc_mode=True(--dc, 구매 건수 기반 — 가격 등 조회 불가 정책):
+    - recent_purchase_count 가 정수로 존재(영수증검증 조회 실패 시 빈 문자열 → 자연히 제외).
+    - recent_purchase_count <= max_purchase_count (임계값 이하).
     """
     candidates = []
     seen = set()
@@ -1140,6 +1166,23 @@ def select_block_candidates(all_rows, max_total_payment: int) -> list:
         uuid_value = row["uuid"]
         if uuid_value in seen:
             continue
+
+        if dc_mode:
+            count = row.get("recent_purchase_count")
+            if not isinstance(count, int):
+                continue  # 영수증검증 조회 실패 → 차단 미진행
+            if count > max_purchase_count:
+                continue
+            seen.add(uuid_value)
+            candidates.append(
+                {
+                    "uuid": uuid_value,
+                    "nickname": row.get("nickname", ""),
+                    "recent_purchase_count": count,
+                }
+            )
+            continue
+
         total = row.get("total_payment_sum")
         if not isinstance(total, int):
             continue  # 영수증검증/지급내역 중 하나라도 조회 실패 → 차단 미진행
@@ -1162,26 +1205,44 @@ def _annotate_block_status(all_rows, status_by_uuid: dict):
             row["block_status"] = status_by_uuid[row["uuid"]]
 
 
-def block_low_payment_new_users(page, all_rows, start_url, project_name, args, project_key) -> dict:
-    """신규 유저 중 총 결제액 임계값 이하 대상을 user_block(+디바이스밴)한다.
+def _format_block_metric(candidate: dict, dc_mode: bool) -> str:
+    if dc_mode:
+        return f"최근 구매 {candidate['recent_purchase_count']}건"
+    return f"총결제 {candidate['total_payment_sum']:,}원"
+
+
+def block_low_payment_new_users(
+    page, all_rows, start_url, project_name, args, project_key,
+    dc_mode: bool = False, max_total_payment: int = 0, max_purchase_count: int = 0,
+) -> dict:
+    """신규 유저 중 차단 임계값 이하 대상을 user_block(+디바이스밴)한다.
+
+    dc_mode=False(기본): 총 결제액(max_total_payment) 기준(가격 기반).
+    dc_mode=True(--dc): 영수증검증 최근 구매 건수(max_purchase_count) 기준(가격 등 조회 불가 정책).
 
     운영 실행이므로 기본은 드라이런(후보만 출력)이고, --block-new-users 지정 시에만 실제 차단한다.
     각 UUID는 독립 재시도 예산을 갖고, 하나가 실패해도 다음 대상으로 계속 진행한다(배치 격리).
     user_block/디바이스밴은 '이미 등록됨'을 화면 문구로 정확히 판정하므로 멱등적이라 재시도 가능하다.
     """
-    candidates = select_block_candidates(all_rows, BLOCK_MAX_TOTAL_PAYMENT)
+    candidates = select_block_candidates(all_rows, max_total_payment, dc_mode=dc_mode, max_purchase_count=max_purchase_count)
 
-    print(
-        f"\n[12] 신규 유저 중 총 결제액 {BLOCK_MAX_TOTAL_PAYMENT:,}원 이하 차단 대상 선정 "
-        "(기존 유저·조회 실패 제외)..."
-    )
+    if dc_mode:
+        print(
+            f"\n[12] 신규 유저 중 최근 구매 건수 {max_purchase_count}건 이하 차단 대상 선정 "
+            "(기존 유저·조회 실패 제외)..."
+        )
+    else:
+        print(
+            f"\n[12] 신규 유저 중 총 결제액 {max_total_payment:,}원 이하 차단 대상 선정 "
+            "(기존 유저·조회 실패 제외)..."
+        )
     if not candidates:
         print("    차단 대상 신규 유저가 없습니다.")
         return {"executed": bool(args.block_new_users), "candidates": [], "results": []}
 
     print(f"    차단 대상 {len(candidates)}명:")
     for c in candidates:
-        print(f"      - {c['uuid']} ({c['nickname']}) 총결제 {c['total_payment_sum']:,}원")
+        print(f"      - {c['uuid']} ({c['nickname']}) {_format_block_metric(c, dc_mode)}")
 
     status_by_uuid = {}
 
@@ -1203,7 +1264,7 @@ def block_low_payment_new_users(page, all_rows, start_url, project_name, args, p
     for idx, c in enumerate(candidates, start=1):
         uuid_value = c["uuid"]
         print(f"\n{'=' * 60}")
-        print(f" [{idx}/{len(candidates)}] 차단: {uuid_value} (총결제 {c['total_payment_sum']:,}원)")
+        print(f" [{idx}/{len(candidates)}] 차단: {uuid_value} ({_format_block_metric(c, dc_mode)})")
         print("=" * 60)
 
         attempt_counter = {"count": 0}
@@ -1649,6 +1710,20 @@ def main():
         if missing:
             raise SystemExit(f"[오류] --title {args.title}: 다음 env가 비어 있습니다 — {', '.join(missing)}")
 
+    # 프로젝트별 운영 파라미터 override(2026-07-03 분리): {TITLE}_ACCOUNT_NEW_HOURS 등이 있으면
+    # 전역 기본값 대신 그 값을 쓴다. args.title은 require_project_name=True라 항상 채워져 있다.
+    global ACCOUNT_NEW_HOURS, ACCOUNT_LOOKUP_LOOKBACK_HOURS, BLOCK_MAX_TOTAL_PAYMENT, BLOCK_MAX_PURCHASE_COUNT
+    ACCOUNT_NEW_HOURS = _resolve_title_int_env(prefix, "ACCOUNT_NEW_HOURS", ACCOUNT_NEW_HOURS)
+    ACCOUNT_LOOKUP_LOOKBACK_HOURS = max(
+        1, _resolve_title_int_env(prefix, "ACCOUNT_LOOKUP_LOOKBACK_HOURS", ACCOUNT_NEW_HOURS)
+    )
+    BLOCK_MAX_TOTAL_PAYMENT = max(
+        0, _resolve_title_int_env(prefix, "USER_BLOCK_MAX_TOTAL_PAYMENT", BLOCK_MAX_TOTAL_PAYMENT)
+    )
+    BLOCK_MAX_PURCHASE_COUNT = max(
+        0, _resolve_title_int_env(prefix, "USER_BLOCK_MAX_PURCHASE_COUNT", BLOCK_MAX_PURCHASE_COUNT)
+    )
+
     credentials = None
     bq_credentials = None
     if use_bigquery:
@@ -1680,13 +1755,16 @@ def main():
         print("DC모드   : 활성 — 지급 내역(웹샵) 조회 생략, 영수증검증은 구매 제품 건수만 확인(가격 등 조회 불가)")
     if args.test_single_board:
         print("테스트   : --test-single-board 활성 — 리더보드 1개만 조회 후 다음 단계로 진행")
+    block_threshold_desc = (
+        f"최근 구매 {BLOCK_MAX_PURCHASE_COUNT}건 이하" if dc_mode else f"총결제 {BLOCK_MAX_TOTAL_PAYMENT:,}원 이하"
+    )
     if args.block_new_users:
         print(
-            f"차단     : 활성 (실제 차단) — 신규 유저 총결제 {BLOCK_MAX_TOTAL_PAYMENT:,}원 이하, "
+            f"차단     : 활성 (실제 차단) — 신규 유저 {block_threshold_desc}, "
             f"디바이스밴 {'생략' if args.skip_device_block else '포함'}, 사유='{args.reason}'"
         )
     else:
-        print(f"차단     : 드라이런 (--block-new-users 미지정) — 후보만 출력, 임계값 {BLOCK_MAX_TOTAL_PAYMENT:,}원 이하")
+        print(f"차단     : 드라이런 (--block-new-users 미지정) — 후보만 출력, 임계값 {block_threshold_desc}")
 
     succeeded = False
     all_rows = []
@@ -1725,7 +1803,7 @@ def main():
                 dc_mode=dc_mode,
             )
 
-            # 조회 완료 후: 신규 유저 중 총결제 임계값 이하 대상 차단(운영 실행) 또는 후보 출력(드라이런).
+            # 조회 완료 후: 신규 유저 중 차단 임계값(가격 또는 --dc 구매 건수) 이하 대상 차단(운영 실행) 또는 후보 출력(드라이런).
             block_outcome = block_low_payment_new_users(
                 page=page,
                 all_rows=all_rows,
@@ -1733,6 +1811,9 @@ def main():
                 project_name=args.project_name,
                 args=args,
                 project_key=project_key,
+                dc_mode=dc_mode,
+                max_total_payment=BLOCK_MAX_TOTAL_PAYMENT,
+                max_purchase_count=BLOCK_MAX_PURCHASE_COUNT,
             )
             block_had_failures = block_outcome["executed"] and any(
                 not r["succeeded"] for r in block_outcome["results"]

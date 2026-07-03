@@ -1,10 +1,16 @@
 ﻿# -*- coding: utf-8 -*-
-# register_leaderboard_schedule.ps1 로 등록한 작업 스케줄러 항목을 제거한다.
-# 실행: 이 파일을 우클릭 -> "PowerShell로 실행"
+# register_leaderboard_schedule_<title>.ps1 로 등록한 작업 스케줄러 항목을 제거한다(타이틀별 공용 core, -Title 파라미터).
+# 이 파일을 직접 실행하지 않는다 — unregister_leaderboard_schedule_gametitle.ps1 / _dc.ps1 처럼
+# 타이틀별 래퍼를 우클릭 -> "PowerShell로 실행"한다.
+
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$Title
+)
 
 $ErrorActionPreference = "Stop"
 
-$TaskName = "ConsoleLeaderboard"
+$TaskName = "ConsoleLeaderboard_$Title"
 
 try {
     $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue

@@ -1,20 +1,31 @@
 ﻿# -*- coding: utf-8 -*-
-# console_leaderboard.py 를 Windows 작업 스케줄러에 등록/갱신한다.
-# 요일/시각은 코드에 하드코딩하지 않고 프로젝트 루트 .env 의 아래 두 값을 읽어 사용한다.
+# console_leaderboard.py 를 Windows 작업 스케줄러에 등록/갱신한다(타이틀별 공용 core, -Title 파라미터).
+# 이 파일을 직접 실행하지 않는다 — register_leaderboard_schedule_gametitle.ps1 / _dc.ps1 처럼
+# 타이틀별 래퍼를 우클릭 -> "PowerShell로 실행"한다(새 타이틀 추가 시 같은 방식으로 래퍼만 추가하면 됨).
 #
-#   LEADERBOARD_SCHEDULE_DAYS=Saturday,Sunday       (콤마 구분, 영문 요일명: Monday/Tuesday/Wednesday/Thursday/Friday/Saturday/Sunday)
-#   LEADERBOARD_SCHEDULE_TIME=12:00,14:00,20:00     (콤마 구분, 24시간제 HH:mm. 여러 개 지정 가능)
+# 요일/시각은 코드에 하드코딩하지 않고 프로젝트 루트 .env 의 아래 두 값을 타이틀별로 읽어 사용한다.
+#
+#   {TITLE}_LEADERBOARD_SCHEDULE_DAYS=Saturday,Sunday       (콤마 구분, 영문 요일명: Monday/Tuesday/Wednesday/Thursday/Friday/Saturday/Sunday)
+#   {TITLE}_LEADERBOARD_SCHEDULE_TIME=12:00,14:00,20:00     (콤마 구분, 24시간제 HH:mm. 여러 개 지정 가능)
+#
+# 예) GAMETITLE_LEADERBOARD_SCHEDULE_DAYS=Friday / GAMETITLE_LEADERBOARD_SCHEDULE_TIME=09:00
 #
 # 위 예시는 "토요일·일요일 각각 12:00/14:00/20:00에 실행" = 지정한 요일 전체 x 지정한 시각 전체 조합으로 실행된다.
-# 스케줄을 바꾸고 싶으면 .env 값만 수정한 뒤 이 스크립트를 다시 실행하면 된다(기존 등록을 덮어씀).
-# 등록 취소: unregister_leaderboard_schedule.ps1 실행 (같은 방식으로 우클릭 -> "PowerShell로 실행")
+# 스케줄을 바꾸고 싶으면 .env 값만 수정한 뒤 해당 타이틀 래퍼를 다시 실행하면 된다(기존 등록을 덮어씀).
+# 등록 취소: unregister_leaderboard_schedule_<title>.ps1 실행 (같은 방식으로 우클릭 -> "PowerShell로 실행")
+
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$Title
+)
 
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $EnvFile = Join-Path $ProjectRoot ".env"
 $WrapperScript = Join-Path $PSScriptRoot "run_leaderboard_scheduled.ps1"
-$TaskName = "ConsoleLeaderboard"
+$TaskName = "ConsoleLeaderboard_$Title"
+$Prefix = $Title.ToUpper()
 
 try {
     if (-not (Test-Path $EnvFile)) {
@@ -33,11 +44,11 @@ try {
         $envMap[$key] = $value
     }
 
-    $Days = $envMap["LEADERBOARD_SCHEDULE_DAYS"]
-    $Time = $envMap["LEADERBOARD_SCHEDULE_TIME"]
+    $Days = $envMap["${Prefix}_LEADERBOARD_SCHEDULE_DAYS"]
+    $Time = $envMap["${Prefix}_LEADERBOARD_SCHEDULE_TIME"]
 
     if (-not $Days -or -not $Time) {
-        throw "[오류] .env 에 LEADERBOARD_SCHEDULE_DAYS / LEADERBOARD_SCHEDULE_TIME 을 설정해 주세요. 예) LEADERBOARD_SCHEDULE_DAYS=Saturday,Sunday / LEADERBOARD_SCHEDULE_TIME=12:00,14:00,20:00"
+        throw "[오류] .env 에 ${Prefix}_LEADERBOARD_SCHEDULE_DAYS / ${Prefix}_LEADERBOARD_SCHEDULE_TIME 을 설정해 주세요. 예) ${Prefix}_LEADERBOARD_SCHEDULE_DAYS=Saturday,Sunday / ${Prefix}_LEADERBOARD_SCHEDULE_TIME=12:00,14:00,20:00"
     }
 
     $DaysOfWeek = $Days.Split(",") | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
@@ -45,11 +56,11 @@ try {
 
     foreach ($t in $Times) {
         if ($t -notmatch "^\d{1,2}:\d{2}$") {
-            throw "[오류] LEADERBOARD_SCHEDULE_TIME 형식이 올바르지 않습니다: '$t' (예: 09:00)"
+            throw "[오류] ${Prefix}_LEADERBOARD_SCHEDULE_TIME 형식이 올바르지 않습니다: '$t' (예: 09:00)"
         }
     }
 
-    Write-Host "등록할 스케줄: 매주 $($DaysOfWeek -join ', ') 요일의 $($Times -join ', ') 시각에 실행됩니다."
+    Write-Host "[$Title] 등록할 스케줄: 매주 $($DaysOfWeek -join ', ') 요일의 $($Times -join ', ') 시각에 실행됩니다."
 
     # 예약 시각에 PC가 절전(Sleep) 상태여도 깨어나 실행되도록 하려면, 작업 자체의
     # WakeToRun 설정뿐 아니라 전원 설정의 "절전 모드 해제 타이머 허용"도 켜져 있어야 한다.
@@ -60,7 +71,7 @@ try {
     Write-Host "전원 설정: 절전 모드 해제 타이머 허용 켬(AC/DC) — WakeToRun이 실제로 동작하기 위한 전제조건"
 
     $Action = New-ScheduledTaskAction -Execute "powershell.exe" `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$WrapperScript`""
+        -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$WrapperScript`" -Title `"$Title`""
 
     $Triggers = foreach ($t in $Times) {
         New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DaysOfWeek -At $t
