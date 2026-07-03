@@ -833,6 +833,15 @@ def query_account_creation_info_bigquery(bq_client, bq_project, dataset, table, 
     if create_dt is None:
         return {"account_type": "계정정보없음", "create_account_date": ""}
 
+    if isinstance(create_dt, str):
+        # dc_all의 in_date_UTC는 BigQuery 스키마상 STRING 컬럼(예: "2026-06-30 02:53:56")이라
+        # TIMESTAMP/DATETIME으로 오지 않는다(라이브 조회로 확인, 2026-07-03). Cloud Logging 쪽
+        # query_account_creation_info와 동일하게 파싱 실패는 별도 상태로 남긴다.
+        try:
+            create_dt = datetime.datetime.fromisoformat(create_dt.replace("Z", ""))
+        except Exception:
+            return {"account_type": "날짜파싱실패", "create_account_date": create_dt}
+
     if create_dt.tzinfo is not None:
         create_dt = create_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
 
