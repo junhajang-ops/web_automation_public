@@ -185,7 +185,13 @@ def configure_console_output() -> str:
         if stream is None or not hasattr(stream, "reconfigure"):
             continue
         try:
-            stream.reconfigure(encoding=encoding, errors="replace")
+            # line_buffering=True: 표준출력이 실제 콘솔이 아니라 파이프로 연결되면(예:
+            # run_leaderboard_scheduled.ps1의 `... | Tee-Object`) 파이썬이 자동으로
+            # 완전 버퍼링으로 전환해, 내부 버퍼가 다 차거나 프로세스가 끝날 때까지
+            # 화면·로그 파일 어디에도 아무 줄도 안 나가는 문제가 있었다(실측: 예약
+            # 실행이 실제로 돌고 있었는데 터미널에 아무것도 안 보여 사용자가 수동 종료).
+            # 줄바꿈마다 강제로 flush하도록 고정해 콘솔 실행과 동일하게 실시간으로 보이게 한다.
+            stream.reconfigure(encoding=encoding, errors="replace", line_buffering=True)
         except Exception:
             continue
     return encoding
