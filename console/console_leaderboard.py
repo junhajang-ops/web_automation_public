@@ -39,6 +39,7 @@ from console_user_search import (
     find_exact_text_match,
     load_playwright,
     prepare_console_project,
+    project_fingerprint_label,
     safe_wait_for_load,
     select_target_page,
     wait_for_visible,
@@ -155,13 +156,14 @@ def _leaderboard_nav_source(page) -> str:
 
 
 def _leaderboard_nav_step_name(page, nav_context: str) -> str:
+    project_label = project_fingerprint_label(page)
     if nav_context == "board_loop":
-        return f"leaderboard_nav_{nav_context}_{_leaderboard_nav_source(page)}_pre"
-    return f"leaderboard_nav_{nav_context}_pre"
+        return f"leaderboard_nav_{nav_context}_{project_label}_{_leaderboard_nav_source(page)}_pre"
+    return f"leaderboard_nav_{nav_context}_{project_label}_pre"
 
 
-def _leaderboard_open_step_name() -> str:
-    return "leaderboard_open_list_pre"
+def _leaderboard_open_step_name(page) -> str:
+    return f"leaderboard_open_list_{project_fingerprint_label(page)}_pre"
 
 
 def parse_args():
@@ -470,7 +472,7 @@ def open_leaderboard_list_and_search_with_retry(page, keyword: str, start_url: s
 
 
 def _click_board_from_list(page, board_name: str):
-    open_step_name = _leaderboard_open_step_name()
+    open_step_name = _leaderboard_open_step_name(page)
     rows = get_data_rows(page)
     row = rows.filter(has_text=board_name).first
     if wait_for_visible(row, 2_000):

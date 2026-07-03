@@ -243,13 +243,29 @@ def find_project_selector_button(page):
     return page.locator("button:has(p):has(svg[name='chevron-down'])").first
 
 
+def project_fingerprint_label(page) -> str:
+    """현재 화면에 표시된 프로젝트명을 fingerprint 스텝 이름에 쓸 수 있게 정규화한다.
+
+    사이드바 카테고리 열림/닫힘 상태와 활성 메뉴는 프로젝트마다 실제로 다르다(다른
+    화면이므로 다른 지문이 정상). 스텝 이름이 프로젝트와 무관하게 고정돼 있으면 서로
+    다른 프로젝트를 번갈아 실행할 때마다 baseline이 덮어써져 "바뀌었다"는 오탐이 반복된다.
+    프로젝트명을 이름에 포함해 프로젝트별로 별도 baseline을 유지한다.
+    """
+    try:
+        text = find_project_selector_button(page).inner_text(timeout=2_000).strip()
+    except Exception:
+        return "unknown"
+    slug = re.sub(r"[^0-9A-Za-z가-힣]+", "_", text).strip("_")
+    return slug or "unknown"
+
+
 def ensure_project_menu_open(page):
     if wait_for_visible(page.locator("[role='menuitem']").first, 1_000):
         return
 
     selector_button = find_project_selector_button(page)
     selector_button.wait_for(state="visible", timeout=15_000)
-    record_step_dump(page, "project_menu_open_pre")
+    record_step_dump(page, f"project_menu_open_{project_fingerprint_label(page)}_pre")
     selector_button.click()
     page.locator("[role='menuitem']").first.wait_for(state="visible", timeout=15_000)
 
@@ -288,7 +304,7 @@ def select_project_by_name(page, project_name):
 
     print(f"[3] 프로젝트 선택: {selected_name}")
     selected_item.scroll_into_view_if_needed()
-    record_step_dump(page, "project_select_pre")
+    record_step_dump(page, f"project_select_{project_fingerprint_label(page)}_pre")
     selected_item.click()
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
