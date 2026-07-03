@@ -10,6 +10,8 @@ Scope:
 - Open each leaderboard from the on-screen list
 - Read every player within rank <= 30 from the detail table (ties included)
 - Enrich new accounts with receipt-verification / payment-history sums
+  (--dc: skip payment-history lookup entirely; receipt-verification only counts
+  purchased products, no price lookup — 게임B 프로젝트는 가격 등 조회 불가 정책)
 - Save CSV and debug artifacts
 
 By default this script is read-only. Only when --block-new-users is passed does it
@@ -915,10 +917,13 @@ def prepare_receipt_verification_session(page, explicit_project_base, start_url,
 
 
 def summarize_recent_payments(page, uuid_value, start_url, project_name, timeout_error,
-                              limit=RECENT_PAYMENT_LIMIT, receipt_session=None):
+                              limit=RECENT_PAYMENT_LIMIT, receipt_session=None, dc_mode=False):
     """콘솔 영수증검증 메뉴 조회 → 최근 limit건 결제액 합계. 읽기 전용.
 
     영수증검증은 이미 100개씩 보기로 최신순 표시되므로 rows 앞에서 limit건을 합산한다.
+
+    dc_mode=True(--dc)이면 가격("금액") 조회/합산을 하지 않고 최근 limit건 중
+    구매 제품 건수만 센다(게임B 프로젝트는 가격 등 조회 불가 정책).
     """
     if receipt_session is None:
         receipt_session = prepare_receipt_verification_session(
@@ -951,6 +956,8 @@ def summarize_recent_payments(page, uuid_value, start_url, project_name, timeout
 
     rows = result.get("rows") or []
     recent = rows[:limit]
+    if dc_mode:
+        return {"recent_purchase_count": len(recent)}
     total = sum(_parse_price_to_int(r.get("금액", "")) for r in recent)
     return {
         "recent_payment_count": len(recent),
@@ -958,10 +965,13 @@ def summarize_recent_payments(page, uuid_value, start_url, project_name, timeout
     }
 
 
-def enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error):
+def enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error, dc_mode=False):
     """all_rows 중 '계정 신규 생성' 유저에 영수증검증 최근 결제 합계를 in-place 추가.
 
     같은 유저가 여러 보드에 중복될 수 있어 uuid 로 한 번만 조회하고 해당 행 전부에 반영.
+
+    dc_mode=True(--dc)이면 가격 합계 대신 최근 구매 제품 건수만 조회한다
+    (게임B 프로젝트는 가격 등 조회 불가 정책).
     """
     new_uuids = []
     seen = set()
@@ -974,7 +984,10 @@ def enrich_new_users_with_payments(page, all_rows, start_url, project_name, time
         print("\n[10] 신규 유저(계정 240시간 이내) 없음 — 영수증검증 단계 생략.")
         return
 
-    print(f"\n[10] 신규 유저 {len(new_uuids)}명 영수증검증 최근 {RECENT_PAYMENT_LIMIT}건 결제액 합계 조회...")
+    if dc_mode:
+        print(f"\n[10] 신규 유저 {len(new_uuids)}명 영수증검증 최근 {RECENT_PAYMENT_LIMIT}건 중 구매 제품 건수 조회...")
+    else:
+        print(f"\n[10] 신규 유저 {len(new_uuids)}명 영수증검증 최근 {RECENT_PAYMENT_LIMIT}건 결제액 합계 조회...")
     summary_by_uuid = {}
     receipt_session = {
         "initialized": False,
@@ -1006,16 +1019,20 @@ def enrich_new_users_with_payments(page, all_rows, start_url, project_name, time
                     project_name,
                     timeout_error,
                     receipt_session=receipt_session,
+                    dc_mode=dc_mode,
                 ),
                 recovery=_recover_receipt_session,
                 label=f"영수증검증 [{uuid_value}] 조회 재시도",
                 recovery_desc=f"콘솔 초기화면({start_url})으로 재접속 후 재시도합니다.",
                 max_retries=RETRY_MAX_RETRIES,
             )
-            print(f"    [{uuid_value}] {summary['recent_payment_count']}건 합계 {summary['recent_payment_sum']:,}")
+            if dc_mode:
+                print(f"    [{uuid_value}] 구매 제품 {summary['recent_purchase_count']}건")
+            else:
+                print(f"    [{uuid_value}] {summary['recent_payment_count']}건 합계 {summary['recent_payment_sum']:,}")
         except Exception as exc:  # noqa: BLE001 — 재시도 소진 후에도 한 명 실패가 전체를 막지 않게
             print(f"    [{uuid_value}] 영수증검증 실패(재시도 소진) — 다음 UUID로 넘어갑니다: {exc}")
-            summary = {"recent_payment_count": "", "recent_payment_sum": ""}
+            summary = {"recent_purchase_count": ""} if dc_mode else {"recent_payment_count": "", "recent_payment_sum": ""}
         summary_by_uuid[uuid_value] = summary
 
     for r in all_rows:
@@ -1371,6 +1388,7 @@ def run(
     bq_date_col="",
     timeout_error=Exception,
     single_board_test=False,
+    dc_mode=False,
 ) -> tuple:
     prepare_console_project(
         page=page,
@@ -1510,8 +1528,11 @@ def run(
     step_and_verify_ui(page, "leaderboard_complete", ignore_patterns=LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS)
 
     # 신규 유저(계정 240시간 이내)만 영수증검증으로 최근 결제액 합계 점검
-    enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error)
-    enrich_new_users_with_webshop_history(page, all_rows, start_url, project_name)
+    # dc_mode(--dc, 게임B)는 가격 등 조회 불가 정책이라 지급 내역(웹샵) 조회는 생략하고
+    # 영수증검증도 구매 제품 건수만 확인한다.
+    enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error, dc_mode=dc_mode)
+    if not dc_mode:
+        enrich_new_users_with_webshop_history(page, all_rows, start_url, project_name)
     compute_total_payment_sum(all_rows)
 
     printed_uuids = set()
@@ -1533,11 +1554,13 @@ def save_csv(rows: list, out_dir: Path, project_key: str) -> Path:
     base_fields = ["leaderboard", "rank", "uuid", "nickname"]
     gcp_fields = ["account_type", "create_account_date"]
     payment_fields = ["recent_payment_count", "recent_payment_sum"]
+    purchase_count_fields = ["recent_purchase_count"]  # --dc: 가격 대신 구매 제품 건수만
     webshop_fields = ["payitem_match_count", "payitem_quantity_total", "payitem_item_value_sum"]
     total_fields = ["total_payment_sum"]
     block_fields = ["block_status"]
     has_gcp = any(row.get("account_type") for row in rows)
     has_payment = any("recent_payment_sum" in row for row in rows)
+    has_purchase_count = any("recent_purchase_count" in row for row in rows)
     has_webshop = any("payitem_item_value_sum" in row for row in rows)
     has_total = any("total_payment_sum" in row for row in rows)
     has_block = any("block_status" in row for row in rows)
@@ -1545,6 +1568,7 @@ def save_csv(rows: list, out_dir: Path, project_key: str) -> Path:
         base_fields
         + (gcp_fields if has_gcp else [])
         + (payment_fields if has_payment else [])
+        + (purchase_count_fields if has_purchase_count else [])
         + (webshop_fields if has_webshop else [])
         + (total_fields if has_total else [])
         + (block_fields if has_block else [])
@@ -1591,6 +1615,9 @@ def main():
         default_leaderboard_keywords=DEFAULT_SEARCH_KEYWORDS,
         include_leaderboard_keywords=True,
     )
+    # --dc(게임B)는 가격 등 조회 불가 정책 — 지급 내역(웹샵) 조회 생략, 영수증검증은 구매 제품 건수만 확인.
+    # --title dc 로 직접 지정해도 동일하게 적용한다(apply_title_profile은 --dc일 때만 title을 자동 채움).
+    dc_mode = bool(args.dc) or args.title.strip().lower() == "dc"
     # 차단 기록 CSV 파일명 접미사 — console_user_block.main()과 동일 규칙(title 우선, 없으면 프로젝트명 정규화).
     project_key = args.title.strip() if args.title.strip() else re.sub(r"[^\w가-힣]", "_", args.project_name).strip("_")
     keyword_list = [k.strip() for k in args.keywords.split(",") if k.strip()]
@@ -1649,6 +1676,8 @@ def main():
     else:
         gcp_ready = credentials and args.gcp_project and args.gcp_log
         print(f"GCP 조회 : {'활성 (' + args.gcp_project + ' / ' + args.gcp_log + ')' if gcp_ready else '비활성 (--key / --gcp-project / --gcp-log 미지정)'}")
+    if dc_mode:
+        print("DC모드   : 활성 — 지급 내역(웹샵) 조회 생략, 영수증검증은 구매 제품 건수만 확인(가격 등 조회 불가)")
     if args.test_single_board:
         print("테스트   : --test-single-board 활성 — 리더보드 1개만 조회 후 다음 단계로 진행")
     if args.block_new_users:
@@ -1693,6 +1722,7 @@ def main():
                 bq_date_col=args.bq_date_col,
                 timeout_error=_timeout_error,
                 single_board_test=args.test_single_board,
+                dc_mode=dc_mode,
             )
 
             # 조회 완료 후: 신규 유저 중 총결제 임계값 이하 대상 차단(운영 실행) 또는 후보 출력(드라이런).
