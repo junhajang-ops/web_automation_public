@@ -599,7 +599,11 @@ def _scroll_leaderboard_grid_once(page):
         return False
 
     page.mouse.move(box["x"] + (box["width"] / 2), box["y"] + (box["height"] / 2))
-    record_step_dump(page, "leaderboard_scroll_pre")
+    record_step_dump(
+        page,
+        "leaderboard_scroll_pre",
+        ignore_patterns=LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS,
+    )
     page.mouse.wheel(0, GRID_SCROLL_STEP_PX)
     page.wait_for_timeout(POLL_WAIT_MS)
     return True
