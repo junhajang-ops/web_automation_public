@@ -788,7 +788,22 @@ def run_device_block(
         dropdown_open = False  # 옵션 선택 시 드롭다운은 자동으로 닫힌다.
         fill_block_reason(page, dialog, reason_text, step_name="device_block_reason_fill_pre")
         submit_block_registration(page, dialog, step_name="device_block_submit_pre")
-        status, error_message = confirm_device_result_popup(page, dialog)
+        # 2026-07-03: 등록 버튼 클릭(비가역 행동)은 이미 끝난 뒤이므로, 결과 확인이
+        # 실패(타임아웃 등)해도 그 사실을 "기록 없이 사라짐"이 아니라 "uncertain"으로
+        # CSV에 남긴다(원칙 11: 비가역 클릭 이후 확인 실패는 불확실로 멈추고 사람이
+        # 확인할 수 있게 흔적을 남긴다). 이 uuid의 재시도 자체는 기존과 동일하게
+        # retry_with_recovery로 계속 진행되므로 여기서는 기록만 남기고 그대로 재발생시킨다.
+        try:
+            status, error_message = confirm_device_result_popup(page, dialog)
+        except Exception as exc:
+            save_device_ban_history(
+                uuid_value, device_id, f"{reason_text} | uncertain={exc}", "uncertain", project_key
+            )
+            print(
+                f"  [불확실] device_id={device_id}: 등록 버튼 클릭 후 결과 확인에 실패했습니다"
+                f"(실제 차단 여부 불명, uncertain으로 기록) — {exc}"
+            )
+            raise
         history_reason = f"{reason_text} | error={error_message}" if error_message else reason_text
         save_device_ban_history(uuid_value, device_id, history_reason, status, project_key)
         results.append(
@@ -877,7 +892,21 @@ def run_user_block(
     set_rank_delete_checkbox(page, dialog, remove_rank)
     fill_block_reason(page, dialog, reason_text)
     submit_block_registration(page, dialog)
-    block_status = confirm_result_popup(page)
+    # 2026-07-03: 디바이스 차단과 동일한 이유로, 등록 버튼 클릭 후 결과 확인이
+    # 실패하면(타임아웃 등) 기록 없이 사라지지 않도록 "uncertain"으로 CSV에 남긴다
+    # (원칙 11). 이 uuid의 재시도 자체는 기존과 동일하게 retry_with_recovery로
+    # 계속 진행되므로 여기서는 기록만 남기고 그대로 재발생시킨다.
+    try:
+        block_status = confirm_result_popup(page)
+    except Exception as exc:
+        save_ban_history(
+            uuid_value, period_days, f"{reason_text} | uncertain={exc}", remove_rank, "uncertain", project_key
+        )
+        print(
+            f"  [불확실] uuid={uuid_value}: 유저 차단 등록 버튼 클릭 후 결과 확인에 실패했습니다"
+            f"(실제 차단 여부 불명, uncertain으로 기록) — {exc}"
+        )
+        raise
     save_ban_history(uuid_value, period_days, reason_text, remove_rank, block_status, project_key)
 
     device_results = []
