@@ -1060,13 +1060,16 @@ def summarize_recent_payments(page, uuid_value, start_url, project_name, timeout
     }
 
 
-def enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error, dc_mode=False):
+def enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error, dc_mode=False, checkpoint=None):
     """all_rows 중 '계정 신규 생성' 유저에 영수증검증 최근 결제 합계를 in-place 추가.
 
     같은 유저가 여러 보드에 중복될 수 있어 uuid 로 한 번만 조회하고 해당 행 전부에 반영.
 
     dc_mode=True(--dc)이면 가격 합계 대신 최근 구매 제품 건수만 조회한다
     (게임B 프로젝트는 가격 등 조회 불가 정책).
+
+    checkpoint(all_rows)가 주어지면 UUID 1명 처리(성공/실패 무관)할 때마다 호출해
+    그 시점까지의 결과를 파일에 즉시 반영한다(전체가 끝나야 저장되는 문제 방지).
     """
     new_uuids = []
     seen = set()
@@ -1083,7 +1086,6 @@ def enrich_new_users_with_payments(page, all_rows, start_url, project_name, time
         print(f"\n[10] 신규 유저 {len(new_uuids)}명 영수증검증 최근 {RECENT_PAYMENT_LIMIT}건 중 구매 제품 건수 조회...")
     else:
         print(f"\n[10] 신규 유저 {len(new_uuids)}명 영수증검증 최근 {RECENT_PAYMENT_LIMIT}건 결제액 합계 조회...")
-    summary_by_uuid = {}
     receipt_session = {
         "initialized": False,
         "rows_per_page_applied": False,
@@ -1128,14 +1130,18 @@ def enrich_new_users_with_payments(page, all_rows, start_url, project_name, time
         except Exception as exc:  # noqa: BLE001 — 재시도 소진 후에도 한 명 실패가 전체를 막지 않게
             print(f"    [{uuid_value}] 영수증검증 실패(재시도 소진) — 다음 UUID로 넘어갑니다: {exc}")
             summary = {"recent_purchase_count": ""} if dc_mode else {"recent_payment_count": "", "recent_payment_sum": ""}
-        summary_by_uuid[uuid_value] = summary
 
-    for r in all_rows:
-        if r["uuid"] in summary_by_uuid:
-            r.update(summary_by_uuid[r["uuid"]])
+        # 이 uuid에 해당하는 모든 행(여러 보드에 중복 등장 가능)에 즉시 반영하고,
+        # 다음 uuid로 넘어가기 전에 체크포인트 저장 — 중간에 죽어도 이 uuid까지는 파일에 남는다.
+        for r in all_rows:
+            if r["uuid"] == uuid_value:
+                r.update(summary)
+        if checkpoint:
+            checkpoint(all_rows)
 
 
-def enrich_new_users_with_webshop_history(page, all_rows, start_url, project_name):
+def enrich_new_users_with_webshop_history(page, all_rows, start_url, project_name, checkpoint=None):
+    """checkpoint(all_rows)가 주어지면 UUID 1명 처리할 때마다 호출해 즉시 파일에 반영한다."""
     new_uuids = []
     seen = set()
     for row in all_rows:
@@ -1148,7 +1154,6 @@ def enrich_new_users_with_webshop_history(page, all_rows, start_url, project_nam
         return
 
     print(f"\n[11] 신규 유저 {len(new_uuids)}명 지급 내역에서 payitem_* 합산을 조회합니다.")
-    summary_by_uuid = {}
     webshop_session = {
         "initialized": False,
         "rows_per_page_applied": False,
@@ -1197,11 +1202,12 @@ def enrich_new_users_with_webshop_history(page, all_rows, start_url, project_nam
                 "payitem_quantity_total": "",
                 "payitem_item_value_sum": "",
             }
-        summary_by_uuid[uuid_value] = summary
 
-    for row in all_rows:
-        if row["uuid"] in summary_by_uuid:
-            row.update(summary_by_uuid[row["uuid"]])
+        for row in all_rows:
+            if row["uuid"] == uuid_value:
+                row.update(summary)
+        if checkpoint:
+            checkpoint(all_rows)
 
 
 def compute_total_payment_sum(all_rows):
@@ -1288,6 +1294,7 @@ def _format_block_metric(candidate: dict, dc_mode: bool) -> str:
 def block_low_payment_new_users(
     page, all_rows, start_url, project_name, args, project_key,
     dc_mode: bool = False, max_total_payment: int = 0, max_purchase_count: int = 0,
+    checkpoint=None,
 ) -> dict:
     """신규 유저 중 차단 임계값 이하 대상을 user_block(+디바이스밴)한다.
 
@@ -1297,6 +1304,9 @@ def block_low_payment_new_users(
     운영 실행이므로 기본은 드라이런(후보만 출력)이고, --block-new-users 지정 시에만 실제 차단한다.
     각 UUID는 독립 재시도 예산을 갖고, 하나가 실패해도 다음 대상으로 계속 진행한다(배치 격리).
     user_block/디바이스밴은 '이미 등록됨'을 화면 문구로 정확히 판정하므로 멱등적이라 재시도 가능하다.
+
+    checkpoint(all_rows)가 주어지면 대상 1명 처리할 때마다 호출해 block_status를
+    즉시 파일에 반영한다(전체 대상이 끝나야만 CSV의 block_status가 채워지는 문제 방지).
     """
     candidates = select_block_candidates(all_rows, max_total_payment, dc_mode=dc_mode, max_purchase_count=max_purchase_count)
 
@@ -1328,6 +1338,8 @@ def block_low_payment_new_users(
         for c in candidates:
             status_by_uuid[c["uuid"]] = "차단대상(미실행)"
         _annotate_block_status(all_rows, status_by_uuid)
+        if checkpoint:
+            checkpoint(all_rows)
         return {"executed": False, "candidates": candidates, "results": []}
 
     print(
@@ -1403,7 +1415,10 @@ def block_low_payment_new_users(
             results.append({"uuid": uuid_value, "succeeded": False, "error": str(exc)})
             previous_uuid_ok = False
 
-    _annotate_block_status(all_rows, status_by_uuid)
+        # 대상 1명 처리 직후 즉시 반영 — 다음 대상에서 재시도가 소진돼도 이 대상까지는 파일에 남는다.
+        _annotate_block_status(all_rows, {uuid_value: status_by_uuid[uuid_value]})
+        if checkpoint:
+            checkpoint(all_rows)
 
     success_count = sum(1 for r in results if r["succeeded"])
     fail_count = len(results) - success_count
@@ -1539,7 +1554,11 @@ def run(
     timeout_error=Exception,
     single_board_test=False,
     dc_mode=False,
+    checkpoint=None,
 ) -> tuple:
+    """checkpoint(all_rows)가 주어지면 보드 1개를 다 읽을 때마다, 그리고 신규 유저
+    보강(영수증검증/지급내역) 1명을 처리할 때마다 호출해 그 시점까지의 결과를 파일에
+    즉시 반영한다 — 전체 키워드/보드가 끝나야만 CSV가 생기는 문제를 막기 위함."""
     prepare_console_project(
         page=page,
         explicit_project_base=explicit_project_base,
@@ -1675,6 +1694,8 @@ def run(
                 )
             all_rows.extend(board_rows)
             found_any_board = True
+            if checkpoint:
+                checkpoint(all_rows)
 
         if single_board_test:
             break
@@ -1692,10 +1713,12 @@ def run(
     # 신규 유저(계정 240시간 이내)만 영수증검증으로 최근 결제액 합계 점검
     # dc_mode(--dc, 게임B)는 가격 등 조회 불가 정책이라 지급 내역(웹샵) 조회는 생략하고
     # 영수증검증도 구매 제품 건수만 확인한다.
-    enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error, dc_mode=dc_mode)
+    enrich_new_users_with_payments(page, all_rows, start_url, project_name, timeout_error, dc_mode=dc_mode, checkpoint=checkpoint)
     if not dc_mode:
-        enrich_new_users_with_webshop_history(page, all_rows, start_url, project_name)
+        enrich_new_users_with_webshop_history(page, all_rows, start_url, project_name, checkpoint=checkpoint)
     compute_total_payment_sum(all_rows)
+    if checkpoint:
+        checkpoint(all_rows)
 
     printed_uuids = set()
     for row in all_rows:
@@ -1710,9 +1733,13 @@ def run(
     return all_rows, skipped_boards
 
 
-def save_csv(rows: list, out_dir: Path, project_key: str) -> Path:
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = out_dir / f"leaderboard_{project_key}_{ts}.csv"
+def save_csv(rows: list, out_dir: Path, project_key: str, csv_path: Path = None) -> Path:
+    """rows를 CSV로 저장한다. csv_path를 넘기면 그 파일을 덮어써 같은 파일을 계속
+    갱신하는 체크포인트 저장으로 쓸 수 있다(중간에 스크립트가 죽어도 그 시점까지의
+    데이터가 파일에 남는다). csv_path가 없으면(기존 동작) 새 타임스탬프로 1회 저장한다."""
+    if csv_path is None:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_path = out_dir / f"leaderboard_{project_key}_{ts}.csv"
     base_fields = ["leaderboard", "rank", "uuid", "nickname"]
     gcp_fields = ["account_type", "create_account_date"]
     payment_fields = ["recent_payment_count", "recent_payment_sum"]
@@ -1886,6 +1913,15 @@ def main():
     block_had_failures = False
     page = None
 
+    # 보드 1개, 신규 유저 보강 1명, 차단 대상 1명을 처리할 때마다 이 같은 파일을 계속
+    # 덮어써 갱신한다(체크포인트). 전체 실행이 끝나야만 CSV가 생기던 기존 방식과 달리,
+    # 중간에 스크립트가 죽어도 그 시점까지 처리된 데이터는 파일에 남는다.
+    csv_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_path = LEADERBOARD_OUT_DIR / f"leaderboard_{project_key}_{csv_ts}.csv"
+
+    def checkpoint(rows):
+        save_csv(rows, LEADERBOARD_OUT_DIR, project_key, csv_path=csv_path)
+
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile_dir),
@@ -1914,6 +1950,7 @@ def main():
                 timeout_error=_timeout_error,
                 single_board_test=args.test_single_board,
                 dc_mode=dc_mode,
+                checkpoint=checkpoint,
             )
 
             # 조회 완료 후: 신규 유저 중 차단 임계값(가격 또는 --dc 구매 건수) 이하 대상 차단(운영 실행) 또는 후보 출력(드라이런).
@@ -1927,12 +1964,13 @@ def main():
                 dc_mode=dc_mode,
                 max_total_payment=BLOCK_MAX_TOTAL_PAYMENT,
                 max_purchase_count=BLOCK_MAX_PURCHASE_COUNT,
+                checkpoint=checkpoint,
             )
             block_had_failures = block_outcome["executed"] and any(
                 not r["succeeded"] for r in block_outcome["results"]
             )
 
-            save_csv(all_rows, LEADERBOARD_OUT_DIR, project_key)
+            checkpoint(all_rows)
 
             board_count = len(set(row["leaderboard"] for row in all_rows))
             print(f"\n=== 완료: {board_count}개 리더보드, 총 {len(all_rows)}행 ===")
