@@ -12,6 +12,17 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+# 파이썬 출력을 `| Tee-Object`로 파이프에 태우면, 파이썬이 콘솔에 직접 쓸 때와 달리
+# PowerShell이 자식 프로세스의 표준출력 바이트를 [Console]::OutputEncoding 기준으로
+# 디코딩해서 문자열로 받는다. 시스템 기본 콘솔 코드페이지(한글 Windows는 보통 CP949)가
+# UTF-8이 아니면, 파이썬이 UTF-8로 내보낸 한글 바이트를 PowerShell이 CP949로 잘못
+# 디코딩해 깨진 글자로 표시/저장된다(실측: 예약 실행 로그에 한글이 깨져서 나옴).
+# 양쪽을 모두 UTF-8로 고정해 이 불일치를 없앤다 — 파이썬은 PYTHONIOENCODING으로,
+# PowerShell 콘솔은 OutputEncoding/코드페이지로.
+$env:PYTHONIOENCODING = "utf-8"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $Script = Join-Path $PSScriptRoot "console_leaderboard.py"
