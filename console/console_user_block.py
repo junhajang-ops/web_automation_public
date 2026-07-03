@@ -619,19 +619,29 @@ def confirm_device_result_popup(page, dialog) -> str:
 
 
 def save_device_ban_history(uuid_value, device_id, reason, status, project_key=""):
+    """이 시점에 디바이스 차단(성공/이미등록) 자체는 이미 화면에서 확정된 상태다.
+    CSV 기록은 그 결과를 남기는 부가 작업일 뿐이므로, 사람이 이 파일을 엑셀 등으로
+    열어봐서 Windows가 잠가 쓰기가 실패해도(PermissionError) 이미 끝난 차단 절차를
+    실패로 되돌리지 않는다 — 경고만 남기고 계속 진행한다."""
     BAN_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     suffix = f"_{project_key}" if project_key else ""
     csv_path = BAN_HISTORY_DIR / f"device_ban_history{suffix}.csv"
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = ["timestamp", "uuid", "device_id", "reason", "status"]
     row = [ts, uuid_value, device_id, reason, status]
-    write_header = not csv_path.exists()
-    with open(csv_path, "a", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        if write_header:
-            writer.writerow(header)
-        writer.writerow(row)
-    print(f"  디바이스 차단 기록 저장: {csv_path} (status={status})")
+    try:
+        write_header = not csv_path.exists()
+        with open(csv_path, "a", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(header)
+            writer.writerow(row)
+        print(f"  디바이스 차단 기록 저장: {csv_path} (status={status})")
+    except OSError as exc:
+        print(
+            f"  [경고] 디바이스 차단 기록 CSV 저장 실패(파일이 다른 프로그램(엑셀 등)에서 "
+            f"열려 있을 수 있음, 차단 자체는 이미 완료됨) — {csv_path}: {exc}"
+        )
 
 
 def is_block_dialog_open(page) -> bool:
@@ -715,19 +725,29 @@ def run_device_block(
 
 
 def save_ban_history(uuid_value, period_days, reason, rank_delete, status, project_key=""):
+    """이 시점에 유저 차단(성공/이미등록) 자체는 이미 화면에서 확정된 상태다.
+    CSV 기록은 그 결과를 남기는 부가 작업일 뿐이므로, 사람이 이 파일을 엑셀 등으로
+    열어봐서 Windows가 잠가 쓰기가 실패해도(PermissionError) 이미 끝난 차단 절차를
+    실패로 되돌리지 않는다 — 경고만 남기고 계속 진행한다(디바이스 차단으로 이어짐)."""
     BAN_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     suffix = f"_{project_key}" if project_key else ""
     csv_path = BAN_HISTORY_DIR / f"ban_history{suffix}.csv"
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = ["timestamp", "uuid", "period_days", "reason", "rank_delete", "status"]
     row = [ts, uuid_value, str(period_days), reason, str(rank_delete), status]
-    write_header = not csv_path.exists()
-    with open(csv_path, "a", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        if write_header:
-            writer.writerow(header)
-        writer.writerow(row)
-    print(f"  차단 기록 저장: {csv_path} (status={status})")
+    try:
+        write_header = not csv_path.exists()
+        with open(csv_path, "a", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(header)
+            writer.writerow(row)
+        print(f"  차단 기록 저장: {csv_path} (status={status})")
+    except OSError as exc:
+        print(
+            f"  [경고] 차단 기록 CSV 저장 실패(파일이 다른 프로그램(엑셀 등)에서 "
+            f"열려 있을 수 있음, 차단 자체는 이미 완료됨) — {csv_path}: {exc}"
+        )
 
 
 def run_user_block(
