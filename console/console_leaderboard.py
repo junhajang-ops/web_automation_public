@@ -1920,7 +1920,19 @@ def main():
     csv_path = LEADERBOARD_OUT_DIR / f"leaderboard_{project_key}_{csv_ts}.csv"
 
     def checkpoint(rows):
-        save_csv(rows, LEADERBOARD_OUT_DIR, project_key, csv_path=csv_path)
+        # 사람이 이 CSV를 엑셀 등으로 열어서 조회 중이면 Windows가 파일을 배타적으로 잠가
+        # 덮어쓰기(open(..., "w"))가 PermissionError로 실패할 수 있다. 이 저장 단계는
+        # 재시도 로직으로 감싸여 있지 않으므로, 여기서 못 잡으면 예외가 그대로 올라가
+        # 체크포인트 저장 실패 하나가 전체 배치 진행을 끊어버린다(중간 저장의 취지와 반대).
+        # 실패해도 경고만 남기고 계속 진행 — 다음 체크포인트(다음 보드/uuid 처리 후)에서
+        # 파일이 닫혀 있으면 그때의 전체 데이터로 다시 저장을 시도한다.
+        try:
+            save_csv(rows, LEADERBOARD_OUT_DIR, project_key, csv_path=csv_path)
+        except OSError as exc:
+            print(
+                f"    [경고] 체크포인트 CSV 저장 실패(파일이 다른 프로그램(엑셀 등)에서 "
+                f"열려 있을 수 있음) — 파일을 닫으면 다음 체크포인트에서 다시 저장됩니다: {exc}"
+            )
 
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
