@@ -33,6 +33,7 @@ from console_user_search import (
     DEFAULT_PROFILE,
     DEFAULT_START_URL,
     click_login_if_needed,
+    ensure_sidebar_link_expanded,
     find_exact_text_match,
     load_playwright,
     prepare_console_project,
@@ -138,6 +139,7 @@ def parse_args():
         help="Title env profile to apply (example: gametitle)",
     )
     parser.add_argument("--gametitle", action="store_true", help="Shortcut for --title gametitle")
+    parser.add_argument("--dc", action="store_true", help="Shortcut for --title dc (게임B)")
     parser.add_argument("--hold-seconds", type=int, default=DEFAULT_HOLD_SECONDS)
     parser.add_argument(
         "--retries",
@@ -207,7 +209,7 @@ def get_visible_dialog_by_title(page, title_text):
 def open_user_access_page(page):
     print(f"[4] 사이드 메뉴에서 '{TEXT_USER_ACCESS}' 페이지로 이동합니다.")
     menu_link = page.locator("a#baseGamerAccess, a[href*='/baseGamerAccess']").first
-    menu_link.wait_for(state="visible", timeout=15_000)
+    ensure_sidebar_link_expanded(page, menu_link, "user_access_category_expand_pre")
     menu_link.scroll_into_view_if_needed()
     record_step_dump(page, "user_access_nav_pre")
     menu_link.click()

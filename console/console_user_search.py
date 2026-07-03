@@ -168,6 +168,18 @@ def safe_wait_for_load(page, state="networkidle", timeout_ms=15_000):
         return False
 
 
+# project_menu_open_pre / project_select_pre 전용: 사이드바 카테고리(아코디언) 펼침
+# 상태는 세션에 걸쳐 남아있다(ensure_sidebar_link_expanded 참고). 자동화가 여러 화면을
+# 거치며 카테고리를 펼칠수록, 그 뒤에 실행되는 프로젝트 진입 스텝에서 보이는 사이드바
+# 링크·nav 텍스트 목록이 이전 baseline보다 누적되어 늘어난다 — 실제 화면 구조 변경이
+# 아니라 펼침 상태 누적에 따른 정상적 차이이므로 이 두 스텝에서만 항목 추가(+)를
+# 무시한다. 제거(-)는 실제 문제(메뉴 소실 등)일 수 있어 그대로 감지 대상으로 둔다.
+PROJECT_ENTRY_IGNORE_PATTERNS = [
+    r"^\s*\[\+\]\s+sidebar a#id:",
+    r"^\s*\[\+\]\s+structural_text: nav:",
+]
+
+
 def ensure_sidebar_link_expanded(page, link, step_name):
     """콘솔 사이드바는 카테고리별 아코디언이며, 프로젝트/세션마다 열림·닫힘 상태가
     남아있는 채로 유지된다(즐겨찾기 등록 여부와 무관). 목표 링크가 DOM에는 있지만
@@ -270,7 +282,7 @@ def ensure_project_menu_open(page):
 
     selector_button = find_project_selector_button(page)
     selector_button.wait_for(state="visible", timeout=15_000)
-    record_step_dump(page, "project_menu_open_pre")
+    record_step_dump(page, "project_menu_open_pre", ignore_patterns=PROJECT_ENTRY_IGNORE_PATTERNS)
     selector_button.click()
     page.locator("[role='menuitem']").first.wait_for(state="visible", timeout=15_000)
 
@@ -309,7 +321,7 @@ def select_project_by_name(page, project_name):
 
     print(f"[3] 프로젝트 선택: {selected_name}")
     selected_item.scroll_into_view_if_needed()
-    record_step_dump(page, "project_select_pre")
+    record_step_dump(page, "project_select_pre", ignore_patterns=PROJECT_ENTRY_IGNORE_PATTERNS)
     selected_item.click()
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
