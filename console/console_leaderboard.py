@@ -1524,14 +1524,25 @@ def run(
                 # 키워드 전환용 "return"(직전 화면=목록 페이지)과는 실제 화면이 달라 지문 이름을 분리한다.
                 open_leaderboard_list_and_search(page, keyword, nav_context="board_loop")
                 enter_leaderboard_detail(page, board_name)
-                set_rows_per_page(
-                    page,
-                    DETAIL_ROWS_PER_PAGE,
-                    "리더보드 상세 표시 개수",
-                    verify_prefix="detail_rows",
-                    ignore_patterns=LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS,
-                )
-                board_rows = extract_top_ranks(page, board_name)
+
+                # 순위가 아예 없는 리더보드는 페이지네이션(표시 개수) 드롭다운 자체가 렌더되지
+                # 않아, 여기서 먼저 빈 상태("현재 순위가 없습니다")를 확인하지 않으면
+                # set_rows_per_page()가 "드롭다운을 열지 못했습니다"로 실패해 로딩 실패로
+                # 오판 -> 불필요한 전체 재시도로 이어진다(실측). extract_top_ranks() 진입 전에
+                # 먼저 판정해서 빈 보드는 표시 개수 변경 자체를 건너뛴다.
+                grid_state, _ = wait_for_leaderboard_rank_rows(page)
+                if grid_state == "empty":
+                    print(f"    '{board_name}': '{LEADERBOARD_EMPTY_TEXT}' 확인 — 표시 개수 변경 없이 빈 결과로 처리합니다.")
+                    board_rows = []
+                else:
+                    set_rows_per_page(
+                        page,
+                        DETAIL_ROWS_PER_PAGE,
+                        "리더보드 상세 표시 개수",
+                        verify_prefix="detail_rows",
+                        ignore_patterns=LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS,
+                    )
+                    board_rows = extract_top_ranks(page, board_name)
                 # 각 보드 추출 직후 계정 생성일 보강 (Cloud Logging 또는 BigQuery, 프로젝트별 설정에 따름)
                 if bq_credentials is not None:
                     enrich_board_with_bigquery(
