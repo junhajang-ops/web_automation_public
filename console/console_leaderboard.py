@@ -149,6 +149,15 @@ LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS = [
     r"structural_text: tab:(?:.*FALLBACK|한국어|과거 기록|현재 순위)$",
     r"structural_text: col:(?:수량|순위 구간|아이템)$",
 ]
+# leaderboard_complete 전용: 이 스텝은 "마지막으로 처리한 보드"의 상세 페이지 상태를
+# 찍는데, 그 보드가 순위 0명(빈 리더보드)이면 표시 개수(페이지네이션) 드롭다운 자체가
+# 렌더되지 않아 role=combobox가 사라진다(실측). 실제 구조 변경이 아니라 마지막 보드의
+# 데이터 유무에 따른 정상적 차이이므로 이 스텝에서만 국소적으로 무시한다 — 공용
+# LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS에 넣지 않는 이유는 다른 스텝(목록 화면 등)에서는
+# combobox 소실이 실제 문제일 수 있어 공용 범위를 넓히면 안 되기 때문(2026-06-29 원칙).
+LEADERBOARD_COMPLETE_IGNORE_PATTERNS = LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS + [
+    r"role: combobox$",
+]
 
 
 
@@ -1642,7 +1651,7 @@ def run(
     if not found_any_board:
         raise RuntimeError(f"다음 검색어로 리더보드를 찾지 못했습니다: {', '.join(keywords)}")
 
-    step_and_verify_ui(page, "leaderboard_complete", ignore_patterns=LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS)
+    step_and_verify_ui(page, "leaderboard_complete", ignore_patterns=LEADERBOARD_COMPLETE_IGNORE_PATTERNS)
 
     # 신규 유저(계정 240시간 이내)만 영수증검증으로 최근 결제액 합계 점검
     # dc_mode(--dc, 게임B)는 가격 등 조회 불가 정책이라 지급 내역(웹샵) 조회는 생략하고
