@@ -74,6 +74,15 @@ TEXT_TARGET_DEVICE = "\ub514\ubc14\uc774\uc2a4"
 TEXT_DEVICE_SEARCH_INPUT_PLACEHOLDER = "UUID \ub610\ub294 \ub2c9\ub124\uc784\uc744 \uc785\ub825\ud558\uc138\uc694"
 TEXT_DEVICE_SEARCH_BUTTON = "\uac80\uc0c9"
 TEXT_ALREADY_BLOCKED_DEVICE_MSG = "\uc774\ubbf8 \ub4f1\ub85d\ub41c \ub514\ubc14\uc774\uc2a4\uc785\ub2c8\ub2e4."
+# 2026-07-03: \ub514\ubc14\uc774\uc2a4 \ucc28\ub2e8 \ub4f1\ub85d \uc2dc \uc11c\ubc84\uac00 "404 NotFoundException \uc624\ub958\uac00 \ubc1c\uc0dd\ud588\uc2b5\ub2c8\ub2e4."
+# \uac19\uc740 \ubcc4\ub3c4 \uc81c\ubaa9\uc758 \uc624\ub958 \ub2e4\uc774\uc5bc\ub85c\uadf8\ub97c \ub744\uc6b0\ub294 \uc0ac\ub840 \ud655\uc778(\uc608: \ubaa9\ub85d\uc5d0\ub294 \uc788\uc73c\ub098 \uc11c\ubc84\uc5d0\uc11c
+# \uc774\ubbf8 \uc9c0\uc6cc\uc9c4 deviceInfo). \uc774 \ub2e4\uc774\uc5bc\ub85c\uadf8\ub294 \uc81c\ubaa9\uc774 "\uc548\ub0b4"\uac00 \uc544\ub2c8\ub77c\uc11c \uae30\uc874
+# already_blocked \ud310\uc815\uc5d0 \uac78\ub9ac\uc9c0 \uc54a\uace0, \ub4f1\ub85d \ub2e4\uc774\uc5bc\ub85c\uadf8\ub3c4 \uacc4\uc18d \uc5f4\ub824 \uc788\ub294 \uc0c1\ud0dc\ub77c
+# confirm_device_result_popup\uc774 15\ucd08\uac04 \uc544\ubb34 \uac83\ub3c4 \ud655\uc815\ud558\uc9c0 \ubabb\ud55c \ucc44 \ud0c0\uc784\uc544\uc6c3
+# \uc608\uc678\ub97c \ub358\uc84c\ub2e4 \u2014 \uc774 \uacbd\uc6b0 save_device_ban_history \ud638\ucd9c \uc804\uc5d0 \uc608\uc678\uac00 \ub098\uc11c
+# CSV\uc5d0 \uc2e4\ud328 \uae30\ub85d\uc870\ucc28 \ub0a8\uc9c0 \uc54a\ub294 \ubb38\uc81c\uac00 \uc788\uc5c8\ub2e4. \uc81c\ubaa9 \ubb38\uad6c\ub85c \uc774 \uc720\ud615\uc758 \uc624\ub958\ub97c
+# \uc2dd\ubcc4\ud574 "error" \uc0c1\ud0dc\ub85c \uba85\ud655\ud788 \ubd84\ub958\ud558\uace0 CSV\uc5d0 \uae30\ub85d\ud55c\ub2e4.
+TEXT_ERROR_HEADING_MARKER = "\uc624\ub958\uac00 \ubc1c\uc0dd"
 
 BAN_HISTORY_DIR = WEB_DOCS_DIR / "ban_history"
 
@@ -204,6 +213,29 @@ def get_visible_dialog_by_title(page, title_text):
         except Exception:
             continue
     return page.locator("[role='dialog']").filter(has_text=title_text).first
+
+
+def find_visible_error_dialog(page, exclude_title):
+    """제목에 TEXT_ERROR_HEADING_MARKER("오류가 발생")가 포함된, exclude_title이
+    아닌 별도의 오류 다이얼로그를 찾는다. 서버가 등록 다이얼로그를 닫지 않은 채
+    "404 NotFoundException 오류가 발생했습니다." 같은 자체 제목의 오류 팝업만
+    띄우는 사례를 already_blocked/success와 구분해 잡아내기 위함이다."""
+    dialogs = page.locator("[role='dialog']")
+    count = dialogs.count()
+    for index in range(count):
+        candidate = dialogs.nth(index)
+        try:
+            if not candidate.is_visible():
+                continue
+            heading = candidate.locator("h2, [role='heading']").first
+            heading_text = heading.inner_text().strip()
+        except Exception:
+            continue
+        if heading_text == exclude_title:
+            continue
+        if TEXT_ERROR_HEADING_MARKER in heading_text:
+            return candidate, heading_text
+    return None
 
 
 def open_user_access_page(page):
@@ -558,7 +590,7 @@ def confirm_result_popup(page) -> str:
     return status
 
 
-def confirm_device_result_popup(page, dialog) -> str:
+def confirm_device_result_popup(page, dialog) -> tuple:
     """디바이스 차단 결과를 판정하고 처리한다.
 
     실측 결과(run_device_block 참고): 성공 시에는 별도 "결과" 팝업이 뜨지 않고
@@ -567,9 +599,18 @@ def confirm_device_result_popup(page, dialog) -> str:
     유지된다. 유저 차단 흐름(confirm_result_popup)과 달리 "성공" 전용 결과 다이얼로그는
     존재하지 않으므로 기다리지 않는다.
 
+    2026-07-03: 서버가 "404 NotFoundException 오류가 발생했습니다."처럼 "안내"가
+    아닌 자체 제목의 오류 팝업을 띄우면서 등록 다이얼로그도 닫지 않는 사례가
+    확인됐다. 이걸 already_blocked/success 어느 쪽으로도 못 잡으면 15초 뒤
+    타임아웃 예외가 나 CSV 기록 전에 절차가 중단된다 — "error" 상태로 명시적으로
+    구분해 호출부가 CSV에 실패로 남기고 다음 디바이스로 넘어갈 수 있게 한다.
+
     Returns:
-        "success"         — 차단 등록 성공(등록 다이얼로그가 자동으로 닫힘)
-        "already_blocked" — 이미 등록된 디바이스(안내 팝업 확인)
+        (status, message) 튜플. status는 다음 중 하나:
+        "success"         — 차단 등록 성공(등록 다이얼로그가 자동으로 닫힘). message=""
+        "already_blocked" — 이미 등록된 디바이스(안내 팝업 확인). message=""
+        "error"           — 서버가 오류 팝업을 띄움(예: 404 NotFoundException).
+                            message에 팝업 제목+본문을 담는다.
     """
     def _outcome():
         already_dialog = get_visible_dialog_by_title(page, TEXT_ALREADY_BLOCKED_DIALOG)
@@ -578,6 +619,12 @@ def confirm_device_result_popup(page, dialog) -> str:
                 return ("already_blocked", already_dialog)
         except Exception:
             pass
+
+        error_found = find_visible_error_dialog(page, exclude_title=TEXT_OPEN_BLOCK_DIALOG)
+        if error_found is not None:
+            error_dialog, heading_text = error_found
+            return ("error", (error_dialog, heading_text))
+
         try:
             if not dialog.is_visible():
                 return ("success", None)
@@ -587,14 +634,47 @@ def confirm_device_result_popup(page, dialog) -> str:
 
     result = wait_until(page, _outcome, timeout_ms=15_000, wait_ms=1_000)
     if result is None:
-        raise RuntimeError("디바이스 차단 결과(성공/이미등록)를 확인하지 못했습니다.")
+        raise RuntimeError("디바이스 차단 결과(성공/이미등록/오류)를 확인하지 못했습니다.")
 
-    status, popup = result
+    status, payload = result
 
     if status == "success":
         print("[D6] 디바이스 차단 등록 성공(등록 다이얼로그가 자동으로 닫힘).")
-        return status
+        return status, ""
 
+    if status == "error":
+        popup, heading_text = payload
+        try:
+            body_text = popup.locator(".MuiDialogContent-root").first.inner_text().strip()
+        except Exception:
+            body_text = ""
+        message = f"{heading_text} {body_text}".strip()
+        print(f"[D6] 디바이스 차단 등록 중 서버 오류가 발생했습니다: {message}")
+
+        confirm_button = popup.get_by_role("button", name=TEXT_CONFIRM, exact=True).first
+        try:
+            confirm_button.wait_for(state="visible", timeout=5_000)
+            confirm_button.scroll_into_view_if_needed()
+            record_step_dump(page, "device_block_error_confirm_pre")
+            confirm_button.click()
+        except Exception:
+            close_button = popup.locator("button:has(svg[name='close-modal'])").first
+            close_button.click()
+
+        def _error_closed():
+            try:
+                if not popup.is_visible():
+                    return True
+            except Exception:
+                return True
+            return None
+
+        if not wait_until(page, _error_closed, timeout_ms=15_000, wait_ms=1_000):
+            raise RuntimeError("오류 팝업이 닫히는 것을 확인하지 못했습니다.")
+
+        return status, message
+
+    popup = payload
     print(f"[D6] 이미 차단된 디바이스입니다. '{TEXT_CONFIRM}'을 누릅니다.")
     popup.locator(f"text={TEXT_ALREADY_BLOCKED_DEVICE_MSG}").first.wait_for(state="visible", timeout=5_000)
 
@@ -615,7 +695,7 @@ def confirm_device_result_popup(page, dialog) -> str:
     if not wait_until(page, _result_closed, timeout_ms=15_000, wait_ms=1_000):
         raise RuntimeError("이미등록 안내 팝업이 닫히는 것을 확인하지 못했습니다.")
 
-    return status
+    return status, ""
 
 
 def save_device_ban_history(uuid_value, device_id, reason, status, project_key=""):
@@ -708,9 +788,14 @@ def run_device_block(
         dropdown_open = False  # 옵션 선택 시 드롭다운은 자동으로 닫힌다.
         fill_block_reason(page, dialog, reason_text, step_name="device_block_reason_fill_pre")
         submit_block_registration(page, dialog, step_name="device_block_submit_pre")
-        status = confirm_device_result_popup(page, dialog)
-        save_device_ban_history(uuid_value, device_id, reason_text, status, project_key)
-        results.append({"uuid": uuid_value, "device_id": device_id, "status": status})
+        status, error_message = confirm_device_result_popup(page, dialog)
+        history_reason = f"{reason_text} | error={error_message}" if error_message else reason_text
+        save_device_ban_history(uuid_value, device_id, history_reason, status, project_key)
+        results.append(
+            {"uuid": uuid_value, "device_id": device_id, "status": status, "error": error_message}
+        )
+        if status == "error":
+            print(f"  [스킵] device_id={device_id}: 서버 오류로 이 디바이스는 건너뛰고 다음 디바이스로 진행합니다.")
 
     if is_block_dialog_open(page):
         print("  마지막 대상까지 처리했지만 다이얼로그가 남아 있어 '취소'로 닫습니다.")
