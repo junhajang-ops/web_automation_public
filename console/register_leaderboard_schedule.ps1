@@ -6,9 +6,11 @@
 # 요일/시각은 코드에 하드코딩하지 않고 프로젝트 루트 .env 의 아래 두 값을 타이틀별로 읽어 사용한다.
 #
 #   {TITLE}_LEADERBOARD_SCHEDULE_DAYS=Saturday,Sunday       (콤마 구분, 영문 요일명: Monday/Tuesday/Wednesday/Thursday/Friday/Saturday/Sunday)
+#                                                            또는 Everyday 한 단어(대소문자 무관) — 매일 실행(Daily 트리거)
 #   {TITLE}_LEADERBOARD_SCHEDULE_TIME=12:00,14:00,20:00     (콤마 구분, 24시간제 HH:mm. 여러 개 지정 가능)
 #
 # 예) GAMETITLE_LEADERBOARD_SCHEDULE_DAYS=Friday / GAMETITLE_LEADERBOARD_SCHEDULE_TIME=09:00
+# 예) GAMETITLE_LEADERBOARD_SCHEDULE_DAYS=Everyday / GAMETITLE_LEADERBOARD_SCHEDULE_TIME=09:00 (매일 09:00 실행)
 #
 # 위 예시는 "토요일·일요일 각각 12:00/14:00/20:00에 실행" = 지정한 요일 전체 x 지정한 시각 전체 조합으로 실행된다.
 # 스케줄을 바꾸고 싶으면 .env 값만 수정한 뒤 해당 타이틀 래퍼를 다시 실행하면 된다(기존 등록을 덮어씀).
@@ -51,8 +53,13 @@ try {
         throw "[오류] .env 에 ${Prefix}_LEADERBOARD_SCHEDULE_DAYS / ${Prefix}_LEADERBOARD_SCHEDULE_TIME 을 설정해 주세요. 예) ${Prefix}_LEADERBOARD_SCHEDULE_DAYS=Saturday,Sunday / ${Prefix}_LEADERBOARD_SCHEDULE_TIME=12:00,14:00,20:00"
     }
 
-    $DaysOfWeek = $Days.Split(",") | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
+    $IsEveryday = $Days.Trim().ToLowerInvariant() -eq "everyday"
+    $DaysOfWeek = if ($IsEveryday) { @() } else { $Days.Split(",") | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() } }
     $Times = $Time.Split(",") | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
+
+    if (-not $IsEveryday -and $DaysOfWeek.Count -eq 0) {
+        throw "[오류] ${Prefix}_LEADERBOARD_SCHEDULE_DAYS 에 요일이 없습니다. 요일명(예: Saturday,Sunday) 또는 Everyday를 지정해 주세요."
+    }
 
     foreach ($t in $Times) {
         if ($t -notmatch "^\d{1,2}:\d{2}$") {
@@ -60,7 +67,11 @@ try {
         }
     }
 
-    Write-Host "[$Title] 등록할 스케줄: 매주 $($DaysOfWeek -join ', ') 요일의 $($Times -join ', ') 시각에 실행됩니다."
+    if ($IsEveryday) {
+        Write-Host "[$Title] 등록할 스케줄: 매일 $($Times -join ', ') 시각에 실행됩니다."
+    } else {
+        Write-Host "[$Title] 등록할 스케줄: 매주 $($DaysOfWeek -join ', ') 요일의 $($Times -join ', ') 시각에 실행됩니다."
+    }
 
     # 예약 시각에 PC가 절전(Sleep) 상태여도 깨어나 실행되도록 하려면, 작업 자체의
     # WakeToRun 설정뿐 아니라 전원 설정의 "절전 모드 해제 타이머 허용"도 켜져 있어야 한다.
@@ -74,7 +85,11 @@ try {
         -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$WrapperScript`" -Title `"$Title`""
 
     $Triggers = foreach ($t in $Times) {
-        New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DaysOfWeek -At $t
+        if ($IsEveryday) {
+            New-ScheduledTaskTrigger -Daily -At $t
+        } else {
+            New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DaysOfWeek -At $t
+        }
     }
 
     $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
@@ -88,7 +103,8 @@ try {
     Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Triggers `
         -Principal $Principal -Settings $Settings -Force | Out-Null
 
-    Write-Host "등록 완료: 작업 스케줄러 > '$TaskName' (요일=$($DaysOfWeek -join ', ') / 시각=$($Times -join ', '))"
+    $DaysLabel = if ($IsEveryday) { "매일" } else { $DaysOfWeek -join ', ' }
+    Write-Host "등록 완료: 작업 스케줄러 > '$TaskName' (요일=$DaysLabel / 시각=$($Times -join ', '))"
 }
 finally {
     # 창이 뜨자마자 바로 닫혀 결과(성공/오류 메시지)를 못 보는 것을 막기 위해 잠깐 유지한다.
