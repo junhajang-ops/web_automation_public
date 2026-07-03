@@ -283,12 +283,17 @@ def open_block_tab(page):
         raise RuntimeError(f"'{TEXT_DENY_TAB}' 탭 전환을 확인하지 못했습니다.")
 
 
-def open_block_register_dialog(page):
+def open_block_register_dialog(page, step_name="user_block_open_dialog_pre"):
+    """호출부마다 서로 다른 step_name을 넘겨야 한다. 유저 차단 흐름(탭 진입 직후)과
+    디바이스 차단 흐름(직전 유저 차단 결과 팝업을 막 닫은 직후, 목록이 새로고침
+    중이라 progressbar가 보임)은 이 버튼을 누르기 직전 화면 상태가 서로 다르므로,
+    같은 이름을 공유하면 서로 다른 정상 상태를 비교해 매번 오탐([UI change])이
+    난다(2026-07-03 실측: role navigation<->progressbar가 반복적으로 갈아치워짐)."""
     print(f"[6] '{TEXT_OPEN_BLOCK_DIALOG}' 버튼을 클릭합니다.")
     button = page.locator("button.ui.button").filter(has_text=TEXT_OPEN_BLOCK_DIALOG).first
     button.wait_for(state="visible", timeout=15_000)
     button.scroll_into_view_if_needed()
-    record_step_dump(page, "user_block_open_dialog_pre")
+    record_step_dump(page, step_name)
     button.click()
 
     dialog = get_visible_dialog_by_title(page, TEXT_OPEN_BLOCK_DIALOG)
@@ -748,7 +753,7 @@ def run_device_block(
     매 반복마다 다이얼로그가 실제로 열려 있는지 직접 확인해 분기한다(추측 금지).
     """
     print("\n[D0] 디바이스 차단 절차를 시작합니다.")
-    dialog = open_block_register_dialog(page)
+    dialog = open_block_register_dialog(page, step_name="device_block_open_dialog_pre")
     select_target_type_device(page, dialog)
     fill_device_search_uuid(page, dialog, uuid_value)
     click_device_search_button(page, dialog)
@@ -774,7 +779,7 @@ def run_device_block(
     # 최하단(가장 마지막) 디바이스부터 위로 하나씩 처리한다.
     for device_id in reversed(target_ids):
         if not is_block_dialog_open(page):
-            dialog = open_block_register_dialog(page)
+            dialog = open_block_register_dialog(page, step_name="device_block_open_dialog_pre")
             select_target_type_device(page, dialog)
             fill_device_search_uuid(page, dialog, uuid_value)
             click_device_search_button(page, dialog)
