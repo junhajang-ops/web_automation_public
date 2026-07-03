@@ -5,9 +5,11 @@ Console console user block helper.
 Warning:
 - Running this script performs an actual mutation in the Console console.
 - It opens the user-access page, registers a block, and confirms the result.
-- --uuid accepts a comma-separated list. Each UUID is processed independently
-  with its own retry budget (--retries); a UUID that exhausts its retries is
-  skipped and the batch continues with the next UUID.
+- 차단 대상 UUID 목록은 기본적으로 web_docs의 CSV 파일(--uuid-csv)에서 읽어온다.
+  CSV의 "uuid" 컬럼에 한 줄씩 대상을 적어두면 된다(예시: web_docs/user_block/user_block_targets.csv).
+- --uuid를 명시하면 CSV 대신 그 값(콤마로 여러 개 가능)을 임시로 사용한다(임시 점검용).
+- Each UUID is processed independently with its own retry budget (--retries);
+  a UUID that exhausts its retries is skipped and the batch continues with the next UUID.
 """
 
 import argparse
@@ -37,9 +39,11 @@ from console_user_search import (
     safe_wait_for_load,
     select_target_page,
 )
-from test_config import TEST_UUID, apply_title_profile
+from test_config import apply_title_profile
 
 BASE_DIR = Path(__file__).resolve().parent
+WEB_DOCS_DIR = BASE_DIR.parent / "web_docs"
+DEFAULT_UUID_CSV = WEB_DOCS_DIR / "user_block" / "user_block_targets.csv"
 DEFAULT_OUTPUT = "dumps_console_user_block"
 DEFAULT_PROJECT_NAME = "\ud5cc\ud130 \ud0a4\uc6b0\uae30"
 DEFAULT_BLOCK_REASON = "UserBlock/Permanent_DataHack_Desc"
@@ -70,7 +74,7 @@ TEXT_DEVICE_SEARCH_INPUT_PLACEHOLDER = "UUID \ub610\ub294 \ub2c9\ub124\uc784\uc7
 TEXT_DEVICE_SEARCH_BUTTON = "\uac80\uc0c9"
 TEXT_ALREADY_BLOCKED_DEVICE_MSG = "\uc774\ubbf8 \ub4f1\ub85d\ub41c \ub514\ubc14\uc774\uc2a4\uc785\ub2c8\ub2e4."
 
-BAN_HISTORY_DIR = Path(__file__).resolve().parent.parent / "web_docs" / "ban_history"
+BAN_HISTORY_DIR = WEB_DOCS_DIR / "ban_history"
 
 
 def parse_args():
@@ -79,11 +83,20 @@ def parse_args():
     )
     parser.add_argument(
         "--uuid",
-        default=TEST_UUID,
+        default="",
         help=(
-            "Target user UUID(s). 콤마로 여러 개 지정 가능(예: uuid1,uuid2) — "
+            "Target user UUID(s)를 콤마로 직접 지정(예: uuid1,uuid2) — "
+            "지정 시 --uuid-csv 대신 이 값을 임시로 사용합니다(1회성 점검용). "
             "각 UUID는 독립적으로 처리되며 한 UUID가 재시도를 모두 소진해도 "
-            f"다음 UUID로 계속 진행합니다 (default: {TEST_UUID})"
+            "다음 UUID로 계속 진행합니다 (default: 비어있음 → --uuid-csv 사용)"
+        ),
+    )
+    parser.add_argument(
+        "--uuid-csv",
+        default=str(DEFAULT_UUID_CSV),
+        help=(
+            "차단 대상 UUID 목록 CSV 경로. 'uuid' 컬럼에 한 줄씩 UUID를 적어둔다. "
+            f"--uuid를 지정하지 않으면 이 CSV를 읽어 배치 처리한다 (default: {DEFAULT_UUID_CSV})"
         ),
     )
     parser.add_argument(
@@ -136,6 +149,39 @@ def parse_args():
         ),
     )
     return parser.parse_args()
+
+
+def load_uuid_list_from_csv(csv_path: Path) -> list:
+    """CSV의 'uuid' 컬럼에서 차단 대상 UUID 목록을 읽어온다.
+
+    중복은 첫 등장 순서를 유지한 채 제거하고, 빈 값·공백 행은 건너뛴다.
+    """
+    if not csv_path.exists():
+        raise SystemExit(
+            f"[오류] --uuid-csv 파일을 찾을 수 없습니다: {csv_path}\n"
+            "web_docs/user_block/user_block_targets.csv 예시를 참고해 CSV를 준비하세요."
+        )
+
+    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None or "uuid" not in reader.fieldnames:
+            raise SystemExit(
+                f"[오류] --uuid-csv에 'uuid' 컬럼이 없습니다: {csv_path} "
+                f"(현재 컬럼: {reader.fieldnames})"
+            )
+        seen = set()
+        uuid_list = []
+        for row in reader:
+            value = (row.get("uuid") or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            uuid_list.append(value)
+
+    if not uuid_list:
+        raise SystemExit(f"[오류] --uuid-csv에 유효한 UUID가 없습니다: {csv_path}")
+
+    return uuid_list
 
 
 def get_visible_dialog_by_title(page, title_text):
@@ -768,9 +814,15 @@ def main():
     project_key = args.title.strip() if args.title.strip() else _re.sub(r"[^\w가-힣]", "_", args.project_name).strip("_")
     sync_playwright, _timeout_error = load_playwright()
 
-    uuid_list = [u.strip() for u in args.uuid.split(",") if u.strip()]
+    if args.uuid.strip():
+        uuid_list = [u.strip() for u in args.uuid.split(",") if u.strip()]
+        uuid_source = "--uuid 직접 지정"
+    else:
+        uuid_csv_path = Path(args.uuid_csv)
+        uuid_list = load_uuid_list_from_csv(uuid_csv_path)
+        uuid_source = f"CSV({uuid_csv_path})"
     if not uuid_list:
-        raise SystemExit("[오류] --uuid 값이 비어 있습니다.")
+        raise SystemExit("[오류] 처리할 UUID가 없습니다.")
 
     profile_dir = BASE_DIR / args.profile
     out_dir = BASE_DIR / args.out
@@ -782,6 +834,7 @@ def main():
     print("=" * 60)
     print(f"프로필 폴더: {profile_dir.name}")
     print(f"출력 폴더  : {out_dir.name}")
+    print(f"UUID 출처  : {uuid_source}")
     print(f"대상 UUID  : {len(uuid_list)}건 — {', '.join(uuid_list)}")
     print(f"차단 기간  : {args.period_days}")
     print(f"차단 사유  : {args.reason}")
