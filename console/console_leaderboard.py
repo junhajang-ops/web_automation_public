@@ -567,10 +567,34 @@ def get_leaderboard_rank_rows(page):
     return grid.locator("div.MuiDataGrid-row, [role='row'][data-id], tbody tr")
 
 
+# 리더보드에 순위 데이터가 아예 없을 때 화면에 뜨는 문구(스크린샷 기준) — 로딩 실패와
+# 구분하는 판정 기준. 이 문구가 뜨면 "빈 결과"이지 "로딩 실패"가 아니므로 재시도 대상이 아니다.
+LEADERBOARD_EMPTY_TEXT = "현재 순위가 없습니다"
+
+
+def _leaderboard_rank_grid_state(page):
+    """행이 로드됐는지, 빈 상태 문구가 떴는지 판정. "rows" | "empty" | None(아직 판정 불가)."""
+    if _is_visible(get_leaderboard_rank_rows(page).first):
+        return "rows"
+    if _is_visible(page.get_by_text(LEADERBOARD_EMPTY_TEXT, exact=True)):
+        return "empty"
+    return None
+
+
 def wait_for_leaderboard_rank_rows(page, timeout_ms: int = 15_000):
-    rows = get_leaderboard_rank_rows(page)
-    rows.first.wait_for(state="visible", timeout=timeout_ms)
-    return rows
+    """행이 나타나거나 빈 상태 문구가 뜰 때까지 대기하고 상태를 구분해 반환한다.
+
+    반환: ("rows", rows_locator) 또는 ("empty", None).
+    시간 초과(둘 다 안 뜸)는 실제 로딩 실패이므로 예외를 던져 상위 재시도로 넘긴다.
+    """
+    state = wait_until(page, lambda: _leaderboard_rank_grid_state(page), timeout_ms=timeout_ms)
+    if state == "rows":
+        return "rows", get_leaderboard_rank_rows(page)
+    if state == "empty":
+        return "empty", None
+    raise RuntimeError(
+        f"리더보드 순위 목록 로딩을 확인하지 못했습니다(행도, '{LEADERBOARD_EMPTY_TEXT}' 문구도 나타나지 않음)."
+    )
 
 
 def _get_leaderboard_grid_scroll_state(page):
@@ -1338,7 +1362,10 @@ def block_low_payment_new_users(
 
 def extract_top_ranks(page, board_name: str) -> list:
     print(f"[9] '{board_name}' 상세에서 {MAX_RANK}위 이내(공동순위 전원) 데이터를 읽습니다.")
-    wait_for_leaderboard_rank_rows(page)
+    grid_state, _ = wait_for_leaderboard_rank_rows(page)
+    if grid_state == "empty":
+        print(f"    '{board_name}': '{LEADERBOARD_EMPTY_TEXT}' 확인 — 빈 리더보드로 처리하고 다음으로 넘어갑니다.")
+        return []
 
     # 공동순위(동점)가 있으면 같은 순위에 여러 명이 있으므로, 순위가 아니라
     # uuid 를 키로 중복 제거한다. rank <= MAX_RANK 인 행은 인원 수와 무관하게 모두 수집.
