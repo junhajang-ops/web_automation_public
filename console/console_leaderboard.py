@@ -820,10 +820,14 @@ def _fetch_account_creation_date_with_retry(bq_client, bq_project, dataset, tabl
 def query_account_creation_info_bigquery(bq_client, bq_project, dataset, table, user_col, date_col, uuid, now_utc) -> dict:
     """BigQuery 유저 마스터 테이블(예: dc_all)에서 유저의 가입일(date_col 최솟값)로 신규/기존을 판정한다.
 
+    dc_all은 "유저당 한 행"인 마스터 테이블이 아니라 Firebase/GA4 스타일 이벤트 로그 테이블이다
+    (라이브로 스키마 확인: event_name/event_timestamp 등 이벤트 컬럼 포함, 15억+ 행, 2026-07-03).
+    즉 MIN(date_col)은 "그 uuid가 남긴 이벤트 중 가장 이른 시각"이며 가입일의 근사치일 뿐이다.
     Cloud Logging 방식(query_account_creation_info)은 "최근 활동 없음=기존 유저"로 판단하지만,
-    이 테이블은 유저당 레코드가 있는 마스터성 테이블이라 그 근거를 쓸 수 없다. 해당 uuid 행
-    자체가 없으면 데이터 미반영/불일치일 수 있으므로 "기존 유저"로 단정하지 않고 별도 상태
-    ("계정정보없음")로 남겨 신규 차단 후보 판정에서 조용히 누락되지 않게 한다.
+    여기서는 해당 uuid의 행 자체가 없는 경우가 "최근 활동 없음"과 "이 uuid는 이 테이블에 이벤트를
+    한 번도 남긴 적이 없음"을 구분할 수 없어(클라이언트의 분석 수집 비활성화, 오래된 계정의 이벤트
+    보존기간 만료 등 여러 원인 가능) "기존 유저"로 단정하지 않고 별도 상태("계정정보없음")로 남겨
+    신규 차단 후보 판정에서 조용히 누락되지 않게 한다.
     """
     create_dt, err = _fetch_account_creation_date_with_retry(
         bq_client, bq_project, dataset, table, user_col, date_col, uuid
