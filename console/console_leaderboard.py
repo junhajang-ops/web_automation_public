@@ -14,13 +14,18 @@ Scope:
   purchased products, no price lookup — 게임B 프로젝트는 가격 등 조회 불가 정책)
 - Save CSV and debug artifacts
 
-By default this script is read-only. Only when --block-new-users is passed does it
-perform a mutation: new accounts whose total payment sum is at or below the env-managed
-threshold (USER_BLOCK_MAX_TOTAL_PAYMENT, default 200,000; --dc uses recent purchase count
-and USER_BLOCK_MAX_PURCHASE_COUNT instead) are user-blocked (device ban included).
-Both this and ACCOUNT_NEW_HOURS accept a {TITLE}_-prefixed per-project override
-(e.g. GAMETITLE_USER_BLOCK_MAX_TOTAL_PAYMENT, DC_USER_BLOCK_MAX_PURCHASE_COUNT).
-Without the flag it merely prints the block candidates (dry-run).
+By default this script is read-only. Actual blocking (mutation: new accounts whose total
+payment sum is at or below the env-managed threshold — USER_BLOCK_MAX_TOTAL_PAYMENT,
+default 200,000; --dc uses recent purchase count and USER_BLOCK_MAX_PURCHASE_COUNT instead
+— are user-blocked, device ban included) only runs when EITHER of these is true:
+  - --block-new-users is passed on the command line (manual runs), OR
+  - env USER_BLOCK_NEW_USERS_ENABLED (or its {TITLE}_ override) is set to a truthy value
+    (1/true/yes/on) — this is the only way scheduled runs (run_leaderboard_scheduled.ps1,
+    which never passes --block-new-users) can enable real blocking, per project.
+USER_BLOCK_MAX_TOTAL_PAYMENT/USER_BLOCK_MAX_PURCHASE_COUNT/ACCOUNT_NEW_HOURS/
+USER_BLOCK_NEW_USERS_ENABLED all accept a {TITLE}_-prefixed per-project override
+(e.g. GAMETITLE_USER_BLOCK_MAX_TOTAL_PAYMENT, DC_USER_BLOCK_NEW_USERS_ENABLED).
+Without either activation path it merely prints the block candidates (dry-run).
 """
 
 import argparse
@@ -96,6 +101,10 @@ from cs_bigquery_logging import (  # noqa: E402
     load_bigquery_credentials,
 )
 
+def _parse_bool_env(raw: str) -> bool:
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 DEFAULT_OUTPUT = "dumps_console_leaderboard"
 LEADERBOARD_OUT_DIR = PAYMENT_DOCS_DIR / "leaderboard"
 DEFAULT_SEARCH_KEYWORDS = "PvPRank"  # 콤마 구분, 복수 지정 가능. --title/--gametitle 사용 시 {TITLE}_LEADERBOARD_KEYWORDS env로 대체 가능
@@ -129,6 +138,10 @@ BLOCK_MAX_TOTAL_PAYMENT = max(0, int(os.environ.get("USER_BLOCK_MAX_TOTAL_PAYMEN
 # 신규 유저 차단 임계값(구매 건수 기반, --dc 전용 — 가격 등 조회 불가 정책):
 # 영수증검증 최근 RECENT_PAYMENT_LIMIT건 중 구매 제품 건수(recent_purchase_count)가 이 값 "이하"면 차단 대상.
 BLOCK_MAX_PURCHASE_COUNT = max(0, int(os.environ.get("USER_BLOCK_MAX_PURCHASE_COUNT", "0")))
+# 예약 실행(작업 스케줄러)은 --block-new-users CLI 플래그를 넘기지 않으므로, 프로젝트별로
+# "실제 차단을 진행할지"를 env로만 켤 수 있게 한다(운영 실행 승인 게이트는 유지 — 기본값 False=드라이런).
+# {TITLE}_USER_BLOCK_NEW_USERS_ENABLED가 있으면 그 값, 없으면 전역 USER_BLOCK_NEW_USERS_ENABLED(기본 false).
+BLOCK_NEW_USERS_ENABLED = _parse_bool_env(os.environ.get("USER_BLOCK_NEW_USERS_ENABLED", ""))
 RANK_COL_WIDTH = 4
 UUID_COL_WIDTH = 36
 ACCOUNT_TYPE_COL_WIDTH = 16  # 계정상태 고정폭 — 조회실패(...) 예외 메시지는 이 폭에서 말줄임 처리됨
@@ -167,6 +180,14 @@ def _resolve_title_int_env(prefix: str, suffix: str, default_value: int) -> int:
         return default_value
     raw = os.environ.get(f"{prefix}_{suffix}", "").strip()
     return int(raw) if raw else default_value
+
+
+def _resolve_title_bool_env(prefix: str, suffix: str, default_value: bool) -> bool:
+    """{prefix}_{suffix} env가 있으면 그 값(불리언 파싱), 없으면 default_value(전역 fallback) 그대로."""
+    if not prefix:
+        return default_value
+    raw = os.environ.get(f"{prefix}_{suffix}", "").strip()
+    return _parse_bool_env(raw) if raw else default_value
 
 
 def _is_visible(locator) -> bool:
@@ -265,7 +286,10 @@ def parse_args():
             "env USER_BLOCK_MAX_TOTAL_PAYMENT, {TITLE}_USER_BLOCK_MAX_TOTAL_PAYMENT로 프로젝트별 override 가능) "
             "이하인 대상을 실제로 user_block(디바이스밴 포함)합니다. --dc는 가격 대신 최근 구매 건수 "
             "(env USER_BLOCK_MAX_PURCHASE_COUNT/{TITLE}_USER_BLOCK_MAX_PURCHASE_COUNT) 기준입니다. "
-            "지정하지 않으면 후보 목록만 출력하는 드라이런으로 동작합니다(운영 실행 승인 게이트)."
+            "지정하지 않아도 env USER_BLOCK_NEW_USERS_ENABLED(또는 {TITLE}_USER_BLOCK_NEW_USERS_ENABLED, "
+            "값 1/true/yes/on) 가 켜져 있으면 동일하게 실제 차단이 진행됩니다 — 예약 실행(작업 스케줄러)은 "
+            "이 CLI 플래그를 넘기지 않으므로, 프로젝트별로 실제 차단 여부를 정하는 유일한 경로입니다. "
+            "둘 다 꺼져 있으면 후보 목록만 출력하는 드라이런으로 동작합니다(운영 실행 승인 게이트)."
         ),
     )
     parser.add_argument(
@@ -1777,7 +1801,7 @@ def main():
 
     # 프로젝트별 운영 파라미터 override(2026-07-03 분리): {TITLE}_ACCOUNT_NEW_HOURS 등이 있으면
     # 전역 기본값 대신 그 값을 쓴다. args.title은 require_project_name=True라 항상 채워져 있다.
-    global ACCOUNT_NEW_HOURS, ACCOUNT_LOOKUP_LOOKBACK_HOURS, BLOCK_MAX_TOTAL_PAYMENT, BLOCK_MAX_PURCHASE_COUNT
+    global ACCOUNT_NEW_HOURS, ACCOUNT_LOOKUP_LOOKBACK_HOURS, BLOCK_MAX_TOTAL_PAYMENT, BLOCK_MAX_PURCHASE_COUNT, BLOCK_NEW_USERS_ENABLED
     ACCOUNT_NEW_HOURS = _resolve_title_int_env(prefix, "ACCOUNT_NEW_HOURS", ACCOUNT_NEW_HOURS)
     ACCOUNT_LOOKUP_LOOKBACK_HOURS = max(
         1, _resolve_title_int_env(prefix, "ACCOUNT_LOOKUP_LOOKBACK_HOURS", ACCOUNT_NEW_HOURS)
@@ -1788,6 +1812,14 @@ def main():
     BLOCK_MAX_PURCHASE_COUNT = max(
         0, _resolve_title_int_env(prefix, "USER_BLOCK_MAX_PURCHASE_COUNT", BLOCK_MAX_PURCHASE_COUNT)
     )
+    BLOCK_NEW_USERS_ENABLED = _resolve_title_bool_env(
+        prefix, "USER_BLOCK_NEW_USERS_ENABLED", BLOCK_NEW_USERS_ENABLED
+    )
+    # --block-new-users(CLI, 수동 실행용)와 {TITLE}_USER_BLOCK_NEW_USERS_ENABLED(env, 예약 실행용)는
+    # 둘 중 하나만 켜도 실제 차단을 진행한다 — 예약 실행은 CLI 플래그를 넘기지 않으므로 env가
+    # 유일한 활성화 경로다. 어느 쪽으로 켜졌는지는 아래 로그에 남긴다.
+    block_new_users_via_cli = bool(args.block_new_users)
+    args.block_new_users = block_new_users_via_cli or BLOCK_NEW_USERS_ENABLED
 
     credentials = None
     bq_credentials = None
@@ -1824,12 +1856,16 @@ def main():
         f"최근 구매 {BLOCK_MAX_PURCHASE_COUNT}건 이하" if dc_mode else f"총결제 {BLOCK_MAX_TOTAL_PAYMENT:,}원 이하"
     )
     if args.block_new_users:
+        block_source = "--block-new-users" if block_new_users_via_cli else f"env {prefix}_USER_BLOCK_NEW_USERS_ENABLED"
         print(
-            f"차단     : 활성 (실제 차단) — 신규 유저 {block_threshold_desc}, "
+            f"차단     : 활성 (실제 차단, {block_source}) — 신규 유저 {block_threshold_desc}, "
             f"디바이스밴 {'생략' if args.skip_device_block else '포함'}, 사유='{args.reason}'"
         )
     else:
-        print(f"차단     : 드라이런 (--block-new-users 미지정) — 후보만 출력, 임계값 {block_threshold_desc}")
+        print(
+            f"차단     : 드라이런 (--block-new-users 미지정, env {prefix}_USER_BLOCK_NEW_USERS_ENABLED도 비활성) "
+            f"— 후보만 출력, 임계값 {block_threshold_desc}"
+        )
 
     succeeded = False
     all_rows = []
