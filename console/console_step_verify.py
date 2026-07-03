@@ -9,6 +9,12 @@ Rules:
 - Fingerprints are compared by stable step name, not by dump filename.
 - Full-page fingerprinting is the default rule. Step-local ignore patterns
   can suppress known false positives without weakening the shared baseline.
+- Before every dump, wait_for_loading_settled() waits for any visible
+  role='progressbar' spinner to disappear (2026-07-03: async list refreshes
+  otherwise get caught mid-load, making the same step's snapshot flicker
+  between "loading" and "settled" shapes). This is a timing fix, not a
+  suppression, so it applies globally via record_step_dump/
+  record_final_step_state rather than a per-script ignore pattern.
 """
 
 import datetime
@@ -261,6 +267,27 @@ def wait_until(page, predicate, timeout_ms: int = 10_000, wait_ms: int = POLL_IN
         if time.monotonic() >= deadline:
             return None
         page.wait_for_timeout(wait_ms)
+
+
+def wait_for_loading_settled(page, timeout_ms: int = 10_000, wait_ms: int = POLL_INTERVAL_MS) -> bool:
+    """콘솔 콘솔이 목록을 비동기로 새로고침할 때 뜨는 로딩 스피너(role='progressbar')가
+    남아있는 동안 dump/fingerprint를 찍으면, 찍는 순간의 네트워크 타이밍에 따라
+    "로딩 중" 스냅샷과 "로딩 완료" 스냅샷이 뒤섞여 매번 role 목록이 달라지는 오탐이
+    난다(2026-07-03 실측: 메뉴 이동/다이얼로그 오픈/결과 팝업 확인 직전 role:
+    progressbar<->navigation이 반복적으로 갈아치워짐). 진단(ignore_patterns)으로
+    죽이는 대신, 스피너가 사라질 때까지 실제로 기다려 "안정된 상태"의 스냅샷만
+    찍도록 한다 — record_step_dump/record_final_step_state 공용으로 적용되므로
+    이 함수를 쓰는 모든 console 스크립트에 동일하게 적용된다.
+    타임아웃 안에 안 사라지면(진짜로 로딩이 멈춰버린 이상 상태일 수 있음) 기다림을
+    포기하고 그대로 진행한다 — 이 경우엔 그 자체가 fingerprint에 실제 이상으로
+    잡히는 게 맞다(숨기지 않는다)."""
+    def _no_progressbar():
+        try:
+            return page.locator("[role='progressbar']").count() == 0
+        except Exception:
+            return True
+
+    return bool(wait_until(page, _no_progressbar, timeout_ms=timeout_ms, wait_ms=wait_ms))
 
 
 def retry_with_recovery(action, recovery, label: str, recovery_desc: str, max_retries: int):
@@ -553,6 +580,7 @@ def record_step_dump(
     # 실제 조작은 이 함수 반환 후 호출부에서 진행된다.
     tag = _next_tag(page, name)
     step_pause(page)
+    wait_for_loading_settled(page)
     _save_dump(page, tag)
     snap_and_check_ui(page, name=tag, ignore_patterns=ignore_patterns)
     return tag
@@ -565,8 +593,11 @@ def record_final_step_state(
 ) -> str:
     # 마지막 단계 기록: 안정화 고정 대기(step_pause)는 두지 않는다.
     # 조작 후 안정화는 조작 측 폴링(wait_until 등)이 이미 보장한 상태에서 호출되므로
-    # 여기서는 기록 덤프와 지문 비교만 수행한다.
+    # 여기서는 기록 덤프와 지문 비교만 수행한다. 다만 그 폴링은 보통 특정 요소(다이얼로그
+    # 닫힘 등) 기준이라 별개로 돌아가는 목록 새로고침 스피너까지는 보장하지 않으므로,
+    # 여기서도 로딩 스피너 소멸은 별도로 기다린다.
     tag = _next_tag(page, name)
+    wait_for_loading_settled(page)
     _save_dump(page, tag)
     snap_and_check_ui(page, name=tag, ignore_patterns=ignore_patterns)
     return tag
