@@ -5,11 +5,17 @@ Cloud Logging(entries.list) 대신 BigQuery로 로그/유저 데이터를 내보
 읽기 전용(SELECT)만 수행한다.
 """
 
-BIGQUERY_READONLY_SCOPE = "https://www.googleapis.com/auth/bigquery.readonly"
+BIGQUERY_SCOPE = "https://www.googleapis.com/auth/bigquery"
+# 주의: bigquery.readonly 스코프로는 쿼리 실행(jobs.insert)이 거부된다
+# (403 ACCESS_TOKEN_SCOPE_INSUFFICIENT, 라이브 테스트로 확인 2026-07-03).
+# BigQuery는 SELECT도 내부적으로 job을 생성해 실행하는 구조라 job 생성 자체에
+# 더 넓은 스코프가 필요함. 실제 쓰기/삭제 가능 여부는 스코프가 아니라 서비스계정에
+# 부여된 IAM 역할(BigQuery 데이터 뷰어 + BigQuery 작업 사용자)로 제한되므로,
+# 스코프를 넓혀도 이 서비스계정이 실제로 할 수 있는 일은 여전히 조회뿐이다.
 
 
 def load_bigquery_credentials(key_path):
-    """서비스계정 키 파일 → credentials(bigquery.readonly scope). 실패 시 None.
+    """서비스계정 키 파일 → credentials(bigquery scope). 실패 시 None.
 
     cs_gcp_logging.load_logging_credentials와 동일한 이유로 credentials(RSA 키 파싱)는
     한 번만 로드해 공유하고, client(연결)는 build_bigquery_client_from_credentials로
@@ -21,7 +27,7 @@ def load_bigquery_credentials(key_path):
         return None
     try:
         return service_account.Credentials.from_service_account_file(
-            str(key_path), scopes=[BIGQUERY_READONLY_SCOPE]
+            str(key_path), scopes=[BIGQUERY_SCOPE]
         )
     except Exception:
         return None
