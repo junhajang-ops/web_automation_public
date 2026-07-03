@@ -75,8 +75,8 @@ def apply_title_profile(
 ):
     if getattr(args, "gametitle", False) and not getattr(args, "title", ""):
         args.title = "gametitle"
-    # 게임B(GCP project: example-project-b). "dc"/"dk" 둘 다 같은 프로필을 가리키는 단축키.
-    if (getattr(args, "dc", False) or getattr(args, "dk", False)) and not getattr(args, "title", ""):
+    # 게임B(GCP project: example-project-b).
+    if getattr(args, "dc", False) and not getattr(args, "title", ""):
         args.title = "dc"
 
     title = (getattr(args, "title", "") or "").strip()

@@ -207,7 +207,6 @@ def parse_args():
     )
     parser.add_argument("--gametitle", action="store_true", help="--title gametitle 단축키")
     parser.add_argument("--dc", action="store_true", help="--title dc 단축키 (게임B)")
-    parser.add_argument("--dk", action="store_true", help="--dc 와 동일 (별칭)")
     parser.add_argument(
         "--unattended",
         action="store_true",
