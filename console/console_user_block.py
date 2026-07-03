@@ -84,6 +84,15 @@ TEXT_ALREADY_BLOCKED_DEVICE_MSG = "\uc774\ubbf8 \ub4f1\ub85d\ub41c \ub514\ubc14\
 # \uc2dd\ubcc4\ud574 "error" \uc0c1\ud0dc\ub85c \uba85\ud655\ud788 \ubd84\ub958\ud558\uace0 CSV\uc5d0 \uae30\ub85d\ud55c\ub2e4.
 TEXT_ERROR_HEADING_MARKER = "\uc624\ub958\uac00 \ubc1c\uc0dd"
 
+# 2026-07-03: 유저 접근 페이지 이동 직전/등록 다이얼로그 오픈 직전/결과 팝업 확인 직전처럼
+# 직전 조작이 콘솔 콘솔의 목록 데이터를 비동기로 새로고침시키는 지점에서는, 그 로딩
+# 스피너(role=progressbar)나 내비게이션 랜드마크(role=navigation)가 dump를 찍는 순간의
+# 타이밍에 따라 있다/없다가 갈려 실제 구조 변경이 아닌데도 [UI change] 오탐이 반복 재현됨
+# (사용자 라이브 실행 로그로 확인). 공용 fingerprint 헬퍼의 기본 scope(전체 페이지)는
+# 그대로 두고, 이런 로딩 타이밍에 노출되는 특정 단계에서만 이 두 role 항목을 좁게
+# 화이트리스트한다(2026-06-29 whitelist 원칙: 한 화면의 알려진 오탐만 로컬로 예외 처리).
+FLAKY_LOADING_ROLE_IGNORE_PATTERNS = [r"role: progressbar$", r"role: navigation$"]
+
 BAN_HISTORY_DIR = WEB_DOCS_DIR / "ban_history"
 
 
@@ -243,7 +252,7 @@ def open_user_access_page(page):
     menu_link = page.locator("a#baseGamerAccess, a[href*='/baseGamerAccess']").first
     ensure_sidebar_link_expanded(page, menu_link, "user_access_category_expand_pre")
     menu_link.scroll_into_view_if_needed()
-    record_step_dump(page, "user_access_nav_pre")
+    record_step_dump(page, "user_access_nav_pre", ignore_patterns=FLAKY_LOADING_ROLE_IGNORE_PATTERNS)
     menu_link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
@@ -288,12 +297,14 @@ def open_block_register_dialog(page, step_name="user_block_open_dialog_pre"):
     디바이스 차단 흐름(직전 유저 차단 결과 팝업을 막 닫은 직후, 목록이 새로고침
     중이라 progressbar가 보임)은 이 버튼을 누르기 직전 화면 상태가 서로 다르므로,
     같은 이름을 공유하면 서로 다른 정상 상태를 비교해 매번 오탐([UI change])이
-    난다(2026-07-03 실측: role navigation<->progressbar가 반복적으로 갈아치워짐)."""
+    난다(2026-07-03 실측: role navigation<->progressbar가 반복적으로 갈아치워짐).
+    이름을 분리한 뒤에도 이 로딩 스피너/랜드마크 자체는 매 호출마다 타이밍에 따라
+    있다/없다가 갈리므로 FLAKY_LOADING_ROLE_IGNORE_PATTERNS로 추가 화이트리스트한다."""
     print(f"[6] '{TEXT_OPEN_BLOCK_DIALOG}' 버튼을 클릭합니다.")
     button = page.locator("button.ui.button").filter(has_text=TEXT_OPEN_BLOCK_DIALOG).first
     button.wait_for(state="visible", timeout=15_000)
     button.scroll_into_view_if_needed()
-    record_step_dump(page, step_name)
+    record_step_dump(page, step_name, ignore_patterns=FLAKY_LOADING_ROLE_IGNORE_PATTERNS)
     button.click()
 
     dialog = get_visible_dialog_by_title(page, TEXT_OPEN_BLOCK_DIALOG)
@@ -578,7 +589,9 @@ def confirm_result_popup(page) -> str:
     confirm_button = dialog.get_by_role("button", name=TEXT_CONFIRM, exact=True).first
     confirm_button.wait_for(state="visible", timeout=10_000)
     confirm_button.scroll_into_view_if_needed()
-    record_step_dump(page, "user_block_result_confirm_pre")
+    record_step_dump(
+        page, "user_block_result_confirm_pre", ignore_patterns=FLAKY_LOADING_ROLE_IGNORE_PATTERNS
+    )
     confirm_button.click()
 
     def _result_closed():
@@ -686,7 +699,9 @@ def confirm_device_result_popup(page, dialog) -> tuple:
     confirm_button = popup.get_by_role("button", name=TEXT_CONFIRM, exact=True).first
     confirm_button.wait_for(state="visible", timeout=10_000)
     confirm_button.scroll_into_view_if_needed()
-    record_step_dump(page, "device_block_result_confirm_pre")
+    record_step_dump(
+        page, "device_block_result_confirm_pre", ignore_patterns=FLAKY_LOADING_ROLE_IGNORE_PATTERNS
+    )
     confirm_button.click()
 
     def _result_closed():
