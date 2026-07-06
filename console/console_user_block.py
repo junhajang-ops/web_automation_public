@@ -86,6 +86,20 @@ TEXT_ERROR_HEADING_MARKER = "\uc624\ub958\uac00 \ubc1c\uc0dd"
 
 BAN_HISTORY_DIR = WEB_DOCS_DIR / "ban_history"
 
+# '유저 접근' 메뉴 이동 직전 / '접근 차단 등록' 다이얼로그 열기 직전 전용.
+# 접근 차단 목록의 페이지네이션(role=navigation)은 목록 로딩 스피너
+# (role=progressbar, MuiCircularProgress)가 사라진 직후에만 렌더된다. 공용
+# wait_for_loading_settled()가 스피너 소멸을 기다리긴 하지만, 라이브 서버 응답이
+# 느린 순간에는 그 대기 안에 로딩이 안 끝나 "로딩 중" 스냅샷이 baseline으로 저장될
+# 때가 있다(2026-07-01/07-03/07-06 반복 실측: 같은 스텝이 회차마다 navigation<->
+# progressbar로 뒤집힘). 이 두 스텝에 한해 두 role의 등장/소멸을 구조 변경으로 보지
+# 않는다 — 다른 스텝/화면의 navigation·progressbar 변화까지 숨기지 않도록 이 두
+# 호출부에만 로컬로 적용한다.
+LOADING_TRANSITION_IGNORE_PATTERNS = [
+    r"role: navigation$",
+    r"role: progressbar$",
+]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -243,7 +257,7 @@ def open_user_access_page(page):
     menu_link = page.locator("a#baseGamerAccess, a[href*='/baseGamerAccess']").first
     ensure_sidebar_link_expanded(page, menu_link, "user_access_category_expand_pre")
     menu_link.scroll_into_view_if_needed()
-    record_step_dump(page, "user_access_nav_pre")
+    record_step_dump(page, "user_access_nav_pre", ignore_patterns=LOADING_TRANSITION_IGNORE_PATTERNS)
     menu_link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
@@ -290,12 +304,15 @@ def open_block_register_dialog(page, step_name="user_block_open_dialog_pre"):
     같은 이름을 공유하면 서로 다른 정상 상태를 비교해 매번 오탐([UI change])이
     난다(2026-07-03 실측: role navigation<->progressbar가 반복적으로 갈아치워짐).
     이 로딩 스피너 자체의 타이밍 흔들림은 record_step_dump가 공용으로 호출하는
-    wait_for_loading_settled()가 스피너 소멸을 기다려 흡수한다."""
+    wait_for_loading_settled()가 스피너 소멸을 기다려 흡수하지만, 라이브 서버 응답이
+    느릴 때는 그 대기 안에도 로딩이 안 끝날 수 있어(2026-07-06 재실측) 이 스텝은
+    LOADING_TRANSITION_IGNORE_PATTERNS로 navigation/progressbar 자체를 로컬
+    화이트리스트했다."""
     print(f"[6] '{TEXT_OPEN_BLOCK_DIALOG}' 버튼을 클릭합니다.")
     button = page.locator("button.ui.button").filter(has_text=TEXT_OPEN_BLOCK_DIALOG).first
     button.wait_for(state="visible", timeout=15_000)
     button.scroll_into_view_if_needed()
-    record_step_dump(page, step_name)
+    record_step_dump(page, step_name, ignore_patterns=LOADING_TRANSITION_IGNORE_PATTERNS)
     button.click()
 
     dialog = get_visible_dialog_by_title(page, TEXT_OPEN_BLOCK_DIALOG)

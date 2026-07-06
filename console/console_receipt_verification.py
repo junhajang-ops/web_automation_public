@@ -52,6 +52,17 @@ GRID_SCROLL_IDLE_LIMIT = 3
 RECEIPT_IGNORE_PATTERNS = [
     r"button: badge\|type=button$",
 ]
+# 'receipt_uuid_input_pre'/'receipt_search_submit_pre' 전용: 이 두 스텝은 검색을
+# 실행하기 '전'에 찍는다. 그런데 영수증 검증 화면은 세션에 직전 조회 결과 그리드를
+# 남겨두므로, 이 시점의 gridcell/rowgroup 유무는 이번 실행이 아니라 과거(다른 실행)
+# 마지막 조회에 결과가 있었는지에 좌우되는 잔존 데이터일 뿐 구조 변경이 아니다
+# (2026-07-06 실측: 같은 스텝이 회차마다 +/-로 뒤집힘). receipt_results(검색 후
+# 실제 결과)와 rows-per-page 스텝(항상 결과가 있는 상태에서만 호출됨)은 행 유무가
+# 의미 있는 신호라 이 화이트리스트를 공유하지 않는다.
+RECEIPT_PRE_SEARCH_IGNORE_PATTERNS = RECEIPT_IGNORE_PATTERNS + [
+    r"role: gridcell$",
+    r"role: rowgroup$",
+]
 # 'receipt_results' 전용: 검색 직후 DataGrid 로딩 스피너(progressbar) 유무는
 # 이전 실행 baseline과의 타이밍 차이일 뿐 실제 화면 구조 변경이 아니다(오탐).
 RECEIPT_RESULTS_IGNORE_PATTERNS = RECEIPT_IGNORE_PATTERNS + [
@@ -211,7 +222,7 @@ def fill_uuid_search(page, uuid_value):
     uuid_input.wait_for(state="visible", timeout=15_000)
     uuid_input.scroll_into_view_if_needed()
     _wait_grid_not_loading(page)
-    record_step_dump(page, "receipt_uuid_input_pre", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
+    record_step_dump(page, "receipt_uuid_input_pre", ignore_patterns=RECEIPT_PRE_SEARCH_IGNORE_PATTERNS)
     uuid_input.fill("")
     uuid_input.fill(uuid_value)
     _verify_uuid_input_value(uuid_input, uuid_value)
@@ -222,7 +233,7 @@ def click_search_button(page):
     search_button = page.locator("button", has_text="검색").first
     search_button.wait_for(state="visible", timeout=15_000)
     search_button.scroll_into_view_if_needed()
-    record_step_dump(page, "receipt_search_submit_pre", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
+    record_step_dump(page, "receipt_search_submit_pre", ignore_patterns=RECEIPT_PRE_SEARCH_IGNORE_PATTERNS)
     search_button.click()
     safe_wait_for_load(page, "networkidle", 5_000)
     _wait_grid_not_loading(page)
