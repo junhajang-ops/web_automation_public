@@ -18,6 +18,7 @@ cs_copilot.py — cs 실시간 보조 co-pilot (읽기 전용 MVP)
 
 import argparse
 import json
+import os
 import queue
 import re
 import sys
@@ -882,6 +883,16 @@ def main():
             start_page.goto("https://companyname.cs.example.com/", timeout=15_000)
         except Exception:
             pass  # 이미 로그인된 세션이면 리다이렉트 등으로 타임아웃 나도 무방
+
+        try:
+            from cs_login import CsLoginError, ensure_logged_in
+
+            ensure_logged_in(start_page, totp_secret=os.environ.get("CS_TOTP_SECRET"))
+        except CsLoginError as e:
+            print(f"[로그인 실패] {e}")
+            print("[안내] 브라우저 창에서 직접 로그인을 확인한 뒤 다시 실행하세요.")
+        except Exception as e:  # noqa: BLE001
+            print(f"[로그인 확인 중 오류] {e}")
 
         print()
         print("=" * 44)
