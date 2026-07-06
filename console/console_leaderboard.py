@@ -1841,9 +1841,25 @@ def _slack_block_status(uuid_value: str, executed: bool, results: list) -> str:
     return "결과 확인 안됨"
 
 
+def _format_short_date(date_str: str) -> str:
+    """ISO 가입일(예: 2026-06-30T04:10:44Z) -> 슬랙 표기용 'MM-DD'. 파싱 실패 시 원본 그대로."""
+    if not date_str:
+        return "확인불가"
+    try:
+        return datetime.datetime.fromisoformat(date_str.replace("Z", "")).strftime("%m-%d")
+    except Exception:
+        return date_str
+
+
+def _rank_appearances(all_rows: list, uuid_value: str) -> str:
+    """이 uuid가 등장한 모든 리더보드·순위를 '보드명 N위' 형태로 나열(복수 보드 가능)."""
+    appearances = [f"{row['leaderboard']} {row['rank']}위" for row in all_rows if row["uuid"] == uuid_value]
+    return ", ".join(appearances) if appearances else "확인불가"
+
+
 def _format_block_detail(candidate: dict, dc_mode: bool) -> str:
     """차단 대상 슬랙 표기용 상세 — 가입일 + (dc 이외는 결제 내역 분해)."""
-    parts = [f"가입일 {candidate.get('create_account_date') or '확인불가'}"]
+    parts = [f"가입일 {_format_short_date(candidate.get('create_account_date'))}"]
     if not dc_mode:
         recent = candidate.get("recent_payment_sum")
         payitem = candidate.get("payitem_item_value_sum")
@@ -1894,9 +1910,10 @@ def build_slack_summary(
     lines.append(f"차단 대상 {len(candidates)}명 ({'실행' if executed else '드라이런(미실행)'}):")
     for c in candidates:
         status = _slack_block_status(c["uuid"], executed, results)
+        ranks = _rank_appearances(all_rows, c["uuid"])
         lines.append(
-            f"  - {c.get('nickname', '')} ({c['uuid']}) {_format_block_metric(c, dc_mode)} "
-            f"| {_format_block_detail(c, dc_mode)} — {status}"
+            f"  - {c.get('nickname', '')} {_format_block_metric(c, dc_mode)} "
+            f"| {_format_block_detail(c, dc_mode)} | 순위: {ranks} — {status}"
         )
 
     return "\n".join(lines)
