@@ -475,14 +475,27 @@ def set_rows_per_page(page, target: int, label: str, verify_prefix: str = "", co
     raise RuntimeError(f"{label} 전환 결과가 기대와 다릅니다: expected='{target_text}'")
 
 
-def collect_visible_board_names(page, keyword: str) -> list:
-    print(f"[6] 현재 목록 페이지에서 '{keyword}_*' 리더보드 이름을 수집합니다.")
+def _board_name_pattern(keyword: str):
     # 뒤에 '_XXX' 접미사가 붙는 접두사 키워드(예: "AllyArena")와, 그 자체가 이미
     # 완전한 리더보드 이름인 키워드(예: --test-single-board 용 "AllyArena_GO_106")를
     # 둘 다 지원해야 한다. 접미사를 선택적으로 만들되, "AllyArena_GO_106"이
     # "AllyArena_GO_1067" 같은 더 긴 이름의 앞부분만 잘못 잘라 매치하지 않도록
     # 뒤에 단어문자가 이어지면 매치 실패로 처리하는 부정 전방탐색을 둔다.
-    board_name_re = re.compile(rf"{re.escape(keyword)}(?:_[A-Za-z0-9_]+)?(?![A-Za-z0-9_])")
+    return re.compile(rf"{re.escape(keyword)}(?:_[A-Za-z0-9_]+)?(?![A-Za-z0-9_])")
+
+
+def count_boards_by_keyword(all_rows: list, keywords: list) -> list:
+    """키워드별로 조회된 고유 리더보드 개수. [(keyword, count), ...], keywords 순서 유지."""
+    board_names = {row["leaderboard"] for row in all_rows}
+    return [
+        (keyword, sum(1 for name in board_names if _board_name_pattern(keyword).fullmatch(name)))
+        for keyword in keywords
+    ]
+
+
+def collect_visible_board_names(page, keyword: str) -> list:
+    print(f"[6] 현재 목록 페이지에서 '{keyword}_*' 리더보드 이름을 수집합니다.")
+    board_name_re = _board_name_pattern(keyword)
     wait_for_data_rows(page)
     rows = get_data_rows(page)
     count = rows.count()
@@ -1847,6 +1860,7 @@ def build_slack_summary(
     block_outcome: dict,
     dc_mode: bool,
     error_message: str,
+    keywords: list,
 ) -> str:
     """예약 실행(--unattended) 완료 후 슬랙에 보낼 요약 텍스트.
 
@@ -1858,9 +1872,11 @@ def build_slack_summary(
         lines.append(f"오류: {error_message}")
         return "\n".join(lines)
 
-    board_names = sorted({row["leaderboard"] for row in all_rows})
-    lines.append(f"조회한 리더보드 ({len(board_names)}개): {', '.join(board_names) if board_names else '없음'}")
-    lines.append(f"총 {len(all_rows)}행")
+    lines.append(f"검색어: {', '.join(keywords) if keywords else '없음'}")
+    keyword_counts = count_boards_by_keyword(all_rows, keywords)
+    total_boards = sum(count for _, count in keyword_counts)
+    breakdown = ", ".join(f"{keyword} {count}개" for keyword, count in keyword_counts)
+    lines.append(f"조회된 리더보드: {breakdown} (합계 {total_boards}개), 총 {len(all_rows)}행")
     if skipped_boards:
         lines.append(f"스킵된 리더보드: {len(skipped_boards)}건")
 
@@ -2127,6 +2143,7 @@ def main():
                 webhook_url,
                 build_slack_summary(
                     project_key, succeeded, all_rows, skipped_boards, block_outcome, dc_mode, error_message,
+                    keyword_list,
                 ),
             )
         else:
