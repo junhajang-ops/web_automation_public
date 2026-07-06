@@ -69,6 +69,7 @@ from console_user_block import (
     DEFAULT_DEVICE_BAN_COUNT,
     run_user_block,
 )
+from console_slack_notify import get_slack_webhook_url, send_slack_message
 from console_step_verify import (
     configure_console_output,
     display_width,
@@ -1808,6 +1809,58 @@ def save_artifacts(page, out_dir: Path, succeeded: bool, rows: list, error_messa
     save_page_artifacts(page, out_dir, "console_leaderboard", lines)
 
 
+def _slack_block_status(uuid_value: str, executed: bool, results: list) -> str:
+    if not executed:
+        return "드라이런(미실행)"
+    for r in results:
+        if r["uuid"] == uuid_value:
+            return "차단 완료" if r["succeeded"] else f"차단 실패: {r.get('error', '')}"
+    return "결과 확인 안됨"
+
+
+def build_slack_summary(
+    project_key: str,
+    succeeded: bool,
+    all_rows: list,
+    skipped_boards: list,
+    block_outcome: dict,
+    dc_mode: bool,
+    error_message: str,
+) -> str:
+    """예약 실행(--unattended) 완료 후 슬랙에 보낼 요약 텍스트.
+
+    차단 대상은 없어도 "없음"을 명시한다 — 침묵으로 "0명"을 표현하지 않는다.
+    """
+    lines = [f"*[리더보드 예약 실행] {project_key}* — {'성공' if succeeded else '실패'}"]
+
+    if not succeeded:
+        lines.append(f"오류: {error_message}")
+        return "\n".join(lines)
+
+    board_count = len(set(row["leaderboard"] for row in all_rows))
+    lines.append(f"조회: 리더보드 {board_count}개, 총 {len(all_rows)}행")
+    if skipped_boards:
+        lines.append(f"스킵된 리더보드: {len(skipped_boards)}건")
+
+    if block_outcome is None:
+        lines.append("차단 결과: 확인 불가(차단 단계 도달 전 종료)")
+        return "\n".join(lines)
+
+    candidates = block_outcome.get("candidates") or []
+    if not candidates:
+        lines.append("차단 대상: 없음")
+        return "\n".join(lines)
+
+    executed = block_outcome.get("executed", False)
+    results = block_outcome.get("results") or []
+    lines.append(f"차단 대상 {len(candidates)}명 ({'실행' if executed else '드라이런(미실행)'}):")
+    for c in candidates:
+        status = _slack_block_status(c["uuid"], executed, results)
+        lines.append(f"  - {c.get('nickname', '')} ({c['uuid']}) {_format_block_metric(c, dc_mode)} — {status}")
+
+    return "\n".join(lines)
+
+
 def main():
     configure_console_output()
     args = parse_args()
@@ -1930,6 +1983,7 @@ def main():
     skipped_boards = []
     error_message = ""
     block_had_failures = False
+    block_outcome = None
     page = None
 
     # 보드 1개, 신규 유저 보강 1명, 차단 대상 1명을 처리할 때마다 이 같은 파일을 계속
@@ -2036,6 +2090,18 @@ def main():
                 context.close()
 
     shutdown_gcp_executor()
+
+    if args.unattended:
+        webhook_url = get_slack_webhook_url()
+        if webhook_url:
+            send_slack_message(
+                webhook_url,
+                build_slack_summary(
+                    project_key, succeeded, all_rows, skipped_boards, block_outcome, dc_mode, error_message,
+                ),
+            )
+        else:
+            print("    [안내] SLACK_WEBHOOK_URL 미설정 — 슬랙 알림 생략.")
 
     if not succeeded:
         sys.exit(1)
