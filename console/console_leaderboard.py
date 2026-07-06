@@ -1276,6 +1276,7 @@ def select_block_candidates(all_rows, max_total_payment: int, dc_mode: bool = Fa
                     "uuid": uuid_value,
                     "nickname": row.get("nickname", ""),
                     "recent_purchase_count": count,
+                    "create_account_date": row.get("create_account_date", ""),
                 }
             )
             continue
@@ -1291,6 +1292,9 @@ def select_block_candidates(all_rows, max_total_payment: int, dc_mode: bool = Fa
                 "uuid": uuid_value,
                 "nickname": row.get("nickname", ""),
                 "total_payment_sum": total,
+                "create_account_date": row.get("create_account_date", ""),
+                "recent_payment_sum": row.get("recent_payment_sum"),
+                "payitem_item_value_sum": row.get("payitem_item_value_sum"),
             }
         )
     return candidates
@@ -1824,6 +1828,17 @@ def _slack_block_status(uuid_value: str, executed: bool, results: list) -> str:
     return "결과 확인 안됨"
 
 
+def _format_block_detail(candidate: dict, dc_mode: bool) -> str:
+    """차단 대상 슬랙 표기용 상세 — 가입일 + (dc 이외는 결제 내역 분해)."""
+    parts = [f"가입일 {candidate.get('create_account_date') or '확인불가'}"]
+    if not dc_mode:
+        recent = candidate.get("recent_payment_sum")
+        payitem = candidate.get("payitem_item_value_sum")
+        if isinstance(recent, int) and isinstance(payitem, int):
+            parts.append(f"영수증검증 {recent:,}원 + 지급내역 {payitem:,}원")
+    return ", ".join(parts)
+
+
 def build_slack_summary(
     project_key: str,
     succeeded: bool,
@@ -1843,8 +1858,9 @@ def build_slack_summary(
         lines.append(f"오류: {error_message}")
         return "\n".join(lines)
 
-    board_count = len(set(row["leaderboard"] for row in all_rows))
-    lines.append(f"조회: 리더보드 {board_count}개, 총 {len(all_rows)}행")
+    board_names = sorted({row["leaderboard"] for row in all_rows})
+    lines.append(f"조회한 리더보드 ({len(board_names)}개): {', '.join(board_names) if board_names else '없음'}")
+    lines.append(f"총 {len(all_rows)}행")
     if skipped_boards:
         lines.append(f"스킵된 리더보드: {len(skipped_boards)}건")
 
@@ -1862,7 +1878,10 @@ def build_slack_summary(
     lines.append(f"차단 대상 {len(candidates)}명 ({'실행' if executed else '드라이런(미실행)'}):")
     for c in candidates:
         status = _slack_block_status(c["uuid"], executed, results)
-        lines.append(f"  - {c.get('nickname', '')} ({c['uuid']}) {_format_block_metric(c, dc_mode)} — {status}")
+        lines.append(
+            f"  - {c.get('nickname', '')} ({c['uuid']}) {_format_block_metric(c, dc_mode)} "
+            f"| {_format_block_detail(c, dc_mode)} — {status}"
+        )
 
     return "\n".join(lines)
 
