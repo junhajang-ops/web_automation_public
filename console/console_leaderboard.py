@@ -117,7 +117,7 @@ MAX_RANK = min(
     max(1, int(os.environ.get("LEADERBOARD_MAX_RANK", "30"))),
 )  # 상위 몇 명까지 볼지. {TITLE}_LEADERBOARD_MAX_RANK로 프로젝트별 override 가능(main()에서 재적용)
 LIST_ROWS_PER_PAGE = 100
-DETAIL_ROWS_PER_PAGE = 50
+DETAIL_ROWS_PER_PAGE = 100
 POLL_WAIT_MS = 1_000
 GRID_SCROLL_STEP_PX = 900
 UUID_RE = re.compile(
