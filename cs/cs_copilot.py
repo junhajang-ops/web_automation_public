@@ -47,8 +47,8 @@ from cs_parse import parse_ticket  # import-time 부작용 없음, 직접 import
 
 # ── EXTRACT_JS ────────────────────────────────────────────────────────────────
 # cs_field_dump.py 동일 상수. import 시 DUMP_DIR.mkdir() 부작용이 있어 복사 사용.
-from cs_parse import list_known_packages, resolve_brand_package, resolve_brand_gcp_log
-from cs_gcp_logging import build_logging_service, fetch_recent_shop_click_log
+from cs_parse import list_known_packages, resolve_brand_package
+from cs_gcp_logging import build_logging_service
 
 EXTRACT_JS = r"""
 () => {
@@ -526,24 +526,6 @@ def _format_config_error(error_code: str):
     return error_code
 
 
-def _print_shop_click_log(entry, error):
-    print(_SEP)
-    print(" [GCP Logging] 직전 log_shop_click (정상 결제 → 게임 로그 확인)")
-    if error or not entry:
-        print(f"   조회 실패/없음: {error or '결과 없음'}")
-        print(_SEP)
-        return
-    payload = entry.get("jsonPayload", {}) or {}
-    print(f"   상품(shop_click_id) : {payload.get('shop_click_id', '-')}")
-    print(f"   카테고리            : {payload.get('shop_click_category', '-')}")
-    print(f"   가격(click_price)   : {payload.get('shop_click_price', '-')}")
-    print(f"   서버                : {payload.get('_server_code', '-')} / {payload.get('_server_type', '-')}")
-    print(f"   로그 시각           : {entry.get('timestamp', '-')}")
-    print("   --- 원문 jsonPayload ---")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    print(_SEP)
-
-
 class ConsoleJudgeWorker:
     """콘솔 미지급 판정을 별도 worker thread에서 처리한다."""
 
@@ -691,7 +673,7 @@ def _print_payment_error(ticket_id, result, error):
     print(_SEP)
 
 
-def _handle_ticket(page, ticket_id, service, logging_service=None, console_worker=None, console_jobs=None):
+def _handle_ticket(page, ticket_id, service, console_worker=None, console_jobs=None):
     """티켓 상세 처리: 추출 → 파싱 → API 조회 → verdict 출력."""
     print("\n[티켓 감지] 분석 중...")
 
@@ -759,22 +741,6 @@ def _handle_ticket(page, ticket_id, service, logging_service=None, console_worke
     _print_verdict(display_num, parsed, verdict, warnings=warnings or None,
                    custom_fields=custom_fields or None)
 
-    # 정상 결제(환불 아님) + 구글 확인 → 해당 유저의 직전 log_shop_click 로그 조회·출력
-    if (
-        logging_service is not None
-        and verdict.get("channel") == "google"
-        and not verdict.get("is_refunded")
-    ):
-        uuid = parsed.get("uuid")
-        project, log_name = resolve_brand_gcp_log(brand)
-        if not uuid:
-            print(" [GCP Logging] UUID 없음 — log_shop_click 조회 생략")
-        elif not (project and log_name):
-            print(f" [GCP Logging] 브랜드 '{brand}' GCP 프로젝트/로그 규칙 없음 — 조회 생략")
-        else:
-            entry, err = fetch_recent_shop_click_log(logging_service, project, log_name, uuid)
-            _print_shop_click_log(entry, err)
-
     # 영수증(주문) 조회됨 → 콘솔 미지급 판정 작업을 console worker에 비동기 등록
     if verdict.get("channel") == "google":
         if not parsed.get("uuid"):
@@ -821,7 +787,6 @@ def main():
             str(key_path), scopes=SCOPES
         )
         service = build("androidpublisher", "v3", credentials=creds, cache_discovery=False)
-        logging_service = build("logging", "v2", credentials=creds, cache_discovery=False)
         print(f"[인증] OK — {getattr(creds, 'service_account_email', '(확인불가)')}")
     except Exception as e:
         print(f"[오류] Google API 인증 실패: {e}")
@@ -976,7 +941,6 @@ def main():
                             page,
                             tid,
                             service,
-                            logging_service,
                             console_worker=console_worker,
                             console_jobs=console_jobs,
                         )

@@ -247,6 +247,7 @@ def judge_nonpayment(
 
     # 분기A 패턴1: 영수증검증 기록 없음 → 미지급 확정. 상품은 로그 후보로 나열.
     if not receipt.get("has_results"):
+        print(" [미지급 판정] 영수증검증 기록 없음 → 패턴1(미지급 확정) — GCP 로그 후보 조회로 상품 특정")
         product_code, candidates = _resolve_gcp_candidates_result(
             logging_service, brand, uuid_value, product_id, order_create_time, notes
         )
@@ -277,9 +278,12 @@ def judge_nonpayment(
         }
 
     pattern = classify_receipt_row(matched)
+    matched_desc = matched.get(ROW_DESCRIPTION) or "(빈값)"
+    print(f" [미지급 판정] 매칭 행 발견 — description='{matched_desc}' → {pattern}")
 
     # 분기A 패턴2: description = PurchaseCodeNull/빈값 → 미지급 확정. 상품은 로그 후보로 나열.
     if pattern == "pattern2":
+        print(" [미지급 판정] description=PurchaseCodeNull/빈값 → 패턴2(미지급 확정) — GCP 로그 후보 조회로 상품 특정")
         product_code, candidates = _resolve_gcp_candidates_result(
             logging_service, brand, uuid_value, product_id, order_create_time, notes
         )
@@ -295,7 +299,9 @@ def judge_nonpayment(
         }
     # 분기B 패턴3: description 정상 → 상품코드 = description → 로그는 안 보고 곧바로
     # ShopData Count 조회(판정 보류). 분기A와 완전히 분리 — product_id/order_create_time 불필요.
-    product_code = (matched.get(ROW_DESCRIPTION) or "").strip()
+    # classify_receipt_row가 이미 pattern2(빈값/PurchaseCodeNull)를 걸러냈으므로 matched_desc는 실값이다.
+    product_code = matched_desc.strip()
+    print(f" [미지급 판정] description 정상('{product_code}') → 패턴3(로그 미사용) — ShopData Count 조회로 이동")
     shopdata = None
     try:
         shopdata = lookup_count_readonly(
