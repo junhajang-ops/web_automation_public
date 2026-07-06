@@ -8,7 +8,9 @@ Scope:
 - Open the leaderboard page from the side menu
 - Search visible <keyword>_* leaderboards for each configured keyword (project별 env로 관리, 복수 지정 가능)
 - Open each leaderboard from the on-screen list
-- Read every player within rank <= 30 from the detail table (ties included)
+- Read every player within rank <= MAX_RANK from the detail table (ties included;
+  MAX_RANK defaults to 30, configurable via env LEADERBOARD_MAX_RANK up to 100,
+  with a {TITLE}_LEADERBOARD_MAX_RANK per-project override)
 - Enrich new accounts with receipt-verification / payment-history sums
   (--dc: skip payment-history lookup entirely; receipt-verification only counts
   purchased products, no price lookup — 게임B 프로젝트는 가격 등 조회 불가 정책)
@@ -109,7 +111,11 @@ def _parse_bool_env(raw: str) -> bool:
 DEFAULT_OUTPUT = "dumps_console_leaderboard"
 LEADERBOARD_OUT_DIR = PAYMENT_DOCS_DIR / "leaderboard"
 DEFAULT_SEARCH_KEYWORDS = "PvPRank"  # 콤마 구분, 복수 지정 가능. --title/--gametitle 사용 시 {TITLE}_LEADERBOARD_KEYWORDS env로 대체 가능
-MAX_RANK = 30
+LEADERBOARD_MAX_RANK_CAP = 100  # 상세 화면 스크롤 부하 상한 — 이 값을 넘는 env는 잘라낸다
+MAX_RANK = min(
+    LEADERBOARD_MAX_RANK_CAP,
+    max(1, int(os.environ.get("LEADERBOARD_MAX_RANK", "30"))),
+)  # 상위 몇 명까지 볼지. {TITLE}_LEADERBOARD_MAX_RANK로 프로젝트별 override 가능(main()에서 재적용)
 LIST_ROWS_PER_PAGE = 100
 DETAIL_ROWS_PER_PAGE = 50
 POLL_WAIT_MS = 1_000
@@ -1469,7 +1475,7 @@ def extract_top_ranks(page, board_name: str) -> list:
             if rank is None or rank < 1:
                 continue
             if rank > MAX_RANK:
-                saw_beyond_max = True  # 30위 초과가 보임 = 30위 이내는 모두 로드됨
+                saw_beyond_max = True  # MAX_RANK 초과가 보임 = MAX_RANK 이내는 모두 로드됨
                 continue
 
             uuid_value = _read_row_field_text(row, ["uuid", "gamerId"])
@@ -1493,7 +1499,7 @@ def extract_top_ranks(page, board_name: str) -> list:
         else:
             idle_rounds = 0
 
-        # 30위 초과 행을 본 순간 30위 이내는 전부 로드된 것 → 더 스크롤하지 않음
+        # MAX_RANK 초과 행을 본 순간 MAX_RANK 이내는 전부 로드된 것 → 더 스크롤하지 않음
         if saw_beyond_max:
             break
 
@@ -1912,7 +1918,11 @@ def main():
 
     # 프로젝트별 운영 파라미터 override(2026-07-03 분리): {TITLE}_ACCOUNT_NEW_HOURS 등이 있으면
     # 전역 기본값 대신 그 값을 쓴다. args.title은 require_project_name=True라 항상 채워져 있다.
-    global ACCOUNT_NEW_HOURS, ACCOUNT_LOOKUP_LOOKBACK_HOURS, BLOCK_MAX_TOTAL_PAYMENT, BLOCK_MAX_PURCHASE_COUNT, BLOCK_NEW_USERS_ENABLED
+    global ACCOUNT_NEW_HOURS, ACCOUNT_LOOKUP_LOOKBACK_HOURS, BLOCK_MAX_TOTAL_PAYMENT, BLOCK_MAX_PURCHASE_COUNT, BLOCK_NEW_USERS_ENABLED, MAX_RANK
+    MAX_RANK = min(
+        LEADERBOARD_MAX_RANK_CAP,
+        max(1, _resolve_title_int_env(prefix, "LEADERBOARD_MAX_RANK", MAX_RANK)),
+    )
     ACCOUNT_NEW_HOURS = _resolve_title_int_env(prefix, "ACCOUNT_NEW_HOURS", ACCOUNT_NEW_HOURS)
     ACCOUNT_LOOKUP_LOOKBACK_HOURS = max(
         1, _resolve_title_int_env(prefix, "ACCOUNT_LOOKUP_LOOKBACK_HOURS", ACCOUNT_NEW_HOURS)
