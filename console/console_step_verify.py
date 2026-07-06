@@ -563,7 +563,7 @@ def snap_and_check_ui(
             print(_red("  -> See console/ui_fingerprints/ui_change_log.txt"))
             _append_change_log(name, kept_diffs, ignored_diffs)
         else:
-            print(f"  [UI monitor] '{name}' unchanged.")
+            # 변화 없음(unchanged)은 콘솔에 출력하지 않는다 — 변경 감지 시에만 출력.
             if ignored_diffs:
                 print(f"  [UI ignore] {len(ignored_diffs)} whitelisted diffs skipped.")
 
