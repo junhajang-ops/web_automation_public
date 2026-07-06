@@ -5,22 +5,28 @@ console_payment_error.py — 미지급(결제오류) 판정 (설계서 3-B)
 
 전제: Play API에 영수증 존재(결제 발생)는 호출자가 이미 확인(설계서 3-A).
 
-판정 흐름:
-  1. 콘솔 '영수증 검증' 메뉴 조회.
-  2. 분기(영수증검증 description 주축):
-     - 기록 없음            → 패턴1: 미지급. 상품은 GCP log_shop_click으로 특정.
-     - description=PurchaseCodeNull(또는 빈값) → 패턴2: 미지급. 상품은 로그로 특정.
-     - description 정상     → 패턴3: 상품코드=description → ShopData Count 조회·표시
-                               (Count 자동 미지급 판정은 주차/상품유형 복잡성으로 보류).
+판정은 두 분기로 완전히 나뉘며 서로 의존하지 않는다(영수증검증 description 주축):
+  - 분기A(패턴1·2, 미지급 확정): 기록 없음 / description=PurchaseCodeNull(또는 빈값).
+    → 이미 미지급이 확정된 상태이므로 남은 목적은 "무엇을 재지급할지 상품만 특정"하는 것.
+    Play `productId`(=StorePurchaseCode_AOS) → CSV로 Inapp 후보 집합 산출 → 결제 시각
+    기준 이전 300초 이내(env `PAYMENT_ERROR_CLICK_WINDOW_SECONDS`) log_shop_click 중
+    후보에 속하는 것만 필터 → 0/1/N건 그대로 나열(자동으로 1건을 확정하지 않음 — 2건
+    이상이면 사람이 최종 선택).
+  - 분기B(패턴3, 미지급 미확정): description 정상(상품코드 있음).
+    → 상품코드=description 그대로 사용, GCP 로그는 보지 않고 곧바로 ShopData Count
+    조회·표시(Count 자동 미지급 판정은 주차/상품유형 복잡성으로 보류).
 
 코드 체계: 영수증검증 description = ShopData PurchaseCode = 상품표 Inapp_PurchaseCode
-          = shop_click_id (출처별 컬럼명만 다른 같은 값). Play 영수증과 잇는 키만 StorePurchaseCode_AOS.
+          = shop_click_id (출처별 컬럼명만 다른 같은 값). Play 영수증과 잇는 키만 StorePurchaseCode_AOS
+          (1:N — 하나의 AOS 코드에 여러 Inapp이 매핑되는 사례 실측 확인. CSV 역매핑은 후보 집합만 좁힌다).
 
 ★ 읽기 전용: ShopData 편집 모드 진입·Count 변경 등 쓰기 동작 없음. 재지급 실행은 사람 승인 후 별도.
 """
 
 import argparse
+import csv as csv_mod
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -48,6 +54,7 @@ from console_user_search import (
     prepare_console_project,
     select_target_page,
 )
+from console_chart_lookup import PAYMENT_DOCS_DIR
 from console_receipt_verification import run_receipt_verification
 from console_shopdata_lookup import (
     click_shopdata_search_button,
@@ -61,8 +68,8 @@ from console_shopdata_lookup import (
     wait_for_shopdata_result_row,
 )
 from cs_parse import resolve_brand_gcp_log
-from cs_gcp_logging import build_logging_service, fetch_recent_shop_click_log
-from test_config import TEST_TABLE_NAME, TEST_UUID, apply_title_profile
+from cs_gcp_logging import build_logging_service, fetch_shop_click_candidates_in_window
+from test_config import TEST_CHART_NAME, TEST_TABLE_NAME, TEST_UUID, apply_title_profile
 
 DEFAULT_OUTPUT = "dumps_console_payment_error"
 DEFAULT_UUID = TEST_UUID
@@ -70,6 +77,9 @@ DEFAULT_TABLE_NAME = TEST_TABLE_NAME
 DEFAULT_BRAND = "Gametitle_Raid(en)"
 PURCHASE_CODE_NULL = "PurchaseCodeNull"
 RETRY_MAX_RETRIES = get_retry_max_retries()
+# 분기A(패턴1·2) click 매칭 시각 윈도우 — 결제(orders.get createTime) 기준 이전 N초.
+# 분석 근거: click→purchase 전환 최대 287초·99%가 60초 이내 → 300초면 여유있게 충분.
+CLICK_MATCH_WINDOW_SECONDS = max(1, int(os.environ.get("PAYMENT_ERROR_CLICK_WINDOW_SECONDS", "300")))
 # subprocess 호출자(cs co-pilot)가 결과를 회수할 때 쓰는 마커.
 # cs_copilot.py 의 PAYMENT_ERROR_JSON_MARKER 와 반드시 같아야 한다.
 PAYMENT_ERROR_JSON_MARKER = "===PAYMENT_ERROR_JSON==="
@@ -99,21 +109,69 @@ def _select_target_row(rows, order_id):
     return rows[0] if rows else None
 
 
-def resolve_product_via_gcp(logging_service, brand, uuid_value):
-    """패턴1·2 보조: 브랜드 → GCP project/log → 직전 log_shop_click 의 shop_click_id.
+def load_shop_aos_candidates(chart_name=None):
+    """web_docs/ 최신 chart_{chart_name}_*.csv에서 {StorePurchaseCode_AOS: set(Inapp_PurchaseCode)} 매핑 생성.
 
-    반환: (shop_click_id | None, error | None). 읽기 전용.
+    AOS는 1:N(하나의 AOS 코드에 여러 Inapp이 매핑되는 사례 실측 확인)이므로 이 매핑은
+    "후보 집합"일 뿐 그 자체로 상품을 확정하지 않는다. console_post_register.py의
+    load_shop_table_id()와 동일한 "최신 CSV = 파일명 정렬 마지막"규칙을 그대로 따른다.
+    """
+    chart_name = chart_name or TEST_CHART_NAME
+    csvs = sorted(PAYMENT_DOCS_DIR.glob(f"chart_{chart_name}_*.csv"))
+    if not csvs:
+        raise RuntimeError(f"web_docs/ 에 '{chart_name}' CSV 없음 — console_chart_lookup.py 먼저 실행 필요")
+    csv_path = csvs[-1]
+
+    for enc in ("utf-8-sig", "utf-8", "euc-kr"):
+        try:
+            mapping = {}
+            with open(csv_path, encoding=enc, newline="") as f:
+                reader = csv_mod.DictReader(f)
+                for row in reader:
+                    aos = (row.get("StorePurchaseCode_AOS") or "").strip()
+                    inapp = (row.get("Inapp_PurchaseCode") or "").strip()
+                    if not aos or not inapp:
+                        continue
+                    mapping.setdefault(aos, set()).add(inapp)
+            return mapping
+        except UnicodeDecodeError:
+            continue
+    raise RuntimeError(f"CSV 인코딩 판별 실패: {csv_path.name}")
+
+
+def resolve_product_candidates_via_gcp(logging_service, brand, uuid_value, product_id, order_create_time):
+    """분기A(패턴1·2) 상품 특정: AOS(product_id) → CSV 후보(Inapp) → 결제 시각 이전
+    CLICK_MATCH_WINDOW_SECONDS초 이내 log_shop_click 중 후보에 속하는 것만 매칭.
+
+    매칭된 후보를 전부 반환한다(자동으로 1건을 확정하지 않음 — 2건 이상이면 사람이
+    최종 선택). 읽기 전용. 반환: (candidates: list[dict], error: str | None).
     """
     if logging_service is None:
-        return None, "logging_service 없음(--key 미지정)"
+        return [], "logging_service 없음(--key 미지정)"
+    if not product_id:
+        return [], "Play productId(AOS) 없음 — 후보 조회 불가"
+    if not order_create_time:
+        return [], "결제 시각(createTime) 없음 — 후보 조회 불가"
+
     project, log_name = resolve_brand_gcp_log(brand)
     if not (project and log_name):
-        return None, f"브랜드 '{brand}' GCP 프로젝트/로그 규칙 없음(env 확인)"
-    entry, err = fetch_recent_shop_click_log(logging_service, project, log_name, uuid_value)
-    if err or not entry:
-        return None, err or "log_shop_click 로그 없음"
-    payload = entry.get("jsonPayload", {}) or {}
-    return payload.get("shop_click_id"), None
+        return [], f"브랜드 '{brand}' GCP 프로젝트/로그 규칙 없음(env 확인)"
+
+    try:
+        aos_candidates = load_shop_aos_candidates()
+    except Exception as exc:  # noqa: BLE001
+        return [], f"CSV 후보 로드 실패: {exc}"
+
+    inapp_candidates = aos_candidates.get(product_id)
+    if not inapp_candidates:
+        return [], f"CSV에서 AOS '{product_id}'에 대응하는 Inapp 후보 없음"
+
+    entries, err = fetch_shop_click_candidates_in_window(
+        logging_service, project, log_name, uuid_value, order_create_time,
+        window_seconds=CLICK_MATCH_WINDOW_SECONDS,
+    )
+    matched = [e for e in entries if e.get("shop_click_id") in inapp_candidates]
+    return matched, err
 
 
 def lookup_count_readonly(page, uuid_value, table_name, purchase_code, timeout_error):
@@ -142,12 +200,31 @@ def lookup_count_readonly(page, uuid_value, table_name, purchase_code, timeout_e
     }
 
 
+def _resolve_gcp_candidates_result(logging_service, brand, uuid_value, product_id, order_create_time, notes):
+    """분기A(패턴1·2) 공용: 후보 조회 결과를 product_code/product_candidates로 정리.
+
+    후보 0건 → product_code=None. 1건 → 그 shop_click_id로 확정. 2건 이상 →
+    product_code=None, product_candidates에 전부 담아 사람이 최종 선택하게 한다.
+    """
+    candidates, err = resolve_product_candidates_via_gcp(
+        logging_service, brand, uuid_value, product_id, order_create_time
+    )
+    if err:
+        notes.append(f"상품 특정(GCP 로그) 실패/불완전: {err}")
+    if len(candidates) > 1:
+        notes.append(f"후보 {len(candidates)}건 — 자동 확정 안 함, product_candidates 참조해 사람 확인")
+    product_code = candidates[0].get("shop_click_id") if len(candidates) == 1 else None
+    return product_code, candidates
+
+
 def judge_nonpayment(
     page,
     uuid_value,
     brand,
     *,
     order_id=None,
+    product_id=None,
+    order_create_time=None,
     table_name="ShopData",
     logging_service=None,
     start_url=DEFAULT_START_URL,
@@ -156,25 +233,30 @@ def judge_nonpayment(
 ):
     """미지급 판정. (전제) Play 영수증 존재는 호출자가 확인.
 
+    product_id(Play productId=StorePurchaseCode_AOS)·order_create_time(Play createTime)은
+    분기A(패턴1·2)의 GCP 로그 후보 조회에만 쓰인다. 분기B(패턴3)는 description만 쓰므로 불필요.
+
     반환: verdict / receipt / matched_row / product_code / product_source /
-          shopdata{purchase_line_number, purchase_count, count_judgment} | None / notes[]
+          product_candidates(list|None) / shopdata{purchase_line_number, purchase_count,
+          count_judgment} | None / notes[]
     """
     notes = []
     receipt = run_receipt_verification(
         page, uuid_value, "", start_url, project_name, timeout_error
     )
 
-    # 패턴1: 영수증검증 기록 없음 → 미지급. 상품은 로그로 특정.
+    # 분기A 패턴1: 영수증검증 기록 없음 → 미지급 확정. 상품은 로그 후보로 나열.
     if not receipt.get("has_results"):
-        product_code, err = resolve_product_via_gcp(logging_service, brand, uuid_value)
-        if err:
-            notes.append(f"상품 특정(GCP 로그) 실패: {err}")
+        product_code, candidates = _resolve_gcp_candidates_result(
+            logging_service, brand, uuid_value, product_id, order_create_time, notes
+        )
         return {
             "verdict": "pattern1_no_receipt_record",
             "receipt": receipt,
             "matched_row": None,
             "product_code": product_code,
-            "product_source": "gcp_log",
+            "product_source": "gcp_log_candidates",
+            "product_candidates": candidates,
             "shopdata": None,
             "notes": notes,
         }
@@ -189,28 +271,30 @@ def judge_nonpayment(
             "matched_row": None,
             "product_code": None,
             "product_source": None,
+            "product_candidates": None,
             "shopdata": None,
             "notes": notes,
         }
 
     pattern = classify_receipt_row(matched)
 
-    # 패턴2: description = PurchaseCodeNull/빈값 → 미지급. 상품은 로그로 특정.
+    # 분기A 패턴2: description = PurchaseCodeNull/빈값 → 미지급 확정. 상품은 로그 후보로 나열.
     if pattern == "pattern2":
-        product_code, err = resolve_product_via_gcp(logging_service, brand, uuid_value)
-        if err:
-            notes.append(f"상품 특정(GCP 로그) 실패: {err}")
+        product_code, candidates = _resolve_gcp_candidates_result(
+            logging_service, brand, uuid_value, product_id, order_create_time, notes
+        )
         return {
             "verdict": "pattern2_purchase_code_null",
             "receipt": receipt,
             "matched_row": matched,
             "product_code": product_code,
-            "product_source": "gcp_log",
+            "product_source": "gcp_log_candidates",
+            "product_candidates": candidates,
             "shopdata": None,
             "notes": notes,
         }
-
-    # 패턴3: description 정상 → 상품코드 = description → ShopData Count 조회(판정 보류)
+    # 분기B 패턴3: description 정상 → 상품코드 = description → 로그는 안 보고 곧바로
+    # ShopData Count 조회(판정 보류). 분기A와 완전히 분리 — product_id/order_create_time 불필요.
     product_code = (matched.get(ROW_DESCRIPTION) or "").strip()
     shopdata = None
     try:
@@ -226,6 +310,7 @@ def judge_nonpayment(
         "matched_row": matched,
         "product_code": product_code,
         "product_source": "description",
+        "product_candidates": None,
         "shopdata": shopdata,
         "notes": notes,
     }
@@ -244,6 +329,12 @@ def print_result(result):
     receipt = result.get("receipt") or {}
     print(f" 영수증검증 결과 : has_results={receipt.get('has_results')} row_count={receipt.get('row_count')}")
     print(f" 상품코드        : {result.get('product_code') or '(미특정)'} (source={result.get('product_source')})")
+    candidates = result.get("product_candidates")
+    if candidates:
+        print(f" GCP 로그 후보 {len(candidates)}건(자동 미확정 — 사람 확인):")
+        for c in candidates:
+            print(f"   - {c.get('shop_click_id', '?')} @ {c.get('update_date', '?')} "
+                  f"(price={c.get('shop_click_price', '?')}, category={c.get('shop_click_category', '?')})")
     shopdata = result.get("shopdata")
     if shopdata:
         print(f" ShopData Count  : line={shopdata.get('purchase_line_number')} "
@@ -263,6 +354,7 @@ def emit_json_result(result, succeeded, error_message):
         "verdict": (result or {}).get("verdict"),
         "product_code": (result or {}).get("product_code"),
         "product_source": (result or {}).get("product_source"),
+        "product_candidates": (result or {}).get("product_candidates"),
         "shopdata": (result or {}).get("shopdata"),
         "notes": (result or {}).get("notes", []),
         "error": error_message or None,
@@ -277,6 +369,10 @@ def save_artifacts(page, out_dir, uuid_value, succeeded, result=None, error_mess
         lines.append(f"verdict={result.get('verdict')}")
         lines.append(f"product_code={result.get('product_code')}")
         lines.append(f"product_source={result.get('product_source')}")
+        candidates = result.get("product_candidates") or []
+        lines.append(f"product_candidates_count={len(candidates)}")
+        for c in candidates:
+            lines.append(f"product_candidate={c.get('shop_click_id')}@{c.get('update_date')}")
         shopdata = result.get("shopdata") or {}
         lines.append(f"purchase_line_number={shopdata.get('purchase_line_number')}")
         lines.append(f"purchase_count={shopdata.get('purchase_count')}")
@@ -300,8 +396,12 @@ def parse_args():
     parser.add_argument("--uuid", default=DEFAULT_UUID, help="대상 유저 UUID")
     parser.add_argument("--brand", default=DEFAULT_BRAND, help="cs 브랜드(패키지/GCP 규칙 키)")
     parser.add_argument("--order-id", dest="order_id", default="", help="문의 주문번호(영수증검증 행 매칭용, 선택)")
+    parser.add_argument("--product-id", dest="product_id", default="",
+                         help="Play productId(=StorePurchaseCode_AOS). 분기A(패턴1·2) 후보 조회용, 선택")
+    parser.add_argument("--order-time", dest="order_create_time", default="",
+                         help="Play orders.get createTime(RFC3339). 분기A(패턴1·2) 후보 조회용, 선택")
     parser.add_argument("--table-name", default=DEFAULT_TABLE_NAME, help="ShopData 테이블명")
-    parser.add_argument("--key", default="", help="GCP 서비스계정 JSON 키(패턴1·2 로그 상품특정용, 선택)")
+    parser.add_argument("--key", default="", help="GCP 서비스계정 JSON 키(패턴1·2 로그 후보조회용, 선택)")
     parser.add_argument("--profile", default=DEFAULT_PROFILE)
     parser.add_argument("--out", default=DEFAULT_OUTPUT)
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
@@ -366,6 +466,8 @@ def main():
                     args.uuid,
                     args.brand,
                     order_id=args.order_id or None,
+                    product_id=args.product_id or None,
+                    order_create_time=args.order_create_time or None,
                     table_name=args.table_name,
                     logging_service=logging_service,
                     start_url=args.start_url,

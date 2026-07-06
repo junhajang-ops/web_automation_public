@@ -565,13 +565,18 @@ class ConsoleJudgeWorker:
         self._tasks.put(None)
         self._thread.join(timeout=10)
 
-    def submit(self, ticket_id: str, parsed: dict) -> None:
+    def submit(self, ticket_id: str, parsed: dict, order_result: dict | None = None) -> None:
+        order_result = order_result or {}
+        line_items = order_result.get("lineItems") or []
+        product_id = line_items[0].get("productId") if line_items else None
         self._tasks.put(
             {
                 "ticket_id": ticket_id,
                 "uuid": parsed.get("uuid"),
                 "brand": parsed.get("brand"),
                 "order_id": parsed.get("order_id"),
+                "product_id": product_id,
+                "order_create_time": order_result.get("createTime"),
             }
         )
 
@@ -631,6 +636,8 @@ class ConsoleJudgeWorker:
                             task["uuid"],
                             task["brand"],
                             order_id=task["order_id"] or None,
+                            product_id=task.get("product_id") or None,
+                            order_create_time=task.get("order_create_time") or None,
                             logging_service=logging_service,
                             start_url=CONSOLE_START_URL,
                             project_name=CONSOLE_PROJECT_NAME,
@@ -668,6 +675,12 @@ def _print_payment_error(ticket_id, result, error):
         return
     print(f"   판정       : {result.get('verdict')}")
     print(f"   상품코드   : {result.get('product_code') or '(미특정)'} (source={result.get('product_source')})")
+    candidates = result.get("product_candidates")
+    if candidates:
+        print(f"   GCP 로그 후보 {len(candidates)}건(자동 미확정 — 사람 확인):")
+        for c in candidates:
+            print(f"     - {c.get('shop_click_id', '?')} @ {c.get('update_date', '?')} "
+                  f"(price={c.get('shop_click_price', '?')})")
     sd = result.get("shopdata")
     if sd:
         print(f"   ShopData   : line={sd.get('purchase_line_number')} "
@@ -777,7 +790,7 @@ def _handle_ticket(page, ticket_id, service, logging_service=None, console_worke
                 "brand": parsed.get("brand"),
                 "order_id": parsed.get("order_id"),
             }
-            console_worker.submit(ticket_id, parsed)
+            console_worker.submit(ticket_id, parsed, order_result=order_result)
             print(" [콘솔 미지급 판정] 콘솔 worker에 등록했습니다. 결과는 준비되면 이어서 출력합니다.")
 
 

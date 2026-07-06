@@ -2,6 +2,7 @@
 """cs/console 공용 GCP Logging 읽기 helper."""
 
 import os
+from datetime import datetime, timedelta, timezone
 
 LOGGING_READ_SCOPE = "https://www.googleapis.com/auth/logging.read"
 
@@ -136,3 +137,127 @@ def fetch_recent_shop_click_log(logging_service, project, log_name, uuid):
     if entry is None:
         return None, "해당 유저의 log_shop_click 로그 없음"
     return entry, None
+
+
+def _parse_log_time(value):
+    """시각 필드(update_date 등)를 timezone-aware datetime으로 변환.
+
+    ISO8601 문자열과 epoch(초 또는 밀리초) 숫자 두 형식을 모두 시도한다 — 실제
+    log_shop_click payload의 update_date 필드 포맷이 라이브 로그로 미확인 상태라
+    방어적으로 둘 다 받는다. 실패 시 None.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        v = float(value)
+        if v > 10 ** 12:  # 밀리초 단위로 추정
+            v /= 1000.0
+        try:
+            return datetime.fromtimestamp(v, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    try:
+        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def fetch_shop_click_candidates_in_window(
+    logging_service, project, log_name, uuid, order_create_time,
+    window_seconds=300, max_empty_pages=None,
+):
+    """결제 시각(order_create_time) 기준, 그 이전 window_seconds초 이내 update_date를 가진
+    log_shop_click 로그를 전부 조회한다. 결제 시각 이후 시각은 조회하지 않는다.
+
+    시각 비교는 GCP 엔트리의 timestamp(수집 시각 — 처리 지연으로 결제시각보다 늦게
+    찍힐 수 있음)가 아니라 jsonPayload.update_date(클라이언트 이벤트 발생 시각) 기준으로
+    한다. API 필터는 처리 지연을 감안해 넉넉한 범위로 걸고, 정확한 윈도우 컷은 이 함수
+    안에서 update_date로 다시 확인한다.
+
+    ★ update_date 필드명·포맷은 라이브 로그 1건으로 아직 재확인되지 않았다(현재는
+      ISO8601/epoch 둘 다 시도). 실제 로그를 확인하면 _parse_log_time을 맞게 조정한다.
+
+    여러 후보를 그대로 반환한다(자동으로 1건을 확정하지 않음 — 후보 나열 후 사람 확인).
+    읽기 전용(entries.list). 반환: (candidates: list[dict], error: str | None).
+    candidates 각 원소: {"shop_click_id", "shop_click_category", "shop_click_price",
+                         "update_date", "log_timestamp"}.
+    """
+    if not (project and log_name and uuid):
+        return [], "project/log_name/uuid 부족"
+
+    order_dt = _parse_log_time(order_create_time)
+    if order_dt is None:
+        return [], f"order_create_time 파싱 실패: {order_create_time!r}"
+
+    window_start = order_dt - timedelta(seconds=window_seconds)
+    # API 레벨 필터는 대략적 범위 컷(처리 지연 감안 여유분 포함)이고, 정확한 컷은 아래에서 update_date로 재확인한다.
+    api_start = window_start - timedelta(seconds=window_seconds)
+    api_end = order_dt + timedelta(seconds=window_seconds)
+
+    log_path = f"projects/{project}/logs/{log_name}"
+    filt = (
+        f'logName="{log_path}" '
+        f'AND jsonPayload._user_id="{uuid}" '
+        f'AND jsonPayload.SUB_CATEGORY="log_shop_click" '
+        f'AND timestamp>="{api_start.isoformat()}" '
+        f'AND timestamp<="{api_end.isoformat()}"'
+    )
+
+    if max_empty_pages is None:
+        max_empty_pages = GCP_MAX_EMPTY_PAGES
+
+    body = {
+        "resourceNames": [f"projects/{project}"],
+        "filter": filt,
+        "orderBy": "timestamp desc",
+        "pageSize": 200,
+    }
+
+    try:
+        from googleapiclient.errors import HttpError
+    except ImportError:
+        HttpError = None
+
+    candidates = []
+    empty_run = 0
+    page_token = None
+    while True:
+        if page_token:
+            body["pageToken"] = page_token
+        else:
+            body.pop("pageToken", None)
+
+        try:
+            resp = logging_service.entries().list(body=body).execute()
+        except Exception as exc:  # noqa: BLE001
+            if HttpError is not None and isinstance(exc, HttpError):
+                status = getattr(getattr(exc, "resp", None), "status", "?")
+                return candidates, f"HTTP {status}(조회 중단, 지금까지 수집분 {len(candidates)}건)"
+            return candidates, f"{exc}(조회 중단, 지금까지 수집분 {len(candidates)}건)"
+
+        entries = resp.get("entries", [])
+        if entries:
+            empty_run = 0
+            for entry in entries:
+                payload = entry.get("jsonPayload", {}) or {}
+                update_dt = _parse_log_time(payload.get("update_date"))
+                if update_dt is None or not (window_start <= update_dt <= order_dt):
+                    continue
+                candidates.append({
+                    "shop_click_id": payload.get("shop_click_id"),
+                    "shop_click_category": payload.get("shop_click_category"),
+                    "shop_click_price": payload.get("shop_click_price"),
+                    "update_date": payload.get("update_date"),
+                    "log_timestamp": entry.get("timestamp"),
+                })
+        else:
+            empty_run += 1
+
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            return candidates, None
+        if empty_run >= max_empty_pages:
+            return candidates, (
+                f"empty pages exhausted (>{max_empty_pages}, nextPageToken 잔존) — "
+                f"지금까지 수집분 {len(candidates)}건만 반환"
+            )
