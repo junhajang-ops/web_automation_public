@@ -12,9 +12,12 @@ console_payment_error.py — 미지급(결제오류) 판정 (설계서 3-B)
     기준 이전 300초 이내(env `PAYMENT_ERROR_CLICK_WINDOW_SECONDS`) log_shop_click 중
     후보에 속하는 것만 필터 → 0/1/N건 그대로 나열(자동으로 1건을 확정하지 않음 — 2건
     이상이면 사람이 최종 선택).
-  - 분기B(패턴3, 미지급 미확정): description 정상(상품코드 있음).
-    → 상품코드=description 그대로 사용, GCP 로그는 보지 않고 곧바로 ShopData Count
-    조회·표시(Count 자동 미지급 판정은 주차/상품유형 복잡성으로 보류).
+  - 분기B(패턴3): description 정상(상품코드 있음).
+    → 상품코드=description 그대로 사용, GCP 로그는 보지 않고 곧바로 ShopData Count 조회.
+    - ShopData PurchaseCode 배열에 그 코드 자체가 없음(`PurchaseCodeNotFoundError`) → 구매
+      시도 기록조차 없다는 뜻이라 **미지급 확정**(`pattern3_code_not_found`, 사람 승인 후 재지급).
+    - 코드는 있고 Count 값 판정만 애매함(주차/상품유형 복잡성) → 자동 판정 보류,
+      조회·표시만 하고 사람 확인(`pattern3_count_review`).
 
 코드 체계: 영수증검증 description = ShopData PurchaseCode = 상품표 Inapp_PurchaseCode
           = shop_click_id (출처별 컬럼명만 다른 같은 값). Play 영수증과 잇는 키만 StorePurchaseCode_AOS
@@ -57,6 +60,7 @@ from console_user_search import (
 from console_chart_lookup import PAYMENT_DOCS_DIR
 from console_receipt_verification import run_receipt_verification
 from console_shopdata_lookup import (
+    PurchaseCodeNotFoundError,
     click_shopdata_search_button,
     ensure_table_selected,
     fill_shopdata_uuid_filter,
@@ -307,7 +311,22 @@ def judge_nonpayment(
         shopdata = lookup_count_readonly(
             page, uuid_value, table_name, product_code, timeout_error
         )
-    except Exception as exc:  # noqa: BLE001 — 조회 실패는 기록만 하고 결과 반환
+    except PurchaseCodeNotFoundError as exc:
+        # ShopData PurchaseCode 배열 자체에 해당 코드가 없음 = 구매 시도 기록조차 없음 → 미지급 확정
+        # (Count 값 판정 보류와는 다르다 — 여기는 코드 존재 여부라 주차/상품유형 애매성이 없다).
+        notes.append(f"ShopData PurchaseCode에 해당 코드 자체가 없음 → 미지급 확정: {exc}")
+        print(f" [미지급 판정] ShopData에 '{product_code}' 코드 자체가 없음 → 미지급 확정")
+        return {
+            "verdict": "pattern3_code_not_found",
+            "receipt": receipt,
+            "matched_row": matched,
+            "product_code": product_code,
+            "product_source": "description",
+            "product_candidates": None,
+            "shopdata": None,
+            "notes": notes,
+        }
+    except Exception as exc:  # noqa: BLE001 — 그 외 조회 실패는 기록만 하고 결과 반환
         notes.append(f"ShopData Count 조회 실패: {exc}")
     notes.append("Count 자동 판정 보류(주차/상품유형) — 사람 확인 필요")
     return {

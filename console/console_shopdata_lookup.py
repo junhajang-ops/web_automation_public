@@ -457,6 +457,14 @@ def split_editor_lines(raw_value, column_name):
     return raw_value.splitlines()
 
 
+class PurchaseCodeNotFoundError(RuntimeError):
+    """PurchaseCode 에디터 배열 전체에 해당 코드가 정확히 일치하는 줄이 없을 때.
+
+    RuntimeError를 상속해 기존에 RuntimeError로 잡던 호출부는 그대로 동작하며,
+    호출부가 "구매 시도 기록 자체가 없음"을 구분해서 처리하고 싶을 때만 이 타입으로 잡으면 된다.
+    """
+
+
 def find_exact_match_line_number(lines, purchase_code):
     exact_targets = {
         f"{json.dumps(purchase_code, ensure_ascii=False)},",
@@ -465,7 +473,7 @@ def find_exact_match_line_number(lines, purchase_code):
     for index, line in enumerate(lines, start=1):
         if line.strip() in exact_targets:
             return index
-    raise RuntimeError(
+    raise PurchaseCodeNotFoundError(
         f"PurchaseCode 에디터에서 정확히 일치하는 코드가 없습니다: {purchase_code}"
     )
 
