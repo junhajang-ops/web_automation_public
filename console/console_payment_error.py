@@ -119,13 +119,19 @@ def classify_receipt_row(row: dict) -> str:
 
 
 def _select_target_row(rows, order_id):
-    """문의 주문번호(order_id)와 일치하는 행 우선, 없으면 첫 행."""
-    if order_id:
-        target = order_id.strip()
-        for row in rows:
-            if (row.get(ROW_ORDER_ID) or "").strip() == target:
-                return row
-    return rows[0] if rows else None
+    """문의 주문번호(order_id)와 완전일치하는 행만 반환한다.
+
+    주문번호가 없거나 일치하는 행이 없으면 무엇을 봐야 할지 모른다는 뜻이므로,
+    다른 결제 건일 수 있는 첫 행을 임의로 집어 판정을 이어가지 않고 None을 반환한다
+    (호출부가 verdict="inconclusive"로 사람 확인을 요청한다).
+    """
+    if not order_id:
+        return None
+    target = order_id.strip()
+    for row in rows:
+        if (row.get(ROW_ORDER_ID) or "").strip() == target:
+            return row
+    return None
 
 
 # Purchase_Limit_Type 값 체계(2026-07-07 Excel 확인, chart_Shop_248162):
@@ -444,7 +450,10 @@ def judge_nonpayment(
     rows = receipt.get("rows") or []
     matched = _select_target_row(rows, order_id)
     if matched is None:
-        notes.append("결과 행은 있으나 대상 행을 고르지 못함")
+        if not order_id:
+            notes.append("결과 행은 있으나 주문번호가 없어 대상 행을 특정하지 못함")
+        else:
+            notes.append(f"결과 행은 있으나 주문번호 '{order_id}'와 일치하는 행이 없음")
         return {
             "verdict": "inconclusive",
             "receipt": receipt,
