@@ -648,7 +648,16 @@ def ensure_uuid_registered(page, uuid_value, timeout_error, nickname=None, nickn
     open_user_page(page)
     submit_uuid_search(page, uuid_value)
     lookup_status, _ = classify_uuid_search_result(page, uuid_value)
-    step_and_verify_ui(page, "user_uuid_validity_check")
+    # 검색 실행 결과가 "있음/없음"에 따라 결과 그리드(ag-Grid)가 렌더/미렌더되며
+    # gridcell·rowgroup·컬럼 헤더 menu role이 나타났다 사라진다. 이는 조회 데이터에
+    # 따라 갈리는 반복적 차이일 뿐 화면 구조(셀렉터) 변경이 아니므로, 이 단계에 한해
+    # 세 role diff만 화이트리스트한다(2026-06-29 fingerprint whitelist note 원칙:
+    # 공용 헬퍼 범위를 약화시키지 않고 해당 단계에서만 알려진 diff를 무시).
+    step_and_verify_ui(
+        page,
+        "user_uuid_validity_check",
+        ignore_patterns=[r"role: (gridcell|menu|rowgroup)$"],
+    )
     if lookup_status == "valid":
         print(f"[유저 탭] UUID 확인됨(존재함): {uuid_value}")
         return uuid_value
