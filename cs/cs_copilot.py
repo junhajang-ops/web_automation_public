@@ -772,7 +772,7 @@ class ConsoleJudgeWorker:
                                 task["uuid"],
                                 task["product_code"],
                                 title=REGRANT_TITLE,
-                                content=f"{REGRANT_TITLE} (티켓 {ticket_id})",
+                                content=REGRANT_TITLE,
                                 start_url=CONSOLE_START_URL,
                                 project_name=CONSOLE_PROJECT_NAME,
                             )
