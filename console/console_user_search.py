@@ -639,7 +639,7 @@ def ensure_uuid_registered(page, uuid_value, timeout_error, nickname=None, nickn
     UUID로 유저 존재를 확정한다. 후보가 없거나 모호하면(0개/2개 이상) InvalidUuidError.
 
     nickname_source(참고용 출처 표기 — "custom_field" | "sender_display_name")는 판정
-    로직에 영향을 주지 않는다. 사용자가 오qupie '보낸 사람' 표시명을 이메일 앞에 실제
+    로직에 영향을 주지 않는다. 사용자가 cs '보낸 사람' 표시명을 이메일 앞에 실제
     닉네임이 오도록 설정해뒀다고 확인(2026-07-08)했으므로, 두 출처 모두 동일하게
     신뢰한다.
 

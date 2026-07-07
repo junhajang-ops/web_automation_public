@@ -385,7 +385,7 @@ def judge_nonpayment(
     판정하고, 그 콘솔 확정 UUID로 유저 존재를 확정해 이후 절차(영수증검증/ShopData/GCP
     로그 조회)를 그 UUID로 진행한다 — 자세한 내용은 console_user_search.ensure_uuid_registered.
     nickname_source는 참고용 출처 표기("custom_field" | "sender_display_name")이며 판정
-    로직·신뢰도에는 영향을 주지 않는다(오qupie '보낸 사람' 표시명이 실제 닉네임이 오도록
+    로직·신뢰도에는 영향을 주지 않는다(cs '보낸 사람' 표시명이 실제 닉네임이 오도록
     설정돼 있음을 사용자가 확인, 2026-07-08).
 
     반환: verdict / receipt / matched_row / product_code / product_source /

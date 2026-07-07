@@ -228,7 +228,7 @@ PROFILE_DIR = BASE_DIR / "pw_profile"
 REFUNDED_STATES = {"REFUNDED", "PARTIALLY_REFUNDED", "PENDING_REFUND", "CANCELED"}
 
 # 브라우저 창 위치/크기 기억(2026-07-09 사용자 요청). start_copilot.ps1이 띄우는
-# 브라우저 2개(오qupie 티켓 창="cs_browser" 키, 콘솔 판정용 창="console_browser"
+# 브라우저 2개(cs 티켓 창="cs_browser" 키, 콘솔 판정용 창="console_browser"
 # 키) 모두 적용한다. 콘솔 판정용 창은 console_leaderboard.py 등이 쓰는
 # pw_profile_console와는 별도 프로필(pw_profile_console_copilot)을 써서, 창 위치가
 # 프로필에 새겨져 console_leaderboard.py로 새어가는 것을 막는다(2026-07-10).
