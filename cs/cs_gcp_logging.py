@@ -6,9 +6,9 @@ from datetime import datetime, timedelta, timezone
 
 LOGGING_READ_SCOPE = "https://www.googleapis.com/auth/logging.read"
 
-# log_shop_click payload의 update_date는 오프셋 표기(Z/±hh:mm) 유무와 무관하게 실제로는
-# KST(UTC+9) 벽시계 시각으로 찍히는 것으로 라이브 로그 확인 완료. Google orders.get의
-# createTime(UTC)과 시각을 비교하려면 update_date를 KST로 재해석해 UTC로 환산해야 한다.
+# log_shop_click payload의 _update_date(필드명 언더스코어 접두사, 2026-07-07 라이브 로그로 확인)는
+# 오프셋 표기(Z/±hh:mm) 유무와 무관하게 실제로는 KST(UTC+9) 벽시계 시각으로 찍힌다.
+# Google orders.get의 createTime(UTC)과 시각을 비교하려면 KST로 재해석해 UTC로 환산해야 한다.
 KST = timezone(timedelta(hours=9))
 
 # Cloud Logging entries.list는 검색을 다 끝내지 못하면 entries=[] 인데도 nextPageToken을
@@ -180,16 +180,19 @@ def fetch_shop_click_candidates_in_window(
     logging_service, project, log_name, uuid, order_create_time,
     window_seconds=300, max_empty_pages=None,
 ):
-    """결제 시각(order_create_time) 기준, 그 이전 window_seconds초 이내 update_date를 가진
+    """결제 시각(order_create_time) 기준, 그 이전 window_seconds초 이내 _update_date를 가진
     log_shop_click 로그를 전부 조회한다. 결제 시각 이후 시각은 조회하지 않는다.
 
     시각 비교는 GCP 엔트리의 timestamp(수집 시각 — 처리 지연으로 결제시각보다 늦게
-    찍힐 수 있음)가 아니라 jsonPayload.update_date(클라이언트 이벤트 발생 시각) 기준으로
+    찍힐 수 있음)가 아니라 jsonPayload._update_date(클라이언트 이벤트 발생 시각) 기준으로
     한다. API 필터는 처리 지연을 감안해 넉넉한 범위로 걸고, 정확한 윈도우 컷은 이 함수
-    안에서 update_date로 다시 확인한다.
+    안에서 _update_date로 다시 확인한다.
 
-    ★ update_date 필드명·포맷은 라이브 로그 1건으로 아직 재확인되지 않았다(현재는
-      ISO8601/epoch 둘 다 시도). 실제 로그를 확인하면 _parse_log_time을 맞게 조정한다.
+    ★ 필드명·포맷 라이브 확인 완료(2026-07-07, 티켓 0000000 원본 로그로 확인): 실제 필드명은
+      `update_date`가 아니라 `_update_date`(다른 필드와 동일하게 언더스코어 접두사)이며,
+      값은 ISO8601 문자열에 `Z`가 붙어 있어도 실제 벽시계는 KST(UTC+9)다(예:
+      `"2026-07-05T19:26:05.096Z"` = 실제 10:26:05.096 UTC). `_parse_log_time(..., assume_kst=True)`로
+      처리한다.
 
     여러 후보를 그대로 반환한다(자동으로 1건을 확정하지 않음 — 후보 나열 후 사람 확인).
     읽기 전용(entries.list). 반환: (candidates: list[dict], error: str | None).
@@ -254,14 +257,14 @@ def fetch_shop_click_candidates_in_window(
             empty_run = 0
             for entry in entries:
                 payload = entry.get("jsonPayload", {}) or {}
-                update_dt = _parse_log_time(payload.get("update_date"), assume_kst=True)
+                update_dt = _parse_log_time(payload.get("_update_date"), assume_kst=True)
                 if update_dt is None or not (window_start <= update_dt <= order_dt):
                     continue
                 candidates.append({
                     "shop_click_id": payload.get("shop_click_id"),
                     "shop_click_category": payload.get("shop_click_category"),
                     "shop_click_price": payload.get("shop_click_price"),
-                    "update_date": payload.get("update_date"),
+                    "update_date": payload.get("_update_date"),
                     "log_timestamp": entry.get("timestamp"),
                 })
         else:
