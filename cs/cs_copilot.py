@@ -227,6 +227,79 @@ if str(CONSOLE_DIR) not in sys.path:
 PROFILE_DIR = BASE_DIR / "pw_profile"
 REFUNDED_STATES = {"REFUNDED", "PARTIALLY_REFUNDED", "PENDING_REFUND", "CANCELED"}
 
+# 브라우저 창 위치/크기 기억(2026-07-09 사용자 요청). PowerShell 콘솔 창도 같은
+# 파일의 "powershell" 키를 읽고 쓴다(start_copilot.ps1). 로컬 화면 배치일 뿐이라
+# .gitignore에 등록(커밋 금지).
+WINDOW_STATE_PATH = BASE_DIR / "window_state.json"
+
+
+def _load_window_state() -> dict:
+    try:
+        return json.loads(WINDOW_STATE_PATH.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+
+
+def _save_window_bounds(key: str, bounds: dict) -> None:
+    """window_state.json에서 key 항목만 갱신한다(다른 키는 그대로 보존)."""
+    state = _load_window_state()
+    state[key] = bounds
+    try:
+        WINDOW_STATE_PATH.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:
+        print(f"[안내] 창 위치/크기 저장 실패({key}): {exc}")
+
+
+def _window_launch_args(key: str) -> list[str]:
+    """저장된 위치/크기가 있으면 그 값으로, 없거나(최초 실행) 최대화 상태로 저장돼
+    있었으면 --start-maximized(기존 기본 동작)로 launch_persistent_context의 args를 만든다.
+    """
+    bounds = _load_window_state().get(key) or {}
+    if bounds.get("maximized"):
+        return ["--start-maximized"]
+    try:
+        left, top = int(bounds["left"]), int(bounds["top"])
+        width, height = int(bounds["width"]), int(bounds["height"])
+    except (KeyError, TypeError, ValueError):
+        return ["--start-maximized"]
+    if width <= 0 or height <= 0:
+        return ["--start-maximized"]
+    return [f"--window-position={left},{top}", f"--window-size={width},{height}"]
+
+
+def _capture_window_bounds(context, key: str) -> None:
+    """CDP(Browser.getWindowBounds)로 현재 브라우저 창 위치/크기를 읽어 저장한다.
+
+    종료 직전(context.close() 전)에 호출한다. 실패해도(창이 이미 닫혔거나 CDP
+    응답이 예상과 다르거나 등) 종료 절차를 막으면 안 되는 부가 기능이라 조용히
+    건너뛴다.
+    """
+    try:
+        pages = context.pages
+        if not pages:
+            return
+        cdp = context.new_cdp_session(pages[0])
+        window_id = cdp.send("Browser.getWindowForTarget")["windowId"]
+        bounds = cdp.send("Browser.getWindowBounds", {"windowId": window_id})["bounds"]
+        if bounds.get("windowState") == "maximized":
+            # 최대화 상태 그대로면 다음 실행 때 --window-position/size가 무의미해지므로
+            # 위치/크기 대신 "최대화였다"는 사실만 남긴다.
+            _save_window_bounds(key, {"maximized": True})
+            return
+        _save_window_bounds(
+            key,
+            {
+                "left": bounds.get("left", 0),
+                "top": bounds.get("top", 0),
+                "width": bounds.get("width", 0),
+                "height": bounds.get("height", 0),
+            },
+        )
+    except Exception:
+        pass
+
 # 결제정보 가격 패턴: 통화기호+숫자 또는 숫자+통화기호 (라벨 무관, 값 셀 직접 감지)
 _PRICE_VAL_RE = re.compile(
     r"[A-Z]{0,3}[$€£¥₩R]\s*[\d,\.]+|[$€£¥₩]\s*[\d,\.]+|[\d,\.]+\s*[$€£¥₩]",
@@ -609,7 +682,7 @@ class ConsoleJudgeWorker:
                 user_data_dir=str(console_profile_dir),
                 headless=False,
                 no_viewport=True,
-                args=["--start-maximized"],
+                args=_window_launch_args("console_browser"),
             )
             try:
                 while not self._stop_event.is_set():
@@ -651,6 +724,7 @@ class ConsoleJudgeWorker:
                             }
                         )
             finally:
+                _capture_window_bounds(context, "console_browser")
                 context.close()
 
 
@@ -848,7 +922,7 @@ def main():
             user_data_dir=str(PROFILE_DIR),
             headless=False,
             no_viewport=True,
-            args=["--start-maximized"],
+            args=_window_launch_args("cs_browser"),
         )
 
         start_page = context.pages[0] if context.pages else context.new_page()
@@ -965,6 +1039,10 @@ def main():
             try:
                 console_worker.stop()
             finally:
+                try:
+                    _capture_window_bounds(context, "cs_browser")
+                except Exception:
+                    pass
                 try:
                     context.close()
                 except Exception:
