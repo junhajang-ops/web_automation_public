@@ -5,6 +5,11 @@ console_payment_error.py — 미지급(결제오류) 판정 (설계서 3-B)
 
 전제: Play API에 영수증 존재(결제 발생)는 호출자가 이미 확인(설계서 3-A).
 
+★ 2026-07-07: run_receipt_verification이 영수증검증 UUID 입력 전 '유저' 탭에서 UUID
+  존재 여부를 먼저 확인한다(ensure_uuid_registered, console_user_search.py). 존재하지
+  않는(오탈자 등) UUID는 InvalidUuidError로 여기서 실패하므로, 아래 패턴1("기록 없음")은
+  항상 "실존하는 UUID인데 기록이 없음"만을 의미한다 — 무효 UUID를 미지급으로 오판하지 않는다.
+
 판정은 두 분기로 완전히 나뉘며 서로 의존하지 않는다(영수증검증 description 주축):
   - 분기A(패턴1·2, 미지급 확정): 기록 없음 / description=PurchaseCodeNull(또는 빈값).
     → 이미 미지급이 확정된 상태이므로 남은 목적은 "무엇을 재지급할지 상품만 특정"하는 것.

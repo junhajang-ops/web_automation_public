@@ -405,6 +405,28 @@ def classify_uuid_search_result(page, uuid_value):
     )
 
 
+class InvalidUuidError(RuntimeError):
+    """'유저' 탭 조회 결과 존재하지 않는(등록되지 않은) UUID로 확인됐을 때."""
+
+
+def ensure_uuid_registered(page, uuid_value, timeout_error):
+    """'유저' 사이드 탭에서 UUID 존재 여부를 먼저 확인한다(상세 팝업은 열지 않음, 읽기 전용).
+
+    영수증 검증 등 다른 화면에 UUID를 입력하기 전에 호출해, 오탈자·존재하지 않는 UUID를
+    "기록 없음"(정상 판정 대상)과 구분해 조기에 걸러낸다. open_user_page/submit_uuid_search/
+    classify_uuid_search_result를 그대로 재사용한다.
+    """
+    print("[유저 탭] UUID 유효성(존재 여부)을 먼저 확인합니다.")
+    open_user_page(page)
+    submit_uuid_search(page, uuid_value)
+    lookup_status, _ = classify_uuid_search_result(page, uuid_value)
+    step_and_verify_ui(page, "user_uuid_validity_check")
+    if lookup_status != "valid":
+        raise InvalidUuidError(f"'유저' 탭에서 존재하지 않는 UUID로 확인됨: {uuid_value}")
+    print(f"[유저 탭] UUID 확인됨(존재함): {uuid_value}")
+    return lookup_status
+
+
 def open_user_detail(page, result_row, uuid_value, timeout_error):
     print("[9] 검색 결과에서 조회 필드를 클릭합니다.")
 

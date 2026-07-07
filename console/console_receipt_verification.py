@@ -4,6 +4,9 @@ Console console 영수증 검증 UUID search smoke test.
 
 Scope:
 - Select the target project (reuses prepare_console_project)
+- Before entering the UUID here, confirm it exists via the '유저' side tab
+  (console_user_search.ensure_uuid_registered) — raises InvalidUuidError if not found,
+  so a typo'd/invalid UUID is never mistaken for a valid "no receipt records" result.
 - Open '영수증 검증' menu from the sidebar
 - Enter UUID into the search field (name='searchValue') and click '검색' button
 - Collect result: row count, total amount, per-row summary
@@ -33,6 +36,7 @@ from console_user_search import (
     DEFAULT_PROJECT_NAME,
     DEFAULT_START_URL,
     click_login_if_needed,
+    ensure_uuid_registered,
     find_exact_text_match,
     hold_open_loop,
     load_playwright,
@@ -502,6 +506,9 @@ def run_receipt_verification(
         start_url=start_url,
         project_name=project_name,
     )
+    # 영수증 검증 UUID 입력 전, '유저' 탭에서 존재하는 UUID인지 먼저 확인한다(오탈자/무효
+    # UUID를 "기록 없음"으로 잘못 취급하지 않기 위함) — 존재하지 않으면 InvalidUuidError.
+    ensure_uuid_registered(page, uuid_value, timeout_error)
     open_receipt_verification_menu(page)
     wait_for_receipt_page_render_stable(page)
     fill_uuid_search(page, uuid_value)
