@@ -609,10 +609,10 @@ def ensure_uuid_registered(page, uuid_value, timeout_error, nickname=None, nickn
     USER_UUID_NICKNAME_MAX_DISTANCE(기본 2) 이내면 동일인의 오탈자로 판정하고, 그 콘솔
     UUID로 유저 존재를 확정한다. 후보가 없거나 모호하면(0개/2개 이상) InvalidUuidError.
 
-    nickname_source가 "sender_display_name"이면 오qupie 티켓 '보낸 사람' 표시명에서
-    가져온 값이라는 뜻이다(닉네임 커스텀 필드가 없는 브랜드의 최후 폴백, 2026-07-08
-    사용자 결정) — 오qupie 계정 표시명일 뿐 인게임 닉네임과 다를 수 있어 신뢰도가
-    낮으므로, 콘솔 로그에 출처를 함께 표시해 사람이 보정 결과를 더 신중히 확인하게 한다.
+    nickname_source(참고용 출처 표기 — "custom_field" | "sender_display_name")는 판정
+    로직에 영향을 주지 않는다. 사용자가 오qupie '보낸 사람' 표시명을 이메일 앞에 실제
+    닉네임이 오도록 설정해뒀다고 확인(2026-07-08)했으므로, 두 출처 모두 동일하게
+    신뢰한다.
 
     반환: 이후 절차에 쓸 확정 UUID(원래 제출값 그대로이거나, 닉네임 대조로 보정된 값).
     """
@@ -630,28 +630,23 @@ def ensure_uuid_registered(page, uuid_value, timeout_error, nickname=None, nickn
             f"'유저' 탭에서 존재하지 않는 UUID로 확인됨(닉네임 정보 없어 대조 불가): {uuid_value}"
         )
 
-    source_note = (
-        "(주의: 오qupie '보낸 사람' 표시명 — 인게임 닉네임과 다를 수 있음) "
-        if nickname_source == "sender_display_name"
-        else ""
-    )
-    print(f"[유저 탭] UUID 미확인 — 닉네임 {source_note}'{nickname}'으로 재검색해 오탈자 여부를 대조합니다.")
+    print(f"[유저 탭] UUID 미확인 — 닉네임 '{nickname}'으로 재검색해 오탈자 여부를 대조합니다.")
     match = resolve_uuid_via_nickname(page, uuid_value, nickname, timeout_error)
     if match["resolved_uuid"]:
         distance = dict(match["close_matches"])[match["resolved_uuid"]]
         print(
-            f"[유저 탭] 닉네임 '{nickname}' {source_note}조회로 콘솔 UUID {match['resolved_uuid']} 확인"
+            f"[유저 탭] 닉네임 '{nickname}' 조회로 콘솔 UUID {match['resolved_uuid']} 확인"
             f"(제출값과 편집거리 {distance}) → 동일인의 오탈자로 판정, 이 UUID로 진행합니다."
         )
         return match["resolved_uuid"]
 
     if not match["candidates"]:
         raise InvalidUuidError(
-            f"'유저' 탭에서 존재하지 않는 UUID로 확인됨, 닉네임 {source_note}'{nickname}'으로도 결과 없음: {uuid_value}"
+            f"'유저' 탭에서 존재하지 않는 UUID로 확인됨, 닉네임 '{nickname}'으로도 결과 없음: {uuid_value}"
         )
 
     raise InvalidUuidError(
-        f"'유저' 탭에서 존재하지 않는 UUID로 확인됨, 닉네임 {source_note}'{nickname}' 조회 결과 "
+        f"'유저' 탭에서 존재하지 않는 UUID로 확인됨, 닉네임 '{nickname}' 조회 결과 "
         f"{len(match['candidates'])}건 중 제출 UUID와 편집거리 {USER_UUID_NICKNAME_MAX_DISTANCE} 이내인 "
         f"후보가 {len(match['close_matches'])}건(0건 또는 모호)이라 자동 판정 보류: {uuid_value}"
     )

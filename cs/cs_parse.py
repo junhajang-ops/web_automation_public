@@ -45,10 +45,11 @@ _ATTACH_EXT = re.compile(
     re.IGNORECASE,
 )
 
-# '보낸 사람' 필드는 보통 "표시명 <email>" 형식(오qupie 고객센터 계정 표시명 —
-# 인게임 닉네임과 다를 수 있음). UUID 오탈자 대조용 닉네임 claim이 티켓 폼에
-# 아예 없는 브랜드(2026-07-08 실측: "게임타이틀" 문의 양식엔 닉네임 항목 자체가
-# 없음)의 최후 폴백으로만 쓴다(2026-07-08 사용자 결정).
+# '보낸 사람' 필드는 "표시명 <email>" 형식. UUID 오탈자 대조용 닉네임 claim이
+# 티켓 폼에 아예 없는 브랜드(2026-07-08 실측: "게임타이틀" 문의 양식엔 닉네임
+# 항목 자체가 없음)의 폴백으로 쓴다 — 사용자가 오qupie 표시명을 이메일 앞에
+# 실제 닉네임이 오도록 별도로 설정해뒀다고 확인(2026-07-08)해 이 표시명은
+# 인게임 닉네임과 동일하게 취급한다(추측성 폴백이 아니라 정확한 값).
 _SENDER_DISPLAY_NAME_RE = re.compile(r"^(.*?)\s*<[^<>]*>\s*$")
 
 _CUSTOM_FIELD_RULES_DEFAULT_ENV = "CS_CUSTOM_FIELD_RULES_DEFAULT"
@@ -426,8 +427,9 @@ def parse_ticket(dump_json: dict) -> dict:
       order_norm_status : "ok" 또는 "digit_count=N" (str | None)
       uuid           : UUID 소문자 정규화 (str | None)
       nickname       : 오탈자 대조 폴백용 닉네임 후보 (str | None) — uuid가 콘솔에서 무효
-                       판정될 때만 쓰임(진실 판정 아님). 닉네임 커스텀 필드가 있으면
-                       그 값, 없으면 '보낸 사람' 표시명(오qupie 계정 표시명, 신뢰도 낮음)
+                       판정될 때만 쓰임. 닉네임 커스텀 필드가 있으면 그 값, 없으면
+                       '보낸 사람' 표시명(이메일 앞부분 — 사용자가 실제 닉네임이 오도록
+                       설정해둔 값이라 정확함, 2026-07-08 확인)
       nickname_source: nickname의 출처 — "custom_field" | "sender_display_name" | None
       brand          : 브랜드 (str | None)
       category       : 문의유형 claim (str | None) — 채널 판정 금지
@@ -502,9 +504,9 @@ def parse_ticket(dump_json: dict) -> dict:
     # 폴백으로만 쓰인다(console_user_search.ensure_uuid_registered 참고). 브랜드별
     # 별칭은 uuid/order_id와 동일하게 CS_*_CUSTOM_FIELD_RULES* env로 설정한다.
     # 커스텀 필드에 닉네임 항목이 없는 브랜드(2026-07-08 실측: "게임타이틀" 문의
-    # 양식엔 닉네임 항목 자체가 없음)는 '보낸 사람' 표시명을 최후 폴백으로 쓴다
-    # (2026-07-08 사용자 결정 — 오qupie 계정 표시명이라 인게임 닉네임과 다를 수
-    # 있어 nickname_source로 출처를 남겨 판정 시 신뢰도를 구분한다).
+    # 양식엔 닉네임 항목 자체가 없음)는 '보낸 사람' 표시명을 쓴다 — 사용자가 이메일
+    # 앞에 실제 닉네임이 오도록 오qupie 표시명을 별도로 설정해뒀다고 확인(2026-07-08)
+    # 했으므로 정확한 값으로 취급한다. nickname_source는 참고용 출처 표기일 뿐이다.
     nickname = None
     nickname_source = None
     if resolved_custom_fields.get("nickname"):
