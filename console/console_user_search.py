@@ -12,6 +12,7 @@ This script is intentionally read-only. It does not click any mutation action.
 """
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -329,8 +330,13 @@ def select_project_by_name(page, project_name):
     return selected_name
 
 
-def ensure_uuid_dropdown(page):
-    target_text = "유저 UUID"
+def ensure_search_column(page, target_text, step_prefix):
+    """'상세 검색' 검색 기준 드롭다운(`div[name='defaultSearchColumn']`)을 target_text로 맞춘다.
+
+    '유저 UUID'/'닉네임' 등 여러 검색 기준에서 공용으로 쓴다. step_prefix로 record_step_dump
+    이름을 기준별로 분리해, 서로 다른 검색 기준 전환이 같은 fingerprint baseline을
+    공유해 오탐을 내지 않게 한다.
+    """
     dropdown = page.locator("div[name='defaultSearchColumn']").first
     dropdown.wait_for(state="visible", timeout=15_000)
 
@@ -339,14 +345,14 @@ def ensure_uuid_dropdown(page):
         return
 
     dropdown.scroll_into_view_if_needed()
-    record_step_dump(page, "user_uuid_dropdown_pre")
+    record_step_dump(page, f"{step_prefix}_dropdown_pre")
     dropdown.click()
 
     option = find_exact_text_match(dropdown.locator(".menu .item"), target_text)
     if option is None:
         raise RuntimeError(f"Could not find exact search-column option: {target_text}")
     option.scroll_into_view_if_needed()
-    record_step_dump(page, "user_uuid_option_pre")
+    record_step_dump(page, f"{step_prefix}_option_pre")
     option.click()
 
     selected_text = dropdown.locator(".text").first.inner_text().strip()
@@ -354,6 +360,14 @@ def ensure_uuid_dropdown(page):
         raise RuntimeError(
             f"Search-column selection did not apply: expected='{target_text}', actual='{selected_text}'"
         )
+
+
+def ensure_uuid_dropdown(page):
+    ensure_search_column(page, "유저 UUID", "user_uuid")
+
+
+def ensure_nickname_search_column(page):
+    ensure_search_column(page, "닉네임", "user_nickname")
 
 
 # 유저 탭 MuiDataGrid의 결과 없음 안내 문구(2026-06-23 dump 실측: dumps_console_search/
@@ -445,22 +459,192 @@ class InvalidUuidError(RuntimeError):
     """'유저' 탭 조회 결과 존재하지 않는(등록되지 않은) UUID로 확인됐을 때."""
 
 
-def ensure_uuid_registered(page, uuid_value, timeout_error):
+def _levenshtein_distance(a: str, b: str) -> int:
+    """편집거리(삽입/삭제/치환 각 비용 1). 외부 의존성 없이 순수 파이썬 DP로 계산."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+
+    previous_row = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, start=1):
+        current_row = [i]
+        for j, char_b in enumerate(b, start=1):
+            insert_cost = current_row[j - 1] + 1
+            delete_cost = previous_row[j] + 1
+            substitute_cost = previous_row[j - 1] + (0 if char_a == char_b else 1)
+            current_row.append(min(insert_cost, delete_cost, substitute_cost))
+        previous_row = current_row
+    return previous_row[-1]
+
+
+# 닉네임 대조로 "동일인의 오탈자"를 자동 판정할 편집거리 상한(2026-07-08 사용자 지시:
+# "2개 이하로 차이나면 동일인의 오탈자"). 운영 중 조정 가능하도록 env로 노출.
+USER_UUID_NICKNAME_MAX_DISTANCE = max(
+    0, int(os.environ.get("USER_UUID_NICKNAME_MAX_DISTANCE", "2"))
+)
+
+
+def collect_user_search_uuid_candidates(page):
+    """검색 결과 그리드의 모든 행에서 UUID 값을 수집한다(닉네임은 유일하지 않을 수 있음)."""
+    candidates = []
+    rows = page.locator("div.MuiDataGrid-row")
+    for index in range(rows.count()):
+        try:
+            cell = rows.nth(index).locator("[data-field='uuid']").first
+            value = (cell.get_attribute("title") or cell.inner_text() or "").strip()
+        except Exception:
+            value = ""
+        if value:
+            candidates.append(value)
+
+    if candidates:
+        return candidates
+
+    legacy_cells = page.locator("td#gamer_id p")
+    for index in range(legacy_cells.count()):
+        try:
+            value = legacy_cells.nth(index).inner_text().strip()
+        except Exception:
+            value = ""
+        if value:
+            candidates.append(value)
+    return candidates
+
+
+def _wait_for_user_search_grid_outcome(page, timeout_ms=15_000, wait_ms=USER_SEARCH_POLL_MS):
+    """검색 결과가 '행 있음'/'결과 없음' 중 어느 쪽으로 안정됐는지 폴링으로 확정한다."""
+    any_row = page.locator("div.MuiDataGrid-row, td#gamer_id p").first
+    empty_notice = page.get_by_text(USER_SEARCH_EMPTY_TEXT, exact=False).first
+
+    def _outcome():
+        try:
+            if any_row.is_visible():
+                return "rows"
+        except Exception:
+            pass
+        try:
+            if empty_notice.is_visible():
+                return "empty"
+        except Exception:
+            pass
+        return None
+
+    return wait_until(page, _outcome, timeout_ms=timeout_ms, wait_ms=wait_ms)
+
+
+def find_uuid_candidates_by_nickname(page, nickname, timeout_error):
+    """'유저' 탭 검색 기준을 '닉네임'으로 바꿔 조회하고, 결과 그리드의 UUID를 모두 모은다.
+
+    닉네임은 유일하지 않을 수 있어 0/1/N건 어느 쪽도 나올 수 있다 — 후보를 좁히는 건
+    호출부(resolve_uuid_via_nickname)의 몫이다. 읽기 전용.
+    """
+    print(f"[유저 탭] 검색 기준을 '닉네임'으로 바꿔 '{nickname}'을(를) 조회합니다.")
+    ensure_nickname_search_column(page)
+
+    search_input = page.locator("input[name='defaultSearchValue']").first
+    search_input.wait_for(state="visible", timeout=15_000)
+    search_input.scroll_into_view_if_needed()
+    record_step_dump(page, "user_nickname_input_pre")
+    search_input.fill("")
+    search_input.fill(nickname)
+    actual_value = search_input.input_value().strip()
+    if actual_value != nickname.strip():
+        raise RuntimeError(
+            f"Nickname input mismatch: expected='{nickname}', actual='{actual_value}'"
+        )
+
+    record_step_dump(page, "user_nickname_search_submit_pre")
+    page.locator("button[type='submit']").first.click()
+    safe_wait_for_load(page, "networkidle", 5_000)
+
+    outcome = _wait_for_user_search_grid_outcome(page)
+    step_and_verify_ui(page, "user_nickname_search_results")
+    if outcome != "rows":
+        return []
+    return collect_user_search_uuid_candidates(page)
+
+
+def resolve_uuid_via_nickname(page, submitted_uuid, nickname, timeout_error,
+                               max_distance=USER_UUID_NICKNAME_MAX_DISTANCE):
+    """닉네임으로 조회한 UUID 후보들과 제출된 UUID를 대조해 오탈자 여부를 판정한다.
+
+    편집거리(Levenshtein) <= max_distance인 후보가 정확히 1개면 동일인의 오탈자로
+    판정한다(2026-07-08 사용자 지시). 후보가 0개거나 2개 이상(모호)이면 잘못된 계정으로
+    확정하는 위험을 피하기 위해 자동 판정하지 않는다.
+    반환: {"resolved_uuid": str|None, "candidates": list[str], "close_matches": list[(uuid, distance)]}
+    """
+    candidates = find_uuid_candidates_by_nickname(page, nickname, timeout_error)
+    normalized_submitted = (submitted_uuid or "").strip().lower()
+
+    distances = {
+        candidate: _levenshtein_distance(normalized_submitted, candidate.strip().lower())
+        for candidate in candidates
+    }
+    close_matches = sorted(
+        ((uuid, dist) for uuid, dist in distances.items() if dist <= max_distance),
+        key=lambda pair: pair[1],
+    )
+
+    resolved_uuid = close_matches[0][0] if len(close_matches) == 1 else None
+
+    return {
+        "resolved_uuid": resolved_uuid,
+        "candidates": candidates,
+        "close_matches": close_matches,
+    }
+
+
+def ensure_uuid_registered(page, uuid_value, timeout_error, nickname=None):
     """'유저' 사이드 탭에서 UUID 존재 여부를 먼저 확인한다(상세 팝업은 열지 않음, 읽기 전용).
 
     영수증 검증 등 다른 화면에 UUID를 입력하기 전에 호출해, 오탈자·존재하지 않는 UUID를
     "기록 없음"(정상 판정 대상)과 구분해 조기에 걸러낸다. open_user_page/submit_uuid_search/
     classify_uuid_search_result를 그대로 재사용한다.
+
+    존재하지 않으면(오탈자 등) nickname이 주어졌을 때 '닉네임'으로 재검색해 후보 UUID들과
+    편집거리를 대조한다(2026-07-08 사용자 지시). 정확히 1개의 후보만 편집거리
+    USER_UUID_NICKNAME_MAX_DISTANCE(기본 2) 이내면 동일인의 오탈자로 판정하고, 그 콘솔
+    UUID로 유저 존재를 확정한다. 후보가 없거나 모호하면(0개/2개 이상) InvalidUuidError.
+
+    반환: 이후 절차에 쓸 확정 UUID(원래 제출값 그대로이거나, 닉네임 대조로 보정된 값).
     """
     print("[유저 탭] UUID 유효성(존재 여부)을 먼저 확인합니다.")
     open_user_page(page)
     submit_uuid_search(page, uuid_value)
     lookup_status, _ = classify_uuid_search_result(page, uuid_value)
     step_and_verify_ui(page, "user_uuid_validity_check")
-    if lookup_status != "valid":
-        raise InvalidUuidError(f"'유저' 탭에서 존재하지 않는 UUID로 확인됨: {uuid_value}")
-    print(f"[유저 탭] UUID 확인됨(존재함): {uuid_value}")
-    return lookup_status
+    if lookup_status == "valid":
+        print(f"[유저 탭] UUID 확인됨(존재함): {uuid_value}")
+        return uuid_value
+
+    if not nickname:
+        raise InvalidUuidError(
+            f"'유저' 탭에서 존재하지 않는 UUID로 확인됨(닉네임 정보 없어 대조 불가): {uuid_value}"
+        )
+
+    print(f"[유저 탭] UUID 미확인 — 닉네임 '{nickname}'으로 재검색해 오탈자 여부를 대조합니다.")
+    match = resolve_uuid_via_nickname(page, uuid_value, nickname, timeout_error)
+    if match["resolved_uuid"]:
+        distance = dict(match["close_matches"])[match["resolved_uuid"]]
+        print(
+            f"[유저 탭] 닉네임 '{nickname}' 조회로 콘솔 UUID {match['resolved_uuid']} 확인"
+            f"(제출값과 편집거리 {distance}) → 동일인의 오탈자로 판정, 이 UUID로 진행합니다."
+        )
+        return match["resolved_uuid"]
+
+    if not match["candidates"]:
+        raise InvalidUuidError(
+            f"'유저' 탭에서 존재하지 않는 UUID로 확인됨, 닉네임 '{nickname}'으로도 결과 없음: {uuid_value}"
+        )
+
+    raise InvalidUuidError(
+        f"'유저' 탭에서 존재하지 않는 UUID로 확인됨, 닉네임 '{nickname}' 조회 결과 "
+        f"{len(match['candidates'])}건 중 제출 UUID와 편집거리 {USER_UUID_NICKNAME_MAX_DISTANCE} 이내인 "
+        f"후보가 {len(match['close_matches'])}건(0건 또는 모호)이라 자동 판정 보류: {uuid_value}"
+    )
 
 
 def open_user_detail(page, result_row, uuid_value, timeout_error):

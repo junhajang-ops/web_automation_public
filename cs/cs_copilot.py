@@ -556,6 +556,7 @@ class ConsoleJudgeWorker:
             {
                 "ticket_id": ticket_id,
                 "uuid": parsed.get("uuid"),
+                "nickname": parsed.get("nickname"),
                 "brand": parsed.get("brand"),
                 "order_id": parsed.get("order_id"),
                 "product_id": product_id,
@@ -621,6 +622,7 @@ class ConsoleJudgeWorker:
                             order_id=task["order_id"] or None,
                             product_id=task.get("product_id") or None,
                             order_create_time=task.get("order_create_time") or None,
+                            nickname=task.get("nickname") or None,
                             logging_service=logging_service,
                             start_url=CONSOLE_START_URL,
                             project_name=CONSOLE_PROJECT_NAME,
@@ -657,6 +659,10 @@ def _print_payment_error(ticket_id, result, error):
         print(_SEP)
         return
     print(f"   판정       : {result.get('verdict')}")
+    submitted_uuid = result.get("submitted_uuid")
+    resolved_uuid = result.get("resolved_uuid")
+    if submitted_uuid and resolved_uuid and submitted_uuid != resolved_uuid:
+        print(f"   UUID       : 제출값={submitted_uuid} → 닉네임 대조로 확정={resolved_uuid}")
     print(f"   상품코드   : {result.get('product_code') or '(미특정)'} (source={result.get('product_source')})")
     candidates = result.get("product_candidates")
     if candidates:

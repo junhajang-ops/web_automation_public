@@ -324,7 +324,7 @@ def _select_custom_field_claims(field_map: dict, brand: str):
     resolved = {}
     selected = {}
 
-    for key in ("uuid", "order_id", "order_time", "order_meta"):
+    for key in ("uuid", "order_id", "order_time", "order_meta", "nickname"):
         matched = _resolve_custom_field(field_map, rules.get(key, []))
         if not matched:
             continue
@@ -409,6 +409,8 @@ def parse_ticket(dump_json: dict) -> dict:
       order_id       : 정규화된 GPA.xxxx-… (str | None)
       order_norm_status : "ok" 또는 "digit_count=N" (str | None)
       uuid           : UUID 소문자 정규화 (str | None)
+      nickname       : 유저 닉네임 claim, 별칭 설정 시에만 (str | None) — uuid가 콘솔에서
+                       무효 판정될 때 오탈자 대조 폴백에만 쓰임(진실 판정 아님)
       brand          : 브랜드 (str | None)
       category       : 문의유형 claim (str | None) — 채널 판정 금지
       ticket_status  : 티켓 상태 (str | None)
@@ -478,6 +480,13 @@ def parse_ticket(dump_json: dict) -> dict:
     if not uuid:
         flags.append("uuid_missing")
 
+    # ── 3-1) 닉네임 추출(선택) — uuid가 콘솔에서 무효 판정될 때 오탈자 대조용
+    # 폴백으로만 쓰인다(console_user_search.ensure_uuid_registered 참고). 브랜드별
+    # 별칭은 uuid/order_id와 동일하게 CS_*_CUSTOM_FIELD_RULES* env로 설정한다.
+    nickname = None
+    if resolved_custom_fields.get("nickname"):
+        nickname = resolved_custom_fields["nickname"]["value"] or None
+
     # ── 4) 최초 문의 메시지 본문 ──────────────────────────────────────────
     body_text = dump_json.get("bodyText", "")
     body_msg = _extract_first_message(body_text)
@@ -490,6 +499,7 @@ def parse_ticket(dump_json: dict) -> dict:
         "order_id": order_id,
         "order_norm_status": order_norm_status,
         "uuid": uuid,
+        "nickname": nickname,
         "brand": brand,
         "app_package": app_package,
         "category": category,

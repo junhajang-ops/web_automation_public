@@ -113,6 +113,14 @@ def parse_args():
         help=f"Target user UUID (default: {DEFAULT_UUID})",
     )
     parser.add_argument(
+        "--nickname",
+        default="",
+        help=(
+            "UUID가 무효로 판정될 때 '닉네임'으로 재검색해 오탈자 여부를 대조하는 데 쓰는 "
+            "티켓 제출 닉네임(선택, 미지정 시 닉네임 대조 없이 바로 InvalidUuidError)"
+        ),
+    )
+    parser.add_argument(
         "--profile",
         default=DEFAULT_PROFILE,
         help=f"Playwright profile directory (default: {DEFAULT_PROFILE})",
@@ -482,6 +490,8 @@ def save_artifacts(page, out_dir, uuid_value, succeeded, result_summary=None, er
     if result_summary:
         summary_lines.append(f"has_results={result_summary.get('has_results', '')}")
         summary_lines.append(f"row_count={result_summary.get('row_count', '')}")
+        summary_lines.append(f"submitted_uuid={result_summary.get('submitted_uuid', '')}")
+        summary_lines.append(f"resolved_uuid={result_summary.get('resolved_uuid', '')}")
         for i, row in enumerate(result_summary.get("rows", []), start=1):
             if isinstance(row, dict):
                 summary_lines.append(f"row_{i}={' | '.join(f'{k}={v}' for k, v in row.items())}")
@@ -507,6 +517,7 @@ def run_receipt_verification(
     start_url,
     project_name,
     timeout_error,
+    nickname=None,
 ):
     prepare_console_project(
         page=page,
@@ -516,13 +527,18 @@ def run_receipt_verification(
     )
     # 영수증 검증 UUID 입력 전, '유저' 탭에서 존재하는 UUID인지 먼저 확인한다(오탈자/무효
     # UUID를 "기록 없음"으로 잘못 취급하지 않기 위함) — 존재하지 않으면 InvalidUuidError.
-    ensure_uuid_registered(page, uuid_value, timeout_error)
+    # nickname이 있으면 ensure_uuid_registered 내부에서 '닉네임' 재검색으로 오탈자 여부까지
+    # 대조하며, 동일인으로 판정되면 콘솔이 확정한 UUID(effective_uuid)를 돌려준다(2026-07-08).
+    effective_uuid = ensure_uuid_registered(page, uuid_value, timeout_error, nickname=nickname)
     open_receipt_verification_menu(page)
     wait_for_receipt_page_render_stable(page)
-    fill_uuid_search(page, uuid_value)
+    fill_uuid_search(page, effective_uuid)
     click_search_button(page)
     step_and_verify_ui(page, "receipt_results", ignore_patterns=RECEIPT_RESULTS_IGNORE_PATTERNS)
-    return collect_result(page, uuid_value, timeout_error, ensure_rows_per_page=True)
+    result = collect_result(page, effective_uuid, timeout_error, ensure_rows_per_page=True)
+    result["submitted_uuid"] = uuid_value
+    result["resolved_uuid"] = effective_uuid
+    return result
 
 
 def main():
@@ -572,6 +588,7 @@ def main():
                     start_url=args.start_url,
                     project_name=args.project_name,
                     timeout_error=timeout_error,
+                    nickname=args.nickname or None,
                 ),
                 recovery=lambda: prepare_console_project(
                     page=page,

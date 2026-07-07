@@ -353,6 +353,7 @@ def judge_nonpayment(
     order_id=None,
     product_id=None,
     order_create_time=None,
+    nickname=None,
     table_name="ShopData",
     logging_service=None,
     start_url=DEFAULT_START_URL,
@@ -364,20 +365,29 @@ def judge_nonpayment(
     product_id(Play productId=StorePurchaseCode_AOS)·order_create_time(Play createTime)은
     분기A(패턴1·2)의 GCP 로그 후보 조회에만 쓰인다. 분기B(패턴3)는 description만 쓰므로 불필요.
 
+    nickname(티켓 제출 닉네임, 선택)은 uuid_value가 '유저' 탭에서 존재하지 않을 때만 쓰인다
+    (2026-07-08 사용자 지시): '닉네임'으로 재검색해 나온 후보와 uuid_value의 편집거리가
+    2 이하(env USER_UUID_NICKNAME_MAX_DISTANCE)인 후보가 정확히 1개면 동일인의 오탈자로
+    판정하고, 그 콘솔 확정 UUID로 유저 존재를 확정해 이후 절차(영수증검증/ShopData/GCP
+    로그 조회)를 그 UUID로 진행한다 — 자세한 내용은 console_user_search.ensure_uuid_registered.
+
     반환: verdict / receipt / matched_row / product_code / product_source /
           product_candidates(list|None) / shopdata{purchase_line_number, purchase_count,
-          purchase_limit_type, purchase_limit_count, count_judgment} | None / notes[]
+          purchase_limit_type, purchase_limit_count, count_judgment} | None / notes[] /
+          submitted_uuid(티켓 제출 UUID 원본) / resolved_uuid(실제 조회에 쓴 확정 UUID —
+          닉네임 대조로 오탈자 보정이 없었으면 submitted_uuid와 동일)
     """
     notes = []
     try:
         receipt = run_receipt_verification(
-            page, uuid_value, "", start_url, project_name, timeout_error
+            page, uuid_value, "", start_url, project_name, timeout_error, nickname=nickname
         )
     except InvalidUuidError as exc:
         # '유저' 탭에서 존재하지 않는다고 이미 확정된 UUID — 오탈자 등 결정론적 문제라
         # 재시도해도 결과가 바뀌지 않는다. main()의 retry_with_recovery(절차 전체 재시도)까지
         # 전파시키지 않고 여기서 바로 정상 반환해 재시도로 시간을 낭비하지 않는다
-        # (2026-07-08 사용자 제보: 무효 UUID 판정 실패까지 시간이 너무 걸림).
+        # (2026-07-08 사용자 제보: 무효 UUID 판정 실패까지 시간이 너무 걸림). 닉네임 대조
+        # 결과(있었다면)도 이미 이 예외 메시지에 포함돼 있다(ensure_uuid_registered 참고).
         print(f" [미지급 판정] '{uuid_value}' — '유저' 탭에서 존재하지 않는 UUID로 확인됨(재시도 없이 즉시 종료)")
         return {
             "verdict": "invalid_uuid",
@@ -388,13 +398,23 @@ def judge_nonpayment(
             "product_candidates": None,
             "shopdata": None,
             "notes": [str(exc)],
+            "submitted_uuid": uuid_value,
+            "resolved_uuid": None,
         }
+
+    effective_uuid = receipt.get("resolved_uuid") or uuid_value
+    if effective_uuid != uuid_value:
+        notes.append(
+            f"닉네임 대조로 UUID 오탈자 확정 — 제출값={uuid_value} → 확정값={effective_uuid} "
+            "(이후 조회는 확정값 기준)"
+        )
+        print(f" [미지급 판정] 닉네임 대조로 UUID 오탈자 확정 → 이후 조회는 '{effective_uuid}' 기준으로 진행")
 
     # 분기A 패턴1: 영수증검증 기록 없음 → 미지급 확정. 상품은 로그 후보로 나열.
     if not receipt.get("has_results"):
         print(" [미지급 판정] 영수증검증 기록 없음 → 패턴1(미지급 확정) — GCP 로그 후보 조회로 상품 특정")
         product_code, candidates = _resolve_gcp_candidates_result(
-            logging_service, brand, uuid_value, product_id, order_create_time, notes
+            logging_service, brand, effective_uuid, product_id, order_create_time, notes
         )
         return {
             "verdict": "pattern1_no_receipt_record",
@@ -405,6 +425,8 @@ def judge_nonpayment(
             "product_candidates": candidates,
             "shopdata": None,
             "notes": notes,
+            "submitted_uuid": uuid_value,
+            "resolved_uuid": effective_uuid,
         }
 
     rows = receipt.get("rows") or []
@@ -420,6 +442,8 @@ def judge_nonpayment(
             "product_candidates": None,
             "shopdata": None,
             "notes": notes,
+            "submitted_uuid": uuid_value,
+            "resolved_uuid": effective_uuid,
         }
 
     pattern = classify_receipt_row(matched)
@@ -430,7 +454,7 @@ def judge_nonpayment(
     if pattern == "pattern2":
         print(" [미지급 판정] description=PurchaseCodeNull/빈값 → 패턴2(미지급 확정) — GCP 로그 후보 조회로 상품 특정")
         product_code, candidates = _resolve_gcp_candidates_result(
-            logging_service, brand, uuid_value, product_id, order_create_time, notes
+            logging_service, brand, effective_uuid, product_id, order_create_time, notes
         )
         return {
             "verdict": "pattern2_purchase_code_null",
@@ -441,6 +465,8 @@ def judge_nonpayment(
             "product_candidates": candidates,
             "shopdata": None,
             "notes": notes,
+            "submitted_uuid": uuid_value,
+            "resolved_uuid": effective_uuid,
         }
     # 분기B 패턴3: description 정상 → 상품코드 = description → 로그는 안 보고 곧바로
     # ShopData Count 조회(판정 보류). 분기A와 완전히 분리 — product_id/order_create_time 불필요.
@@ -450,7 +476,7 @@ def judge_nonpayment(
     shopdata = None
     try:
         shopdata = lookup_count_readonly(
-            page, uuid_value, table_name, product_code, timeout_error
+            page, effective_uuid, table_name, product_code, timeout_error
         )
     except PurchaseCodeNotFoundError as exc:
         # ShopData PurchaseCode 배열 자체에 해당 코드가 없음 = 구매 시도 기록조차 없음 → 미지급 확정
@@ -466,6 +492,8 @@ def judge_nonpayment(
             "product_candidates": None,
             "shopdata": None,
             "notes": notes,
+            "submitted_uuid": uuid_value,
+            "resolved_uuid": effective_uuid,
         }
     except Exception as exc:  # noqa: BLE001 — 그 외 조회 실패는 기록만 하고 결과 반환
         notes.append(f"ShopData Count 조회 실패: {exc}")
@@ -494,6 +522,8 @@ def judge_nonpayment(
         "product_candidates": None,
         "shopdata": shopdata,
         "notes": notes,
+        "submitted_uuid": uuid_value,
+        "resolved_uuid": effective_uuid,
     }
 
 
@@ -507,6 +537,10 @@ def print_result(result):
     print(_SEP)
     print(f" 미지급 판정: {result.get('verdict')}")
     print(_SEP)
+    submitted_uuid = result.get("submitted_uuid")
+    resolved_uuid = result.get("resolved_uuid")
+    if submitted_uuid and resolved_uuid and submitted_uuid != resolved_uuid:
+        print(f" UUID            : 제출값={submitted_uuid} → 닉네임 대조로 확정={resolved_uuid}")
     receipt = result.get("receipt") or {}
     print(f" 영수증검증 결과 : has_results={receipt.get('has_results')} row_count={receipt.get('row_count')}")
     print(f" 상품코드        : {result.get('product_code') or '(미특정)'} (source={result.get('product_source')})")
@@ -536,6 +570,8 @@ def emit_json_result(result, succeeded, error_message):
     payload = {
         "success": succeeded,
         "verdict": (result or {}).get("verdict"),
+        "submitted_uuid": (result or {}).get("submitted_uuid"),
+        "resolved_uuid": (result or {}).get("resolved_uuid"),
         "product_code": (result or {}).get("product_code"),
         "product_source": (result or {}).get("product_source"),
         "product_candidates": (result or {}).get("product_candidates"),
@@ -551,6 +587,8 @@ def save_artifacts(page, out_dir, uuid_value, succeeded, result=None, error_mess
     lines = [f"success={succeeded}", f"uuid={uuid_value}", f"url={page.url}"]
     if result:
         lines.append(f"verdict={result.get('verdict')}")
+        lines.append(f"submitted_uuid={result.get('submitted_uuid')}")
+        lines.append(f"resolved_uuid={result.get('resolved_uuid')}")
         lines.append(f"product_code={result.get('product_code')}")
         lines.append(f"product_source={result.get('product_source')}")
         candidates = result.get("product_candidates") or []
@@ -582,6 +620,14 @@ def parse_args():
     parser.add_argument("--uuid", default=DEFAULT_UUID, help="대상 유저 UUID")
     parser.add_argument("--brand", default=DEFAULT_BRAND, help="cs 브랜드(패키지/GCP 규칙 키)")
     parser.add_argument("--order-id", dest="order_id", default="", help="문의 주문번호(영수증검증 행 매칭용, 선택)")
+    parser.add_argument(
+        "--nickname",
+        default="",
+        help=(
+            "티켓 제출 닉네임. UUID가 '유저' 탭에서 무효로 판정될 때만 '닉네임'으로 재검색해 "
+            "오탈자 여부를 대조하는 데 쓰인다(선택, 미지정 시 대조 없이 바로 실패)"
+        ),
+    )
     parser.add_argument("--product-id", dest="product_id", default="",
                          help="Play productId(=StorePurchaseCode_AOS). 분기A(패턴1·2) 후보 조회용, 선택")
     parser.add_argument("--order-time", dest="order_create_time", default="",
@@ -629,6 +675,7 @@ def main():
     print(" Console 미지급(결제오류) 판정 — 읽기 전용")
     print("=" * 60)
     print(f"대상 UUID  : {args.uuid}")
+    print(f"닉네임     : {args.nickname or '(미지정)'}")
     print(f"브랜드     : {args.brand}")
     print(f"주문번호   : {args.order_id or '(미지정)'}")
 
@@ -654,6 +701,7 @@ def main():
                     order_id=args.order_id or None,
                     product_id=args.product_id or None,
                     order_create_time=args.order_create_time or None,
+                    nickname=args.nickname or None,
                     table_name=args.table_name,
                     logging_service=logging_service,
                     start_url=args.start_url,
