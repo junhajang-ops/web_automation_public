@@ -751,9 +751,31 @@ class ConsoleJudgeWorker:
                 context.close()
 
 
+def _payment_error_sources_label(result):
+    """이번 판정에서 실제로 조회한 데이터 소스를 판정 결과에서 도출해 헤더에 쓴다.
+
+    분기마다 조회 소스가 다르다 — pattern1·2(미지급 확정)는 영수증검증 + GCP 로그
+    후보만 보고 ShopData는 열지 않으며, pattern3만 ShopData Count를 조회한다. 따라서
+    "영수증검증 + ShopData"를 모든 판정에 고정으로 찍으면 사실과 다른 출력이 된다
+    (pattern2인데 ShopData를 본 것처럼 보임). verdict 기준으로 실제 소스를 표기한다.
+    """
+    verdict = (result or {}).get("verdict") or ""
+    if verdict.startswith("pattern3"):
+        return "영수증검증 + ShopData"
+    if verdict in ("pattern1_no_receipt_record", "pattern2_purchase_code_null"):
+        return "영수증검증 + GCP 로그 후보"
+    if verdict == "invalid_uuid":
+        return "유저 탭 UUID 존재 확인"
+    return "영수증검증"
+
+
 def _print_payment_error(ticket_id, result, error):
     print(_SEP)
-    print(f" [콘솔 미지급 판정] 티켓 {ticket_id} — 영수증검증 + ShopData (읽기 전용)")
+    if error or not result:
+        # 판정을 못 끝냈으면(예외/결과 없음) 조회 소스를 특정할 수 없으므로 단정하지 않는다.
+        print(f" [콘솔 미지급 판정] 티켓 {ticket_id} (읽기 전용)")
+    else:
+        print(f" [콘솔 미지급 판정] 티켓 {ticket_id} — {_payment_error_sources_label(result)} (읽기 전용)")
     if error:
         print(f"   판정 실패: {error}")
         print(_SEP)
