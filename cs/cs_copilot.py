@@ -704,11 +704,17 @@ class ConsoleJudgeWorker:
                 # 전체 스택 트레이스를 PowerShell에 그대로 찍는다(데몬 스레드라
                 # main 스레드에 전파되지도 않고 그냥 콘솔만 어지럽힌다). worker
                 # 초기화 실패와 동일하게 결과 큐로만 조용히 알린다.
+                #
+                # str(exc) 자체가 Playwright의 "Browser logs:" 전문(launch 커맨드라인
+                # 전체 + call log)을 포함하는 경우가 있어(TargetClosedError 등),
+                # 그대로 쓰면 예외를 잡아도 화면엔 여전히 긴 로그가 그대로 남는다.
+                # 사람이 볼 판정 실패 메시지는 첫 줄만 남기고, 나머지는 버린다.
+                short_msg = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
                 self._results.put(
                     {
                         "ticket_id": None,
                         "result": None,
-                        "error": f"console 브라우저 실행 실패: {exc}",
+                        "error": f"console 브라우저 실행 실패: {short_msg}",
                     }
                 )
                 return
@@ -744,11 +750,15 @@ class ConsoleJudgeWorker:
                             }
                         )
                     except Exception as exc:  # noqa: BLE001
+                        # Playwright 예외(TargetClosedError 등)는 str(exc)에 launch
+                        # 커맨드라인·call log 전문이 붙어 나올 수 있어 첫 줄만 남긴다
+                        # (위 launch_persistent_context 예외 처리와 동일한 이유).
+                        short_msg = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
                         self._results.put(
                             {
                                 "ticket_id": ticket_id,
                                 "result": None,
-                                "error": str(exc),
+                                "error": short_msg,
                             }
                         )
                     # 판정 1건 끝날 때마다 창 위치를 갱신 저장한다 — 이 worker는 다음
