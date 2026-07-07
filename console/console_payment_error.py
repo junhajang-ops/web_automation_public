@@ -11,12 +11,21 @@ console_payment_error.py — 미지급(결제오류) 판정 (설계서 3-B)
   항상 "실존하는 UUID인데 기록이 없음"만을 의미한다 — 무효 UUID를 미지급으로 오판하지 않는다.
 
 판정은 두 분기로 완전히 나뉘며 서로 의존하지 않는다(영수증검증 description 주축):
-  - 분기A(패턴1·2, 미지급 확정): 기록 없음 / description=PurchaseCodeNull(또는 빈값).
+  - 분기A(패턴1·2, 미지급 확정): 기록 없음 / 이 주문번호만 기록에 없음(2026-07-07 추가,
+    `pattern1_order_not_in_receipt` — 아래 참고) / description=PurchaseCodeNull(또는 빈값).
     → 이미 미지급이 확정된 상태이므로 남은 목적은 "무엇을 재지급할지 상품만 특정"하는 것.
     Play `productId`(=StorePurchaseCode_AOS) → CSV로 Inapp 후보 집합 산출 → 결제 시각
     기준 이전 300초 이내(env `PAYMENT_ERROR_CLICK_WINDOW_SECONDS`) log_shop_click 중
     후보에 속하는 것만 필터 → 0/1/N건 그대로 나열(자동으로 1건을 확정하지 않음 — 2건
     이상이면 사람이 최종 선택).
+    - `pattern1_no_receipt_record`: 그 UUID로 영수증검증을 조회했더니 행이 통째로 0건.
+    - `pattern1_order_not_in_receipt`: 그 UUID는 다른 결제 행이 있지만(has_results=True),
+      이 주문번호(order_id)와 일치하는 행만 없음. UUID 유효성은 이미 위에서 확정했으므로
+      (무효 UUID면 InvalidUuidError로 먼저 걸러짐) "무효 UUID라 조회가 안 됨"과는 다르다 —
+      Google `orders.get`은 이 주문의 결제를 확인했는데 영수증검증에는 이 건만 안 잡힌
+      것이므로, "기록 자체 없음"과 실질적으로 동일한 미지급 확정으로 취급한다
+      (2026-07-07 사용자 지시: 예전엔 이 경우 임의로 다른 행을 골라 판정을 이어가는
+      버그가 있었음 — 지금은 그 행 선택 자체를 하지 않고 곧바로 이 분기로 옴).
   - 분기B(패턴3): description 정상(상품코드 있음).
     → 상품코드=description 그대로 사용, GCP 로그는 보지 않고 곧바로 ShopData Count 조회.
     - ShopData PurchaseCode 배열에 그 코드 자체가 없음(`PurchaseCodeNotFoundError`) → 구매
@@ -451,16 +460,41 @@ def judge_nonpayment(
     matched = _select_target_row(rows, order_id)
     if matched is None:
         if not order_id:
+            # 실전 경로(cs_copilot)는 order_id 없는 티켓을 이 함수 호출 전에 이미
+            # 걸러내므로(order_missing 플래그) 여기 도달하는 건 CLI 단독 테스트 등뿐이다.
+            # 어떤 주문을 찾아야 할지 자체를 모르므로 자동 판정하지 않는다.
             notes.append("결과 행은 있으나 주문번호가 없어 대상 행을 특정하지 못함")
-        else:
-            notes.append(f"결과 행은 있으나 주문번호 '{order_id}'와 일치하는 행이 없음")
+            return {
+                "verdict": "inconclusive",
+                "receipt": receipt,
+                "matched_row": None,
+                "product_code": None,
+                "product_source": None,
+                "product_candidates": None,
+                "shopdata": None,
+                "notes": notes,
+                "submitted_uuid": uuid_value,
+                "resolved_uuid": effective_uuid,
+            }
+        # 분기A 패턴1 변형: Google orders.get으로 결제는 확인됐고 이 UUID의 다른 구매
+        # 내역은 영수증검증에 있지만(has_results=True), 이 주문번호와 일치하는 행만 없음.
+        # UUID 유효성은 이미 위에서 확정했으므로(무효 UUID였다면 InvalidUuidError로 먼저
+        # 걸러짐) "무효 UUID라 조회가 안 된 것"과 구분된다 — 유효한 유저의 이 결제 건만
+        # 영수증검증에 없는 것이므로 "기록 자체 없음"(패턴1)과 실질적으로 동일한 미지급
+        # 확정으로 취급하고, 상품은 동일하게 GCP 로그 후보로 특정한다(2026-07-07 사용자 지시).
+        print(f" [미지급 판정] 주문번호 '{order_id}' 영수증검증에 없음(다른 구매 내역은 있음) "
+              "→ 패턴1과 동일하게 미지급 확정 — GCP 로그 후보 조회로 상품 특정")
+        notes.append(f"주문번호 '{order_id}'와 일치하는 영수증검증 행 없음 → 패턴1과 동일 취급")
+        product_code, candidates = _resolve_gcp_candidates_result(
+            logging_service, brand, effective_uuid, product_id, order_create_time, notes
+        )
         return {
-            "verdict": "inconclusive",
+            "verdict": "pattern1_order_not_in_receipt",
             "receipt": receipt,
             "matched_row": None,
-            "product_code": None,
-            "product_source": None,
-            "product_candidates": None,
+            "product_code": product_code,
+            "product_source": "gcp_log_candidates",
+            "product_candidates": candidates,
             "shopdata": None,
             "notes": notes,
             "submitted_uuid": uuid_value,

@@ -882,6 +882,7 @@ REGRANT_SINGLE_VERDICTS = {
 }
 REGRANT_CANDIDATE_VERDICTS = {
     "pattern1_no_receipt_record",  # 영수증검증 기록 자체 없음 → GCP 로그 후보로 상품 특정
+    "pattern1_order_not_in_receipt",  # 다른 결제 행은 있으나 이 주문번호만 없음(패턴1과 동일 취급) → GCP 로그 후보로 상품 특정
     "pattern2_purchase_code_null",  # description=PurchaseCodeNull/빈값 → GCP 로그 후보로 상품 특정
 }
 REGRANT_COMMAND_RE = re.compile(r"^재지급(?:\s+(\d+))?$")
@@ -930,7 +931,7 @@ def _payment_error_sources_label(result):
     verdict = (result or {}).get("verdict") or ""
     if verdict.startswith("pattern3"):
         return "영수증검증 + ShopData"
-    if verdict in ("pattern1_no_receipt_record", "pattern2_purchase_code_null"):
+    if verdict in ("pattern1_no_receipt_record", "pattern1_order_not_in_receipt", "pattern2_purchase_code_null"):
         return "영수증검증 + GCP 로그 후보"
     if verdict == "invalid_uuid":
         return "유저 탭 UUID 존재 확인"
