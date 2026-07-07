@@ -33,6 +33,7 @@ from console_step_verify import (
 )
 from console_post_register import (
     confirm_item_add_popup,
+    confirm_post_send,
     ensure_receiver_list_rows_per_page,
     fill_item_count,
     fill_title_and_content,
@@ -50,7 +51,6 @@ from test_config import apply_title_profile
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = "dumps_console_post_bulk"
-POST_SEND_WAIT_MS = 5_000
 
 
 # ── CSV 로드 ──────────────────────────────────────────────────────────────────
@@ -155,23 +155,6 @@ def select_bulk_item_in_popup(page, chart_category: str, item_value: str):
     selected_text = item_dropdown.locator(".text, .divider.text").first.inner_text().strip()
     print(f"    선택 결과: {selected_text[:100]}...")
     return selected_text
-
-
-# ── 우편 등록 최종 확인 (5초 대기 후 발송) ────────────────────────────────────
-
-def confirm_post_send(page):
-    """5초 대기 후 우편 등록 다이얼로그의 '확인' 버튼을 클릭해 발송."""
-    print(f"[16] {POST_SEND_WAIT_MS // 1000}초 대기 후 우편 등록 '확인'을 클릭합니다.")
-    page.wait_for_timeout(POST_SEND_WAIT_MS)
-
-    dialog = get_post_register_dialog(page)
-    confirm_btn = dialog.locator("button.ui.medium.positive.button").first
-    confirm_btn.wait_for(state="visible", timeout=10_000)
-    confirm_btn.scroll_into_view_if_needed()
-    record_step_dump(page, "bulk_send_confirm_pre")
-    confirm_btn.click()
-
-    dialog.wait_for(state="hidden", timeout=15_000)
 
 
 # ── 그룹 단위 우편 발송 ───────────────────────────────────────────────────────

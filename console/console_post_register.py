@@ -158,6 +158,16 @@ def open_item_add_popup(page):
 
 def load_shop_table_id(chart_name: str) -> str:
     """web_docs/ 에 저장된 CSV에서 TEST_PURCHASE_CODE → ShopTable_ID 반환."""
+    return load_shop_table_id_for_code(chart_name, TEST_PURCHASE_CODE)
+
+
+def load_shop_table_id_for_code(chart_name: str, purchase_code: str) -> str:
+    """web_docs/ 에 저장된 CSV에서 임의의 purchase_code → ShopTable_ID 반환(재지급용).
+
+    load_shop_table_id()는 TEST_PURCHASE_CODE 고정값만 조회하지만, 재지급은 판정
+    결과(description 또는 GCP log shop_click_id)로 확정된 임의의 purchase_code를
+    받아야 하므로 별도로 분리한다.
+    """
     csvs = sorted(PAYMENT_DOCS_DIR.glob(f"chart_{chart_name}_*.csv"))
     if not csvs:
         raise RuntimeError(
@@ -165,11 +175,11 @@ def load_shop_table_id(chart_name: str) -> str:
         )
     csv_path = csvs[-1]
     print(f"[CSV] {csv_path.name} 에서 ShopTable_ID 조회 중...")
-    result = _read_csv_and_lookup(csv_path, TEST_PURCHASE_CODE)
+    result = _read_csv_and_lookup(csv_path, purchase_code)
     shop_table_id = result.get("shop_table_id", "")
     if not shop_table_id:
         raise RuntimeError(
-            f"CSV에서 purchase_code='{TEST_PURCHASE_CODE}'에 대응하는 ShopTable_ID를 찾지 못했습니다."
+            f"CSV에서 purchase_code='{purchase_code}'에 대응하는 ShopTable_ID를 찾지 못했습니다."
         )
     print(f"    ShopTable_ID: {shop_table_id}")
     return shop_table_id
@@ -341,6 +351,83 @@ def register_receiver_uuid_and_wait(page, uuid: str, timeout_ms: int = 15_000):
     fill_receiver_uuid(page, uuid)
     click_receiver_register(page)
     wait_for_receiver_registered(page, uuid, timeout_ms=timeout_ms)
+
+
+# console_post_bulk.py와 재지급(run_post_register_for_recipient) 공용.
+POST_SEND_WAIT_MS = 5_000
+
+
+def confirm_post_send(page):
+    """N초 대기 후 우편 등록 다이얼로그의 '확인' 버튼을 클릭해 발송(비가역)."""
+    print(f"[16] {POST_SEND_WAIT_MS // 1000}초 대기 후 우편 등록 '확인'을 클릭합니다.")
+    page.wait_for_timeout(POST_SEND_WAIT_MS)
+
+    dialog = get_post_register_dialog(page)
+    confirm_btn = dialog.locator("button.ui.medium.positive.button").first
+    confirm_btn.wait_for(state="visible", timeout=10_000)
+    confirm_btn.scroll_into_view_if_needed()
+    record_step_dump(page, "post_send_confirm_pre")
+    confirm_btn.click()
+
+    dialog.wait_for(state="hidden", timeout=15_000)
+
+
+class PostSendUncertainError(RuntimeError):
+    """confirm_post_send()(비가역 발송 확인 클릭) 이후 발생한 예외를 감싼다.
+
+    이 시점 이후 예외는 실제로 발송이 됐는지 안 됐는지 화면 기준으로 확정할 수
+    없으므로, 호출부가 "실패"(발송 전 중단, 재시도 가능)와 구분해 "불확실"(재시도
+    금지, 사람 확인 필요)로 처리하게 한다(AGENTS.md 원칙 11).
+    """
+
+
+def run_post_register_for_recipient(
+    page,
+    uuid_value: str,
+    product_code: str,
+    title: str,
+    content: str,
+    chart_name: str = "",
+    explicit_project_base: str = "",
+    start_url: str = DEFAULT_START_URL,
+    project_name: str = DEFAULT_PROJECT_NAME,
+):
+    """확정된 product_code(Inapp_PurchaseCode) 1건을 UUID 1명에게 우편으로 재지급.
+
+    호출부가 이미 사람 승인(터미널 '재지급' 입력)을 받은 뒤에만 불러야 한다 — 이
+    함수는 최종 발송 확인(confirm_post_send)까지 수행하는 비가역 동작이다.
+    실패 지점이 confirm_post_send() 이전이면 일반 예외(아무것도 발송되지 않음),
+    이후면 PostSendUncertainError로 감싸 반환한다.
+
+    반환: {"shop_table_id", "chart_name"}
+    """
+    chart_name = chart_name or TEST_CHART_NAME
+    prepare_console_project(
+        page=page,
+        explicit_project_base=explicit_project_base,
+        start_url=start_url,
+        project_name=project_name,
+    )
+    shop_table_id = load_shop_table_id_for_code(chart_name, product_code)
+
+    open_post_page(page)
+    open_post_register_popup(page)
+    select_expiry_7days(page)
+    fill_title_and_content(page, title, content)
+    open_item_add_popup(page)
+    select_chart_in_item_popup(page, chart_name)
+    select_item_in_popup(page, shop_table_id)
+    fill_item_count(page, count=1)
+    confirm_item_add_popup(page)
+    register_receiver_uuid_and_wait(page, uuid_value)
+
+    try:
+        confirm_post_send(page)
+    except Exception as exc:  # noqa: BLE001
+        raise PostSendUncertainError(str(exc)) from exc
+
+    step_and_verify_ui(page, "post_regrant_sent")
+    return {"shop_table_id": shop_table_id, "chart_name": chart_name}
 
 
 def run_post_register(page, chart_name, explicit_project_base, start_url, project_name):

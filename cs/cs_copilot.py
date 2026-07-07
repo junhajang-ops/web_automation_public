@@ -646,6 +646,7 @@ class ConsoleJudgeWorker:
         product_id = line_items[0].get("productId") if line_items else None
         self._tasks.put(
             {
+                "task_type": "judge",
                 "ticket_id": ticket_id,
                 "uuid": parsed.get("uuid"),
                 "nickname": parsed.get("nickname"),
@@ -654,6 +655,17 @@ class ConsoleJudgeWorker:
                 "order_id": parsed.get("order_id"),
                 "product_id": product_id,
                 "order_create_time": order_result.get("createTime"),
+            }
+        )
+
+    def submit_regrant(self, ticket_id: str, uuid_value: str, product_code: str) -> None:
+        """사람이 터미널에 '재지급'을 입력해 승인한 뒤에만 호출한다(비가역 우편 발송)."""
+        self._tasks.put(
+            {
+                "task_type": "regrant",
+                "ticket_id": ticket_id,
+                "uuid": uuid_value,
+                "product_code": product_code,
             }
         )
 
@@ -672,6 +684,10 @@ class ConsoleJudgeWorker:
             from playwright.sync_api import sync_playwright as console_sync_playwright
 
             from console_payment_error import judge_nonpayment
+            from console_post_register import (
+                PostSendUncertainError,
+                run_post_register_for_recipient,
+            )
             from console_step_verify import init_dump_dir
             from console_user_search import (
                 DEFAULT_PROJECT_NAME as CONSOLE_PROJECT_NAME,
@@ -745,6 +761,61 @@ class ConsoleJudgeWorker:
                         break
 
                     ticket_id = task["ticket_id"]
+                    task_type = task.get("task_type", "judge")
+
+                    if task_type == "regrant":
+                        try:
+                            page = context.pages[0] if context.pages else context.new_page()
+                            page = select_console_target_page(context, page)
+                            summary = run_post_register_for_recipient(
+                                page,
+                                task["uuid"],
+                                task["product_code"],
+                                title=REGRANT_TITLE,
+                                content=f"{REGRANT_TITLE} (티켓 {ticket_id})",
+                                start_url=CONSOLE_START_URL,
+                                project_name=CONSOLE_PROJECT_NAME,
+                            )
+                            self._results.put({
+                                "task_type": "regrant",
+                                "ticket_id": ticket_id,
+                                "result": {
+                                    "status": "sent",
+                                    "uuid": task["uuid"],
+                                    "product_code": task["product_code"],
+                                    **summary,
+                                },
+                                "error": None,
+                            })
+                        except PostSendUncertainError as exc:
+                            # 발송 확인 클릭 이후 예외 — 실제 발송 여부 불명. 재시도 절대 금지
+                            # (AGENTS.md 원칙 11), 사람이 콘솔 우편 목록에서 직접 확인해야 한다.
+                            self._results.put({
+                                "task_type": "regrant",
+                                "ticket_id": ticket_id,
+                                "result": {
+                                    "status": "uncertain",
+                                    "uuid": task["uuid"],
+                                    "product_code": task["product_code"],
+                                },
+                                "error": str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__,
+                            })
+                        except Exception as exc:  # noqa: BLE001
+                            # 발송 확인 클릭 이전 실패 — 아무것도 발송되지 않았다.
+                            short_msg = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+                            self._results.put({
+                                "task_type": "regrant",
+                                "ticket_id": ticket_id,
+                                "result": {
+                                    "status": "failed",
+                                    "uuid": task["uuid"],
+                                    "product_code": task["product_code"],
+                                },
+                                "error": short_msg,
+                            })
+                        _capture_window_bounds(context, "console_browser")
+                        continue
+
                     try:
                         page = context.pages[0] if context.pages else context.new_page()
                         page = select_console_target_page(context, page)
@@ -764,6 +835,7 @@ class ConsoleJudgeWorker:
                         )
                         self._results.put(
                             {
+                                "task_type": "judge",
                                 "ticket_id": ticket_id,
                                 "result": result,
                                 "error": None,
@@ -776,6 +848,7 @@ class ConsoleJudgeWorker:
                         short_msg = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
                         self._results.put(
                             {
+                                "task_type": "judge",
                                 "ticket_id": ticket_id,
                                 "result": None,
                                 "error": short_msg,
@@ -793,6 +866,57 @@ class ConsoleJudgeWorker:
                 # 위험이 없어(_capture_window_bounds 상단 주석 참고) 그대로 직접 호출한다.
                 _capture_window_bounds(context, "console_browser")
                 context.close()
+
+
+# ── 재지급(우편 발송) ────────────────────────────────────────────────────────
+# 사람이 이미 확정한 미지급 판정에 한해, 터미널에 '재지급'(단일 확정 상품) 또는
+# '재지급 N'(GCP 후보 여러 건 중 N번)을 입력하면 우편으로 재지급한다.
+# 대상 verdict는 두 그룹으로 나뉜다:
+#  - SINGLE: product_code가 이미 하나로 확정됨 → '재지급'만으로 충분.
+#  - CANDIDATE: GCP 로그 후보로 상품을 특정하는 분기(pattern1/2) → 후보가 정확히
+#    1건이면 SINGLE과 동일하게 product_code가 이미 확정돼 있고, 2건 이상이면
+#    번호 지정이 필요하다.
+REGRANT_SINGLE_VERDICTS = {
+    "pattern3_count_confirmed_missing",  # ShopData Count 기준 미지급 확정 (None/Onetime 한정)
+    "pattern3_code_not_found",  # ShopData PurchaseCode 자체가 없음 → 구매 시도 기록조차 없어 미지급 확정
+}
+REGRANT_CANDIDATE_VERDICTS = {
+    "pattern1_no_receipt_record",  # 영수증검증 기록 자체 없음 → GCP 로그 후보로 상품 특정
+    "pattern2_purchase_code_null",  # description=PurchaseCodeNull/빈값 → GCP 로그 후보로 상품 특정
+}
+REGRANT_COMMAND_RE = re.compile(r"^재지급(?:\s+(\d+))?$")
+REGRANT_TITLE = "결제상품지급"
+
+
+def _resolve_regrant_context(ticket_id, result):
+    """판정 결과에서 재지급 가능 여부/대상을 뽑는다. 대상 아니면 None.
+
+    반환: {"ticket_id", "uuid", "product_code"(확정 시) | None,
+           "candidates"(여러 건일 때만) | None}
+    """
+    if not result:
+        return None
+    verdict = result.get("verdict")
+    uuid_value = result.get("resolved_uuid") or result.get("submitted_uuid")
+    if not uuid_value:
+        return None
+
+    if verdict in REGRANT_SINGLE_VERDICTS:
+        product_code = result.get("product_code")
+        if not product_code:
+            return None
+        return {"ticket_id": ticket_id, "uuid": uuid_value, "product_code": product_code, "candidates": None}
+
+    if verdict in REGRANT_CANDIDATE_VERDICTS:
+        product_code = result.get("product_code")
+        candidates = result.get("product_candidates") or []
+        if product_code and len(candidates) == 1:
+            return {"ticket_id": ticket_id, "uuid": uuid_value, "product_code": product_code, "candidates": None}
+        if len(candidates) > 1:
+            return {"ticket_id": ticket_id, "uuid": uuid_value, "product_code": None, "candidates": candidates}
+        return None
+
+    return None
 
 
 def _payment_error_sources_label(result):
@@ -823,11 +947,11 @@ def _print_payment_error(ticket_id, result, error):
     if error:
         print(f"   판정 실패: {error}")
         print(_SEP)
-        return
+        return None
     if not result:
         print("   판정 결과 없음")
         print(_SEP)
-        return
+        return None
     print(f"   판정       : {result.get('verdict')}")
     submitted_uuid = result.get("submitted_uuid")
     resolved_uuid = result.get("resolved_uuid")
@@ -837,8 +961,8 @@ def _print_payment_error(ticket_id, result, error):
     candidates = result.get("product_candidates")
     if candidates:
         print(f"   GCP 로그 후보 {len(candidates)}건(자동 미확정 — 사람 확인):")
-        for c in candidates:
-            print(f"     - {c.get('shop_click_id', '?')} @ {c.get('update_date', '?')} "
+        for i, c in enumerate(candidates, 1):
+            print(f"     {i}) {c.get('shop_click_id', '?')} @ {c.get('update_date', '?')} "
                   f"(price={c.get('shop_click_price', '?')})")
     sd = result.get("shopdata")
     if sd:
@@ -846,7 +970,107 @@ def _print_payment_error(ticket_id, result, error):
               f"count={sd.get('purchase_count')} judgment={sd.get('count_judgment')}")
     for note in result.get("notes", []) or []:
         print(f"   - {note}")
+
+    regrant_ctx = _resolve_regrant_context(ticket_id, result)
+    if regrant_ctx:
+        if regrant_ctx["candidates"]:
+            print(f"   [재지급 가능] 후보 중 번호를 골라 '재지급 N' 입력(예: 재지급 1)")
+        else:
+            print(f"   [재지급 가능] 상품코드={regrant_ctx['product_code']} — 터미널에 '재지급' 입력 시 우편 발송")
     print(_SEP)
+    return regrant_ctx
+
+
+def _print_regrant_result(ticket_id, result, error):
+    result = result or {}
+    status = result.get("status")
+    print(_SEP)
+    print(f" [재지급] 티켓 {ticket_id}")
+    print(f"   UUID       : {result.get('uuid')}")
+    print(f"   상품코드   : {result.get('product_code')}")
+    if status == "sent":
+        print(f"   상태       : 발송 완료 (ShopTable_ID={result.get('shop_table_id')}, chart={result.get('chart_name')})")
+    elif status == "uncertain":
+        print("   상태       : 불확실 — 발송 확인 클릭 이후 오류 발생, 실제 발송 여부 화면 확인 필요")
+        print("   조치       : 콘솔 우편 목록에서 직접 확인하세요. 이 건은 자동 재시도하지 않습니다.")
+        print(f"   오류       : {error}")
+    else:
+        print("   상태       : 실패 (발송 전 단계에서 중단 — 우편이 발송되지 않았습니다)")
+        print(f"   오류       : {error}")
+    print(_SEP)
+
+
+class TerminalCommandReader:
+    """터미널 입력을 별도 daemon thread에서 non-blocking하게 읽어 큐에 쌓는다.
+
+    메인 루프는 Playwright 이벤트 펌핑(wait_for_timeout)으로 바쁘므로, 여기서
+    input()으로 블로킹 대기하는 스레드를 따로 두고 메인 루프는 매 tick마다
+    drain()으로 쌓인 명령만 non-blocking하게 가져간다(ConsoleJudgeWorker의
+    큐 패턴과 동일).
+    """
+
+    def __init__(self):
+        self._queue: queue.Queue = queue.Queue()
+        self._thread = threading.Thread(
+            target=self._run, name="terminal-command-reader", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            try:
+                line = input()
+            except (EOFError, RuntimeError):
+                break
+            line = line.strip()
+            if line:
+                self._queue.put(line)
+
+    def drain(self) -> list[str]:
+        items = []
+        while True:
+            try:
+                items.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        return items
+
+
+def _handle_command(command_text, regrant_state, console_worker):
+    """'재지급'/'재지급 N' 명령 처리. 그 외 명령은 안내만 하고 무시한다."""
+    m = REGRANT_COMMAND_RE.match(command_text.strip())
+    if not m:
+        print(f"[안내] 알 수 없는 명령: '{command_text}' (지원: 재지급, 재지급 N)")
+        return
+
+    ctx = regrant_state.get("last_actionable")
+    if not ctx:
+        print("[재지급] 재지급 가능한 판정 결과가 없습니다.")
+        return
+
+    index_str = m.group(1)
+    index = int(index_str) if index_str else None
+
+    if ctx["candidates"]:
+        if index is None:
+            print(f"[재지급] 후보가 {len(ctx['candidates'])}건입니다 — '재지급 N' 형식으로 번호를 지정하세요(예: 재지급 1).")
+            return
+        if not (1 <= index <= len(ctx["candidates"])):
+            print(f"[재지급] 잘못된 번호입니다: {index} (1~{len(ctx['candidates'])})")
+            return
+        product_code = ctx["candidates"][index - 1].get("shop_click_id")
+        if not product_code:
+            print("[재지급] 선택한 후보에 상품코드(shop_click_id)가 없습니다.")
+            return
+    else:
+        product_code = ctx["product_code"]
+
+    # 1회성 소비 — 같은 결과에 '재지급'을 두 번 입력해도 중복 발송되지 않는다.
+    regrant_state["last_actionable"] = None
+    print(f"[재지급] 티켓 {ctx['ticket_id']} — UUID={ctx['uuid']}, 상품코드={product_code} 발송을 등록합니다.")
+    console_worker.submit_regrant(ctx["ticket_id"], ctx["uuid"], product_code)
 
 
 def _handle_ticket(page, ticket_id, service, console_worker=None, console_jobs=None):
@@ -975,6 +1199,9 @@ def main():
     console_jobs = {}  # ticket_id -> 간단 메타
     console_worker = ConsoleJudgeWorker(key_path)
     console_worker.start()
+    command_reader = TerminalCommandReader()
+    command_reader.start()
+    regrant_state = {"last_actionable": None}  # 재지급 대상 판정 1건(1회성 소비)
 
     def _register_page(page):
         pid = id(page)
@@ -1040,6 +1267,7 @@ def main():
         print(" cs co-pilot 실행 중 (읽기 전용)")
         print("=" * 44)
         print(" cs 티켓 상세 페이지를 열면 자동으로 분석합니다.")
+        print(" 미지급 확정 판정이 뜨면 '재지급' 또는 '재지급 N' 입력 시 우편으로 재지급합니다(비가역, 사람 승인).")
         print(" 종료: Ctrl+C")
         print()
 
@@ -1088,13 +1316,25 @@ def main():
 
                 for console_result in console_worker.drain_results():
                     result_ticket_id = console_result.get("ticket_id")
-                    _print_payment_error(
+                    if console_result.get("task_type") == "regrant":
+                        _print_regrant_result(
+                            result_ticket_id or "(unknown)",
+                            console_result.get("result"),
+                            console_result.get("error"),
+                        )
+                        continue
+                    regrant_ctx = _print_payment_error(
                         result_ticket_id or "(unknown)",
                         console_result.get("result"),
                         console_result.get("error"),
                     )
+                    if regrant_ctx:
+                        regrant_state["last_actionable"] = regrant_ctx
                     if result_ticket_id in console_jobs:
                         console_jobs.pop(result_ticket_id, None)
+
+                for command_text in command_reader.drain():
+                    _handle_command(command_text, regrant_state, console_worker)
 
                 # ── 1) 이벤트 기반 감지 (framenavigated) ─────────────────
                 to_handle = {}
