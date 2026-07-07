@@ -228,8 +228,10 @@ PROFILE_DIR = BASE_DIR / "pw_profile"
 REFUNDED_STATES = {"REFUNDED", "PARTIALLY_REFUNDED", "PENDING_REFUND", "CANCELED"}
 
 # 브라우저 창 위치/크기 기억(2026-07-09 사용자 요청). start_copilot.ps1이 띄우는
-# 오qupie 브라우저("cs_browser" 키)에만 적용한다 — console 판정용 브라우저는
-# console_leaderboard.py 등과 프로필을 공유해 기억 대상에서 제외했다(2026-07-10).
+# 브라우저 2개(오qupie 티켓 창="cs_browser" 키, 콘솔 판정용 창="console_browser"
+# 키) 모두 적용한다. 콘솔 판정용 창은 console_leaderboard.py 등이 쓰는
+# pw_profile_console와는 별도 프로필(pw_profile_console_copilot)을 써서, 창 위치가
+# 프로필에 새겨져 console_leaderboard.py로 새어가는 것을 막는다(2026-07-10).
 # PowerShell 콘솔 창 쪽 기억 기능은 ConPTY 호스팅 환경에서 동작하지 않아 원복됨
 # (`.claude/CHANGELOG.md` 2026-07-09 참고). 로컬 화면 배치일 뿐이라 .gitignore에
 # 등록(커밋 금지).
@@ -672,7 +674,6 @@ class ConsoleJudgeWorker:
             from console_payment_error import judge_nonpayment
             from console_step_verify import init_dump_dir
             from console_user_search import (
-                DEFAULT_PROFILE as CONSOLE_PROFILE_NAME,
                 DEFAULT_PROJECT_NAME as CONSOLE_PROJECT_NAME,
                 DEFAULT_START_URL as CONSOLE_START_URL,
                 select_target_page as select_console_target_page,
@@ -687,7 +688,12 @@ class ConsoleJudgeWorker:
             )
             return
 
-        console_profile_dir = CONSOLE_DIR / CONSOLE_PROFILE_NAME
+        # console_leaderboard.py 등이 쓰는 pw_profile_console와는 별도 프로필을 쓴다
+        # (2026-07-10 사용자 요청). 창 위치/크기 기억("console_browser" 키)이 프로필에
+        # 새겨져 그 값을 console_leaderboard.py로도 새어가게 했던 문제를 프로필 분리로
+        # 막는다. 대가: 이 프로필은 처음엔 로그인 세션이 없어 콘솔 로그인을 다시
+        # 거쳐야 한다(기존 pw_profile_console의 로그인 세션을 재사용하지 않음).
+        console_profile_dir = BASE_DIR / "pw_profile_console_copilot"
         logging_service = build_logging_service(self.key_path) if self.key_path else None
         # record_step_dump/step_and_verify_ui(console_*.py 전반에서 호출)는 dump 디렉터리가
         # 설정돼야 HTML/스크린샷을 남긴다 — 이전엔 미설정이라 이 worker의 실패를 사후에
@@ -700,14 +706,7 @@ class ConsoleJudgeWorker:
                     user_data_dir=str(console_profile_dir),
                     headless=False,
                     no_viewport=True,
-                    # 창 위치/크기 기억은 start_copilot.ps1이 띄우는 오qupie 브라우저
-                    # ("cs_browser" 키)에만 적용한다(2026-07-10 사용자 요청). 이
-                    # console 판정용 브라우저는 console_leaderboard.py 등과 같은
-                    # 프로필(pw_profile_console)을 공유하므로, 여기서 명시적으로
-                    # --window-position/size를 주면 Chromium이 그 값을 프로필에 자체
-                    # 저장해 console_leaderboard.py 실행 시에도 위치가 이어지는 것처럼
-                    # 보이는 부작용이 있었다. 항상 최대화로 고정해 이 부작용을 없앤다.
-                    args=["--start-maximized"],
+                    args=_window_launch_args("console_browser"),
                 )
             except Exception as exc:  # noqa: BLE001
                 # 여기서 잡지 않으면 예외가 스레드 밖으로 나가 Python 기본 핸들러가
@@ -771,7 +770,17 @@ class ConsoleJudgeWorker:
                                 "error": short_msg,
                             }
                         )
+                    # 판정 1건 끝날 때마다 창 위치를 갱신 저장한다 — 이 worker는 다음
+                    # 티켓이 올 때까지 오래(수십 분~) 대기할 수 있어, 활동이 있을 때마다
+                    # 갱신해두면 종료 시점 위치와 크게 어긋나지 않는다. 이 스레드는 파이썬
+                    # SIGINT(Ctrl+C)를 절대 받지 않으므로(신호는 항상 메인 스레드로만
+                    # 전달됨) Playwright 동기 호출이 인터럽트로 깨질 위험이 없어 그대로
+                    # 직접 호출한다(_capture_window_bounds 자체가 실패는 조용히 삼킴).
+                    _capture_window_bounds(context, "console_browser")
             finally:
+                # 위와 같은 이유로 이 스레드는 인터럽트에 의한 Playwright 상태 손상
+                # 위험이 없어(_capture_window_bounds 상단 주석 참고) 그대로 직접 호출한다.
+                _capture_window_bounds(context, "console_browser")
                 context.close()
 
 
