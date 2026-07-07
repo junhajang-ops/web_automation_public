@@ -6,6 +6,11 @@ from datetime import datetime, timedelta, timezone
 
 LOGGING_READ_SCOPE = "https://www.googleapis.com/auth/logging.read"
 
+# log_shop_click payload의 update_date는 오프셋 표기(Z/±hh:mm) 유무와 무관하게 실제로는
+# KST(UTC+9) 벽시계 시각으로 찍히는 것으로 라이브 로그 확인 완료. Google orders.get의
+# createTime(UTC)과 시각을 비교하려면 update_date를 KST로 재해석해 UTC로 환산해야 한다.
+KST = timezone(timedelta(hours=9))
+
 # Cloud Logging entries.list는 검색을 다 끝내지 못하면 entries=[] 인데도 nextPageToken을
 # 돌려주며(공식 문서 명시), 클라이언트가 토큰으로 계속 넘겨야 실제 로그를 만난다.
 # 첫 페이지만 읽고 "로그없음"으로 단정하면 실제 로그가 있는 유저를 false negative로 놓친다
@@ -139,12 +144,17 @@ def fetch_recent_shop_click_log(logging_service, project, log_name, uuid):
     return entry, None
 
 
-def _parse_log_time(value):
+def _parse_log_time(value, assume_kst=False):
     """시각 필드(update_date 등)를 timezone-aware datetime으로 변환.
 
     ISO8601 문자열과 epoch(초 또는 밀리초) 숫자 두 형식을 모두 시도한다 — 실제
     log_shop_click payload의 update_date 필드 포맷이 라이브 로그로 미확인 상태라
     방어적으로 둘 다 받는다. 실패 시 None.
+
+    assume_kst=True면 파싱된 벽시계 숫자를 KST(UTC+9)로 재해석한다 — update_date는
+    문자열에 Z/오프셋이 붙어 있어도(또는 없어도) 실제 벽시계 값은 KST이므로, 원본에
+    있던 tzinfo는 버리고 KST를 강제로 붙인 뒤 이후 비교에서 Python이 UTC로 정확히
+    환산하도록 한다. Google orders.get의 createTime(UTC)에는 쓰지 않는다.
     """
     if value is None or value == "":
         return None
@@ -153,13 +163,17 @@ def _parse_log_time(value):
         if v > 10 ** 12:  # 밀리초 단위로 추정
             v /= 1000.0
         try:
-            return datetime.fromtimestamp(v, tz=timezone.utc)
+            dt = datetime.fromtimestamp(v, tz=timezone.utc)
         except (OverflowError, OSError, ValueError):
             return None
-    try:
-        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if assume_kst:
+        dt = dt.replace(tzinfo=KST)
+    return dt
 
 
 def fetch_shop_click_candidates_in_window(
@@ -240,7 +254,7 @@ def fetch_shop_click_candidates_in_window(
             empty_run = 0
             for entry in entries:
                 payload = entry.get("jsonPayload", {}) or {}
-                update_dt = _parse_log_time(payload.get("update_date"))
+                update_dt = _parse_log_time(payload.get("update_date"), assume_kst=True)
                 if update_dt is None or not (window_start <= update_dt <= order_dt):
                     continue
                 candidates.append({
