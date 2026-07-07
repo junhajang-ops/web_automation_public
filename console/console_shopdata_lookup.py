@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from console_step_verify import (
+    SIDEBAR_BASE_MENU_IGNORE_PATTERNS,
     configure_console_output,
     get_retry_max_retries,
     init_dump_dir,
@@ -123,7 +124,7 @@ def open_game_info_menu(page):
     game_info_link = page.locator("a#baseGameInfo, a[href*='/baseGameInfo']").first
     game_info_link.wait_for(state="visible", timeout=15_000)
     game_info_link.scroll_into_view_if_needed()
-    record_step_dump(page, "gameinfo_nav_pre")
+    record_step_dump(page, "gameinfo_nav_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     game_info_link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
@@ -139,7 +140,7 @@ def open_game_info_data_tab(page):
     ).first
     data_tab.wait_for(state="visible", timeout=15_000)
     data_tab.scroll_into_view_if_needed()
-    record_step_dump(page, "gameinfo_data_tab_pre")
+    record_step_dump(page, "gameinfo_data_tab_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     data_tab.click()
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
@@ -165,7 +166,7 @@ def open_table_dropdown(page):
         expanded = (dropdown.get_attribute("aria-expanded") or "").lower() == "true"
         if not expanded:
             dropdown.scroll_into_view_if_needed()
-            record_step_dump(page, "table_dd_pre")
+            record_step_dump(page, "table_dd_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
             dropdown.click()
 
         search_input = table_field.locator(
@@ -173,7 +174,7 @@ def open_table_dropdown(page):
         ).first
         if wait_for_visible(search_input, 3_000):
             search_input.scroll_into_view_if_needed()
-            record_step_dump(page, "table_dd_search_pre")
+            record_step_dump(page, "table_dd_search_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
             search_input.click()
             return dropdown, search_input
     else:
@@ -186,7 +187,7 @@ def ensure_detail_search_open(page):
 
     title = page.locator(".accordion .title", has_text="상세 검색").first
     title.wait_for(state="visible", timeout=15_000)
-    record_step_dump(page, "detail_search_open_pre")
+    record_step_dump(page, "detail_search_open_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     title.click()
     page.locator("input[name='defaultSearchValue']").first.wait_for(
         state="visible",
@@ -202,7 +203,7 @@ def ensure_table_selected(page, table_name):
         return
 
     dropdown, search_input = open_table_dropdown(page)
-    record_step_dump(page, "table_search_input_pre")
+    record_step_dump(page, "table_search_input_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     search_input.fill("")
     search_input.fill(table_name)
 
@@ -210,7 +211,7 @@ def ensure_table_selected(page, table_name):
     option = dropdown.get_by_role("option", name=table_name, exact=True).first
     option.wait_for(state="visible", timeout=5_000)
     option.scroll_into_view_if_needed()
-    record_step_dump(page, "table_option_pre")
+    record_step_dump(page, "table_option_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     option.click()
 
     def _table_selected():
@@ -232,14 +233,14 @@ def fill_shopdata_uuid_filter(page, uuid_value):
     print(f"[7] UUID 입력: {uuid_value}")
     search_input = page.locator("input[name='defaultSearchValue']").first
     search_input.wait_for(state="visible", timeout=15_000)
-    record_step_dump(page, "shopdata_uuid_input_pre")
+    record_step_dump(page, "shopdata_uuid_input_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     search_input.fill("")
     search_input.fill(uuid_value)
 
 
 def click_shopdata_search_button(page):
     print("[9] 검색 버튼을 클릭합니다.")
-    record_step_dump(page, "shopdata_search_submit_pre")
+    record_step_dump(page, "shopdata_search_submit_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     page.locator("form button[type='submit']").first.click()
     safe_wait_for_load(page, "networkidle", 5_000)
 
@@ -277,7 +278,7 @@ def open_top_shopdata_detail(page, result_row, uuid_value, timeout_error):
     uuid_link = result_row.locator("td#gamer_id p._link_16cvg_110, td#gamer_id p").first
     uuid_link.wait_for(state="visible", timeout=15_000)
     uuid_link.scroll_into_view_if_needed()
-    record_step_dump(page, "detail_link_pre")
+    record_step_dump(page, "detail_link_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     uuid_link.click()
 
     dialog = page.locator("[role='dialog']").first
@@ -303,7 +304,7 @@ def click_detail_edit_button(page, dialog):
     edit_button = dialog.locator("button", has_text="수정").first
     edit_button.wait_for(state="visible", timeout=15_000)
     edit_button.scroll_into_view_if_needed()
-    record_step_dump(page, "edit_btn_pre")
+    record_step_dump(page, "edit_btn_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     edit_button.click()
     dialog.locator("input[name$='.columnName']").first.wait_for(
         state="visible",
@@ -315,7 +316,7 @@ def refresh_detail_popup_with_mouse_scroll(page, dialog):
     print("[11] 상세 팝업 안에서 아래로 내렸다가 다시 올려 로딩을 깨웁니다.")
     content = dialog.locator(".content").first
     content.wait_for(state="visible", timeout=15_000)
-    record_step_dump(page, "detail_content_pre")
+    record_step_dump(page, "detail_content_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
 
     box = content.bounding_box()
     if not box:
@@ -326,7 +327,7 @@ def refresh_detail_popup_with_mouse_scroll(page, dialog):
     page.mouse.move(mouse_x, mouse_y)
 
     for delta in (1_200, 1_200, 1_200, -1_200, -1_200, -1_200):
-        record_step_dump(page, "detail_scroll_pre")
+        record_step_dump(page, "detail_scroll_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
         page.mouse.wheel(0, delta)
 
 
@@ -360,9 +361,9 @@ def ensure_detail_json_editor_loaded(page, dialog, column_name):
                 value_box["x"] + min(120, value_box["width"] / 2),
                 value_box["y"] + min(120, value_box["height"] / 2),
             )
-            record_step_dump(page, "detail_editor_scroll_pre")
+            record_step_dump(page, "detail_editor_scroll_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
             page.mouse.wheel(0, 800)
-            record_step_dump(page, "detail_editor_scroll_pre")
+            record_step_dump(page, "detail_editor_scroll_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
             page.mouse.wheel(0, -800)
 
     raise RuntimeError(f"상세 팝업에서 '{column_name}' 편집기 로딩을 확인하지 못했습니다.")
@@ -413,9 +414,9 @@ def ensure_edit_mode_json_editor_loaded(page, dialog, column_name):
                 value_box["x"] + min(120, value_box["width"] / 2),
                 value_box["y"] + min(120, value_box["height"] / 2),
             )
-            record_step_dump(page, "edit_editor_scroll_pre")
+            record_step_dump(page, "edit_editor_scroll_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
             page.mouse.wheel(0, 800)
-            record_step_dump(page, "edit_editor_scroll_pre")
+            record_step_dump(page, "edit_editor_scroll_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
             page.mouse.wheel(0, -800)
 
     raise RuntimeError(f"Edit mode editor not loaded for column: {column_name}")
@@ -744,7 +745,7 @@ def run_shopdata_lookup(
         f"purchase_count={summary['purchase_count']}, "
         f"edited_count_value={summary['edited_count_value']}"
     )
-    step_and_verify_ui(page, "shopdata_lookup_complete")
+    step_and_verify_ui(page, "shopdata_lookup_complete", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     return summary
 
 
