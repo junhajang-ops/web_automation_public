@@ -20,6 +20,7 @@ from pathlib import Path
 
 # Windows PowerShell 한국어 깨짐 방지
 from console_step_verify import (
+    SIDEBAR_BASE_MENU_IGNORE_PATTERNS,
     configure_console_output,
     get_retry_max_retries,
     init_dump_dir,
@@ -179,7 +180,7 @@ def safe_wait_for_load(page, state="networkidle", timeout_ms=15_000):
 PROJECT_ENTRY_IGNORE_PATTERNS = [
     r"^\s*\[\+\]\s+sidebar a#id:",
     r"^\s*\[\+\]\s+structural_text: nav:",
-]
+] + SIDEBAR_BASE_MENU_IGNORE_PATTERNS
 
 
 def ensure_sidebar_link_expanded(page, link, step_name):
@@ -656,7 +657,7 @@ def ensure_uuid_registered(page, uuid_value, timeout_error, nickname=None, nickn
     step_and_verify_ui(
         page,
         "user_uuid_validity_check",
-        ignore_patterns=[r"role: (gridcell|menu|rowgroup)$"],
+        ignore_patterns=[r"role: (gridcell|menu|rowgroup)$"] + SIDEBAR_BASE_MENU_IGNORE_PATTERNS,
     )
     if lookup_status == "valid":
         print(f"[유저 탭] UUID 확인됨(존재함): {uuid_value}")
@@ -775,7 +776,7 @@ def open_user_page(page):
     user_link = page.locator("a#baseGamer, a[href*='/baseGamer/']").first
     user_link.wait_for(state="visible", timeout=15_000)
     user_link.scroll_into_view_if_needed()
-    record_step_dump(page, "user_nav_pre")
+    record_step_dump(page, "user_nav_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     user_link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
@@ -790,12 +791,12 @@ def submit_uuid_search(page, uuid_value):
     print(f"[6] UUID 입력: {uuid_value}")
     search_input = page.locator("input[name='defaultSearchValue']").first
     search_input.wait_for(state="visible", timeout=15_000)
-    record_step_dump(page, "user_uuid_input_pre")
+    record_step_dump(page, "user_uuid_input_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     search_input.fill("")
     search_input.fill(uuid_value)
 
     print("[7] 검색 버튼을 클릭합니다.")
-    record_step_dump(page, "user_search_submit_pre")
+    record_step_dump(page, "user_search_submit_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     page.locator("button[type='submit']").first.click()
     safe_wait_for_load(page, "networkidle", 5_000)
 

@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from console_step_verify import (
+    SIDEBAR_BASE_MENU_IGNORE_PATTERNS,
     configure_console_output,
     get_retry_max_retries,
     init_dump_dir,
@@ -55,7 +56,7 @@ GRID_SCROLL_STEP_PX = 1_200
 GRID_SCROLL_IDLE_LIMIT = 3
 RECEIPT_IGNORE_PATTERNS = [
     r"button: badge\|type=button$",
-]
+] + SIDEBAR_BASE_MENU_IGNORE_PATTERNS
 # 'receipt_uuid_input_pre'/'receipt_search_submit_pre' 전용: 이 두 스텝은 검색을
 # 실행하기 '전'에 찍는다. 그런데 영수증 검증 화면은 세션에 직전 조회 결과 그리드를
 # 남겨두므로, 이 시점의 gridcell/rowgroup 유무는 이번 실행이 아니라 과거(다른 실행)

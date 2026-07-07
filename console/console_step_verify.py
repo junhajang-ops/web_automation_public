@@ -34,6 +34,22 @@ POLL_INTERVAL_MS = 500  # wait_until 폴링(요소 대기) 재확인 주기 — 
 STEP_WAIT_ENV_KEYS = ("CONSOLE_STEP_WAIT_MS", "STEP_WAIT_MS")
 FINGERPRINT_SCHEMA_VERSION = 4
 
+# 콘솔 콘솔의 기본 제공 사이드바 카테고리(쿠폰/이벤트/1:1문의/약관 및 정책/유저정보
+# 찾기/그룹)는 계정·브라우저 프로필의 아코디언 펼침 이력에 따라 add/remove 양쪽으로
+# 나타날 수 있는 잘 알려진 비신호성 잡음이다. console_user_search.py의
+# PROJECT_ENTRY_IGNORE_PATTERNS는 이미 이 카테고리들의 "추가(+)"만 화이트리스트해
+# 왔으나(펼침 상태가 누적되며 항목이 늘어나는 경우), cs_copilot.py의
+# ConsoleJudgeWorker가 console_leaderboard.py 등과 별도 프로필을 쓰도록 분리된 뒤
+# (2026-07-10) 그 전용 프로필은 이 카테고리들을 한 번도 펼친 적이 없어 "제거(-)"로도
+# 반복 오탐이 발생함이 라이브 확인됨. 이 6개 카테고리에 한해 양방향을 모두
+# 화이트리스트한다 — 다른 사이드바 링크의 실제 소실은 계속 감지 대상으로 남긴다
+# (2026-06-29 fingerprint whitelist note 원칙: 공용 헬퍼의 기본 비교 범위는 그대로
+# 두고, 호출부가 opt-in하는 이 상수만 추가).
+SIDEBAR_BASE_MENU_IGNORE_PATTERNS = [
+    r"sidebar a#id: base(Coupon|Event|Inquiry|Policy|SearchGamer|UserGroup)$",
+    r"structural_text: nav:(1:1 문의|그룹|약관 및 정책|유저정보 찾기|이벤트|쿠폰)$",
+]
+
 _step_seq = [0]
 _dump_counter = [0]
 _dump_dir: list = [None]  # [Path | None]
