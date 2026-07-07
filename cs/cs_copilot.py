@@ -580,6 +580,7 @@ class ConsoleJudgeWorker:
             from playwright.sync_api import sync_playwright as console_sync_playwright
 
             from console_payment_error import judge_nonpayment
+            from console_step_verify import init_dump_dir
             from console_user_search import (
                 DEFAULT_PROFILE as CONSOLE_PROFILE_NAME,
                 DEFAULT_PROJECT_NAME as CONSOLE_PROJECT_NAME,
@@ -598,6 +599,10 @@ class ConsoleJudgeWorker:
 
         console_profile_dir = CONSOLE_DIR / CONSOLE_PROFILE_NAME
         logging_service = build_logging_service(self.key_path) if self.key_path else None
+        # record_step_dump/step_and_verify_ui(console_*.py 전반에서 호출)는 dump 디렉터리가
+        # 설정돼야 HTML/스크린샷을 남긴다 — 이전엔 미설정이라 이 worker의 실패를 사후에
+        # 재현·확인할 증거가 전혀 안 남았다(2026-07-09, 닉네임 재검색 오탐 진단 중 확인).
+        init_dump_dir(CONSOLE_DIR / "dumps_console_copilot_worker")
 
         with console_sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(

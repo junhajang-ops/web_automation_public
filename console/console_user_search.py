@@ -29,6 +29,7 @@ from console_step_verify import (
     set_project_label_provider,
     step_and_verify_ui,
     step_pause,
+    wait_for_loading_settled,
     wait_until,
 )
 from test_config import TEST_UUID, apply_title_profile
@@ -375,6 +376,17 @@ def ensure_nickname_search_column(page):
 # "검색 결과가 없습니다."와는 다른 문구다.
 USER_SEARCH_EMPTY_TEXT = "생성된 유저가 없습니다."
 USER_SEARCH_POLL_MS = 500
+# 같은 페이지(Playwright context)를 여러 티켓/검색에 걸쳐 재사용하는 호출부(예:
+# cs_copilot.ConsoleJudgeWorker)에서는, 새 검색 결과가 실제로 그려지기 직전
+# 순간에 "직전 검색의 결과없음 안내 문구"가 DOM에 잠깐 남아있는 게 그대로 잡히는
+# 레이스가 있다(2026-07-09 사용자 제보: 닉네임 재검색이 실제로는 결과가 있었는데
+# "결과 없음"으로 오판됨). '결과 있음'은 한 번만 보여도 즉시 확정하되, '결과 없음'은
+# 연속 USER_SEARCH_EMPTY_STABLE_ROUNDS회(폴링 간격 USER_SEARCH_POLL_MS 기준 약 2초)
+# 확인돼야 최종 확정한다(행이 뒤늦게 나타나면 스트릭이 끊기고 즉시 "rows"로 전환됨).
+# "무효 판정이 느리다"던 이전 문제(2026-07-08)는 불필요한 15~30초 풀타임아웃이
+# 원인이었고, 이 debounce는 최대 2초 추가일 뿐이라 그 문제를 되살리지 않는다 —
+# 오탐(진짜 결과를 놓치는 것)이 지연보다 훨씬 더 큰 대가이므로 여유 있게 잡는다.
+USER_SEARCH_EMPTY_STABLE_ROUNDS = 4
 
 
 def find_user_result_row(page, uuid_value, wait_timeout_ms):
@@ -386,11 +398,14 @@ def find_user_result_row(page, uuid_value, wait_timeout_ms):
     무효 UUID 판정이 너무 느림). 결과 없음 안내 문구(USER_SEARCH_EMPTY_TEXT)까지
     같은 폴링 루프에서 함께 확인해, 그리드가 실제로 빈 상태로 안정되는 즉시 짧게
     확정한다. 유효한 UUID가 렌더링에 시간이 걸리는 경우를 위한 대기 상한
-    (wait_timeout_ms)은 그대로 유지된다.
+    (wait_timeout_ms)은 그대로 유지된다. '결과 없음'은 연속 확인(안정화) 후에만
+    확정한다 — 이유는 USER_SEARCH_EMPTY_STABLE_ROUNDS 주석 참고.
     """
+    wait_for_loading_settled(page)
     grid_row = page.locator(f"div.MuiDataGrid-row[data-id='{uuid_value}']").first
     legacy_result = page.locator("td#gamer_id p", has_text=uuid_value).first
     empty_notice = page.get_by_text(USER_SEARCH_EMPTY_TEXT, exact=False).first
+    empty_streak = [0]
 
     def _outcome():
         try:
@@ -405,9 +420,11 @@ def find_user_result_row(page, uuid_value, wait_timeout_ms):
             pass
         try:
             if empty_notice.is_visible():
-                return "empty"
+                empty_streak[0] += 1
+                return "empty" if empty_streak[0] >= USER_SEARCH_EMPTY_STABLE_ROUNDS else None
         except Exception:
             pass
+        empty_streak[0] = 0
         return None
 
     outcome = wait_until(page, _outcome, timeout_ms=wait_timeout_ms, wait_ms=USER_SEARCH_POLL_MS)
@@ -515,9 +532,18 @@ def collect_user_search_uuid_candidates(page):
 
 
 def _wait_for_user_search_grid_outcome(page, timeout_ms=15_000, wait_ms=USER_SEARCH_POLL_MS):
-    """검색 결과가 '행 있음'/'결과 없음' 중 어느 쪽으로 안정됐는지 폴링으로 확정한다."""
+    """검색 결과가 '행 있음'/'결과 없음' 중 어느 쪽으로 안정됐는지 폴링으로 확정한다.
+
+    '결과 없음'은 연속 USER_SEARCH_EMPTY_STABLE_ROUNDS회 확인돼야 최종 확정한다 —
+    같은 페이지를 재사용하는 호출부(닉네임 재검색 등)에서 새 결과가 그려지기 직전
+    순간에 직전 검색의 "결과없음" 문구가 DOM에 잠깐 남아있는 레이스를 피하기 위함
+    (2026-07-09 사용자 제보: 실제로는 결과가 있었는데 결과없음으로 오판됨). '결과
+    있음'은 한 번만 보여도 즉시 확정한다.
+    """
+    wait_for_loading_settled(page)
     any_row = page.locator("div.MuiDataGrid-row, td#gamer_id p").first
     empty_notice = page.get_by_text(USER_SEARCH_EMPTY_TEXT, exact=False).first
+    empty_streak = [0]
 
     def _outcome():
         try:
@@ -527,9 +553,11 @@ def _wait_for_user_search_grid_outcome(page, timeout_ms=15_000, wait_ms=USER_SEA
             pass
         try:
             if empty_notice.is_visible():
-                return "empty"
+                empty_streak[0] += 1
+                return "empty" if empty_streak[0] >= USER_SEARCH_EMPTY_STABLE_ROUNDS else None
         except Exception:
             pass
+        empty_streak[0] = 0
         return None
 
     return wait_until(page, _outcome, timeout_ms=timeout_ms, wait_ms=wait_ms)
