@@ -16,6 +16,12 @@ try {
         exit 1
     }
 
+    # 콘솔 판정 워커 전용 대기값(2026-07-11). console_leaderboard.py 등이 쓰는
+    # CONSOLE_STEP_WAIT_MS/STEP_WAIT_MS와 분리된 이 프로세스만의 값이며, 이 줄은
+    # 이 스크립트 프로세스와 그 자식(python.exe)에만 적용되고 다른 터미널/스크립트에는
+    # 영향을 주지 않는다.
+    $env:COPILOT_STEP_WAIT_MS = "2000"
+
     & "$root\.venv\Scripts\python.exe" "$scriptDir\cs_copilot.py" `
         --key "$root\$keyFile"
 }

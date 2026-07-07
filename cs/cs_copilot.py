@@ -688,6 +688,17 @@ class ConsoleJudgeWorker:
             )
             return
 
+        # copilot 전용 대기값 분리(2026-07-11). 이 워커는 console_leaderboard.py 등
+        # 사람이 직접 실행하며 화면을 지켜보는 콘솔 스크립트와 달리 무인 백그라운드
+        # 스레드로 콘솔을 조작한다. get_step_wait_ms()(console_step_verify.py)가 읽는
+        # CONSOLE_STEP_WAIT_MS/STEP_WAIT_MS를 그대로 쓰면 사람이 지켜보는 다른 콘솔
+        # 스크립트의 대기값과 얽인다. 이 프로세스는 이 워커 스레드에서만
+        # console_step_verify를 쓰므로, COPILOT_STEP_WAIT_MS가 설정돼 있으면 이 프로세스
+        # 안에서만 CONSOLE_STEP_WAIT_MS를 덮어써 분리한다(공용 헬퍼 자체는 수정하지 않음).
+        copilot_wait_ms = os.environ.get("COPILOT_STEP_WAIT_MS", "").strip()
+        if copilot_wait_ms:
+            os.environ["CONSOLE_STEP_WAIT_MS"] = copilot_wait_ms
+
         # console_leaderboard.py 등이 쓰는 pw_profile_console와는 별도 프로필을 쓴다
         # (2026-07-10 사용자 요청). 창 위치/크기 기억("console_browser" 키)이 프로필에
         # 새겨져 그 값을 console_leaderboard.py로도 새어가게 했던 문제를 프로필 분리로
