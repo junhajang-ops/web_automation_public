@@ -356,19 +356,55 @@ def ensure_uuid_dropdown(page):
         )
 
 
+# 유저 탭 MuiDataGrid의 결과 없음 안내 문구(2026-06-23 dump 실측: dumps_console_search/
+# console_user_search_20260623_154529.html, invalid UUID 케이스). 영수증 검증의
+# "검색 결과가 없습니다."와는 다른 문구다.
+USER_SEARCH_EMPTY_TEXT = "생성된 유저가 없습니다."
+USER_SEARCH_POLL_MS = 500
+
+
 def find_user_result_row(page, uuid_value, wait_timeout_ms):
-    grid_row = page.locator(
-        f"div.MuiDataGrid-row[data-id='{uuid_value}']"
-    ).first
-    if wait_for_visible(grid_row, wait_timeout_ms):
-        uuid_cell = grid_row.locator("div[data-field='uuid']").first
-        cell_text = uuid_cell.inner_text().strip()
+    """검색 결과 그리드를 폴링해 UUID 행을 찾는다.
+
+    기존에는 새 MuiDataGrid 행을 최대 wait_timeout_ms(기본 15초)까지 기다린 뒤
+    실패하면 레거시 테이블 행을 다시 최대 wait_timeout_ms까지 기다려, 존재하지
+    않는 UUID 판정에 최악 2×wait_timeout_ms(30초)가 걸렸다(2026-07-08 사용자 제보 —
+    무효 UUID 판정이 너무 느림). 결과 없음 안내 문구(USER_SEARCH_EMPTY_TEXT)까지
+    같은 폴링 루프에서 함께 확인해, 그리드가 실제로 빈 상태로 안정되는 즉시 짧게
+    확정한다. 유효한 UUID가 렌더링에 시간이 걸리는 경우를 위한 대기 상한
+    (wait_timeout_ms)은 그대로 유지된다.
+    """
+    grid_row = page.locator(f"div.MuiDataGrid-row[data-id='{uuid_value}']").first
+    legacy_result = page.locator("td#gamer_id p", has_text=uuid_value).first
+    empty_notice = page.get_by_text(USER_SEARCH_EMPTY_TEXT, exact=False).first
+
+    def _outcome():
+        try:
+            if grid_row.is_visible():
+                return "grid"
+        except Exception:
+            pass
+        try:
+            if legacy_result.is_visible():
+                return "legacy"
+        except Exception:
+            pass
+        try:
+            if empty_notice.is_visible():
+                return "empty"
+        except Exception:
+            pass
+        return None
+
+    outcome = wait_until(page, _outcome, timeout_ms=wait_timeout_ms, wait_ms=USER_SEARCH_POLL_MS)
+
+    if outcome == "grid":
+        cell_text = grid_row.locator("div[data-field='uuid']").first.inner_text().strip()
         if uuid_value not in cell_text:
             raise RuntimeError(f"Unexpected search result text: {cell_text}")
         return grid_row
 
-    legacy_result = page.locator("td#gamer_id p", has_text=uuid_value).first
-    if wait_for_visible(legacy_result, wait_timeout_ms):
+    if outcome == "legacy":
         found_text = legacy_result.inner_text().strip()
         if found_text != uuid_value:
             raise RuntimeError(f"Unexpected search result text: {found_text}")

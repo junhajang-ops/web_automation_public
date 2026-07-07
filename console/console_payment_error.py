@@ -66,6 +66,7 @@ from console_user_search import (
     DEFAULT_PROFILE,
     DEFAULT_PROJECT_NAME,
     DEFAULT_START_URL,
+    InvalidUuidError,
     hold_open_loop,
     load_playwright,
     prepare_console_project,
@@ -368,9 +369,26 @@ def judge_nonpayment(
           purchase_limit_type, purchase_limit_count, count_judgment} | None / notes[]
     """
     notes = []
-    receipt = run_receipt_verification(
-        page, uuid_value, "", start_url, project_name, timeout_error
-    )
+    try:
+        receipt = run_receipt_verification(
+            page, uuid_value, "", start_url, project_name, timeout_error
+        )
+    except InvalidUuidError as exc:
+        # '유저' 탭에서 존재하지 않는다고 이미 확정된 UUID — 오탈자 등 결정론적 문제라
+        # 재시도해도 결과가 바뀌지 않는다. main()의 retry_with_recovery(절차 전체 재시도)까지
+        # 전파시키지 않고 여기서 바로 정상 반환해 재시도로 시간을 낭비하지 않는다
+        # (2026-07-08 사용자 제보: 무효 UUID 판정 실패까지 시간이 너무 걸림).
+        print(f" [미지급 판정] '{uuid_value}' — '유저' 탭에서 존재하지 않는 UUID로 확인됨(재시도 없이 즉시 종료)")
+        return {
+            "verdict": "invalid_uuid",
+            "receipt": None,
+            "matched_row": None,
+            "product_code": None,
+            "product_source": None,
+            "product_candidates": None,
+            "shopdata": None,
+            "notes": [str(exc)],
+        }
 
     # 분기A 패턴1: 영수증검증 기록 없음 → 미지급 확정. 상품은 로그 후보로 나열.
     if not receipt.get("has_results"):
