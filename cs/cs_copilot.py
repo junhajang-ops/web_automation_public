@@ -1147,6 +1147,8 @@ def _handle_ticket(page, ticket_id, service, console_worker=None, console_jobs=N
             print(" [콘솔 미지급 판정] UUID 없음 — 생략")
         elif verdict.get("is_refunded"):
             print(" [콘솔 미지급 판정] 환불/취소 상태 — 생략")
+        elif verdict.get("state") != "PROCESSED":
+            print(f" [콘솔 미지급 판정] Google 주문 상태가 PROCESSED가 아님({verdict.get('state')}) — 생략")
         elif console_worker is None or console_jobs is None:
             print(" [콘솔 미지급 판정] worker 없음 — 생략")
         elif ticket_id in console_jobs:
