@@ -47,7 +47,7 @@ from cs_parse import parse_ticket  # import-time 부작용 없음, 직접 import
 
 # ── EXTRACT_JS ────────────────────────────────────────────────────────────────
 # cs_field_dump.py 동일 상수. import 시 DUMP_DIR.mkdir() 부작용이 있어 복사 사용.
-from cs_parse import list_known_packages, resolve_brand_package
+from cs_parse import list_known_packages, resolve_brand_console_project, resolve_brand_package
 from cs_gcp_logging import build_logging_service
 
 EXTRACT_JS = r"""
@@ -658,7 +658,7 @@ class ConsoleJudgeWorker:
             }
         )
 
-    def submit_regrant(self, ticket_id: str, uuid_value: str, product_code: str) -> None:
+    def submit_regrant(self, ticket_id: str, uuid_value: str, product_code: str, brand: str | None = None) -> None:
         """사람이 터미널에 '재지급'을 입력해 승인한 뒤에만 호출한다(비가역 우편 발송)."""
         self._tasks.put(
             {
@@ -666,6 +666,7 @@ class ConsoleJudgeWorker:
                 "ticket_id": ticket_id,
                 "uuid": uuid_value,
                 "product_code": product_code,
+                "brand": brand,
             }
         )
 
@@ -690,7 +691,6 @@ class ConsoleJudgeWorker:
             )
             from console_step_verify import init_dump_dir
             from console_user_search import (
-                DEFAULT_PROJECT_NAME as CONSOLE_PROJECT_NAME,
                 DEFAULT_START_URL as CONSOLE_START_URL,
                 select_target_page as select_console_target_page,
             )
@@ -764,6 +764,21 @@ class ConsoleJudgeWorker:
                     task_type = task.get("task_type", "judge")
 
                     if task_type == "regrant":
+                        console_project_name = resolve_brand_console_project(task.get("brand"))
+                        if not console_project_name:
+                            # 아직 아무것도 발송하지 않은 시점 — 모호한 기본값으로 진행하지
+                            # 않고 여기서 바로 중단한다(대상 선택 모호성 금지 원칙).
+                            self._results.put({
+                                "task_type": "regrant",
+                                "ticket_id": ticket_id,
+                                "result": {
+                                    "status": "failed",
+                                    "uuid": task["uuid"],
+                                    "product_code": task["product_code"],
+                                },
+                                "error": f"브랜드 '{task.get('brand')}'의 console_project_name 설정 없음(CS_PACKAGE_BRAND_RULES 확인)",
+                            })
+                            continue
                         try:
                             page = context.pages[0] if context.pages else context.new_page()
                             page = select_console_target_page(context, page)
@@ -774,7 +789,7 @@ class ConsoleJudgeWorker:
                                 title=REGRANT_TITLE,
                                 content=REGRANT_TITLE,
                                 start_url=CONSOLE_START_URL,
-                                project_name=CONSOLE_PROJECT_NAME,
+                                project_name=console_project_name,
                             )
                             self._results.put({
                                 "task_type": "regrant",
@@ -816,6 +831,20 @@ class ConsoleJudgeWorker:
                         _capture_window_bounds(context, "console_browser")
                         continue
 
+                    console_project_name = resolve_brand_console_project(task.get("brand"))
+                    if not console_project_name:
+                        # 모호한 기본값으로 진행하지 않고 이 티켓만 건너뛴다(대상 선택
+                        # 모호성 금지 원칙 — 2026-07-07). 다른 티켓 처리는 막지 않는다.
+                        self._results.put(
+                            {
+                                "task_type": "judge",
+                                "ticket_id": ticket_id,
+                                "result": None,
+                                "error": f"브랜드 '{task.get('brand')}'의 console_project_name 설정 없음(CS_PACKAGE_BRAND_RULES 확인)",
+                            }
+                        )
+                        continue
+
                     try:
                         page = context.pages[0] if context.pages else context.new_page()
                         page = select_console_target_page(context, page)
@@ -830,13 +859,14 @@ class ConsoleJudgeWorker:
                             nickname_source=task.get("nickname_source"),
                             logging_service=logging_service,
                             start_url=CONSOLE_START_URL,
-                            project_name=CONSOLE_PROJECT_NAME,
+                            project_name=console_project_name,
                             timeout_error=PlaywrightTimeoutError,
                         )
                         self._results.put(
                             {
                                 "task_type": "judge",
                                 "ticket_id": ticket_id,
+                                "brand": task.get("brand"),
                                 "result": result,
                                 "error": None,
                             }
@@ -1070,7 +1100,7 @@ def _handle_command(command_text, regrant_state, console_worker):
     # 1회성 소비 — 같은 결과에 '재지급'을 두 번 입력해도 중복 발송되지 않는다.
     regrant_state["last_actionable"] = None
     print(f"[재지급] 티켓 {ctx['ticket_id']} — UUID={ctx['uuid']}, 상품코드={product_code} 발송을 등록합니다.")
-    console_worker.submit_regrant(ctx["ticket_id"], ctx["uuid"], product_code)
+    console_worker.submit_regrant(ctx["ticket_id"], ctx["uuid"], product_code, ctx.get("brand"))
 
 
 def _handle_ticket(page, ticket_id, service, console_worker=None, console_jobs=None):
@@ -1331,6 +1361,7 @@ def main():
                         console_result.get("error"),
                     )
                     if regrant_ctx:
+                        regrant_ctx["brand"] = console_result.get("brand")
                         regrant_state["last_actionable"] = regrant_ctx
                     if result_ticket_id in console_jobs:
                         console_jobs.pop(result_ticket_id, None)

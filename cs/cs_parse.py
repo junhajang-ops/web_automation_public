@@ -391,6 +391,34 @@ def resolve_brand_gcp_log(brand: str):
     return None, None
 
 
+def resolve_brand_console_project(brand: str):
+    """브랜드 → 콘솔 콘솔 프로젝트 표시명(console_project_name).
+
+    `CS_PACKAGE_BRAND_RULES`의 **패키지 레벨** `console_project_name`을 읽는다
+    (resolve_brand_gcp_log와 동일한 패턴 — 같은 패키지의 언어별 브랜드는 같은 콘솔
+    프로젝트를 공유). 설정 없으면 None(호출자가 하드코딩 기본값으로 폴백하면 안
+    된다 — 2026-07-07 대상 선택 모호성 금지 원칙, 폴백이 실제로 후보 다건 오류를 낸 사례).
+    """
+    raw = _load_json_env(_PACKAGE_BRAND_RULES_ENV)
+    if not isinstance(raw, dict) or not brand:
+        return None
+    normalized_brand = _normalize_brand_key(brand)
+    for _package_name, block in raw.items():
+        if not isinstance(block, dict):
+            continue
+        brands = block.get("brands") if isinstance(block.get("brands"), dict) else block
+        if not isinstance(brands, dict):
+            continue
+        matched = brand in brands or any(
+            isinstance(b, str) and _normalize_brand_key(b) == normalized_brand
+            for b in brands
+        )
+        if matched:
+            project_name = block.get("console_project_name")
+            return project_name if isinstance(project_name, str) and project_name else None
+    return None
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 공개 함수 1: normalize_gpa_order
 # ────────────────────────────────────────────────────────────────────────────
