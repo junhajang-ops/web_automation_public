@@ -272,9 +272,22 @@ def _window_launch_args(key: str) -> list[str]:
 def _capture_window_bounds(context, key: str) -> None:
     """CDP(Browser.getWindowBounds)로 현재 브라우저 창 위치/크기를 읽어 저장한다.
 
-    종료 직전(context.close() 전)에 호출한다. 실패해도(창이 이미 닫혔거나 CDP
-    응답이 예상과 다르거나 등) 종료 절차를 막으면 안 되는 부가 기능이라 조용히
-    건너뛴다.
+    실패해도(창이 이미 닫혔거나 CDP 응답이 예상과 다르거나 등) 호출부 절차를 막으면
+    안 되는 부가 기능이라 조용히 건너뛴다.
+
+    ★ 반드시 이 Playwright context를 만든 바로 그 스레드에서만 호출한다.
+    Playwright 동기 API는 스레드 전용(그린렛 기반 동기↔비동기 브리지가 생성
+    스레드에 묶여 있음) — 2026-07-09 라이브 재현 테스트로 두 가지를 직접 확인했다:
+    (1) Ctrl+C(KeyboardInterrupt)가 `page.wait_for_timeout()` 같은 Playwright
+    동기 호출 도중 발생하면, 그 직후 같은 스레드에서 부르는 모든 Playwright 호출
+    (`new_cdp_session()`, `context.close()` 포함)이 영원히 멈출 수 있다. (2) 이
+    함수를 다른 스레드(예: 타임아웃을 걸려고 만든 데몬 스레드)에서 부르면 멈추진
+    않지만 `greenlet.error: cannot switch to a different thread`로 항상 실패한다
+    — 즉 "다른 스레드 + 타임아웃"으로는 이 문제를 못 피한다. 실제 해법은 이 함수를
+    (1) 인터럽트가 없었던 게 확실한 정상 루프 중에 주기적으로 호출하고, (2)
+    KeyboardInterrupt를 잡은 직후(종료 처리 중)에는 아예 호출하지 않는 것이다
+    (호출부의 "종료 시 캡처 생략" 주석 참고 — `with sync_playwright()` 자체의
+    종료 처리가 브라우저 프로세스 정리를 대신 맡는다).
     """
     try:
         pages = context.pages
@@ -299,6 +312,7 @@ def _capture_window_bounds(context, key: str) -> None:
         )
     except Exception:
         pass
+
 
 # 결제정보 가격 패턴: 통화기호+숫자 또는 숫자+통화기호 (라벨 무관, 값 셀 직접 감지)
 _PRICE_VAL_RE = re.compile(
@@ -723,7 +737,16 @@ class ConsoleJudgeWorker:
                                 "error": str(exc),
                             }
                         )
+                    # 판정 1건 끝날 때마다 창 위치를 갱신 저장한다 — 이 worker는 다음
+                    # 티켓이 올 때까지 오래(수십 분~) 대기할 수 있어, 활동이 있을 때마다
+                    # 갱신해두면 종료 시점 위치와 크게 어긋나지 않는다. 이 스레드는 파이썬
+                    # SIGINT(Ctrl+C)를 절대 받지 않으므로(신호는 항상 메인 스레드로만
+                    # 전달됨) Playwright 동기 호출이 인터럽트로 깨질 위험이 없어 그대로
+                    # 직접 호출한다(_capture_window_bounds 자체가 실패는 조용히 삼킴).
+                    _capture_window_bounds(context, "console_browser")
             finally:
+                # 위와 같은 이유로 이 스레드는 인터럽트에 의한 Playwright 상태 손상
+                # 위험이 없어(_capture_window_bounds 상단 주석 참고) 그대로 직접 호출한다.
                 _capture_window_bounds(context, "console_browser")
                 context.close()
 
@@ -954,6 +977,14 @@ def main():
         print(" 종료: Ctrl+C")
         print()
 
+        # 창 위치 주기 저장(2026-07-09 추가) — Ctrl+C 시점(종료 처리 중)의 저장은
+        # 아예 시도하지 않는다(_capture_window_bounds 상단 주석 참고: 인터럽트 직후
+        # Playwright 호출이 영원히 멈출 수 있고, 다른 스레드로 옮겨도 대신 즉시
+        # 에러가 나 해결되지 않음). 대신 정상 동작 중 10초마다 저장해두면 대부분의
+        # 경우 마지막 위치가 크게 뒤처지지 않는다.
+        last_window_capture = time.monotonic()
+        WINDOW_CAPTURE_INTERVAL_SECONDS = 10
+
         try:
             while True:
                 # ── Playwright 이벤트 펌핑 ────────────────────────────────
@@ -981,6 +1012,13 @@ def main():
                         pending.pop(id(alive_page), None)
                 else:
                     time.sleep(0.5)  # 열린 탭이 없을 때만 fallback
+
+                if time.monotonic() - last_window_capture >= WINDOW_CAPTURE_INTERVAL_SECONDS:
+                    last_window_capture = time.monotonic()
+                    # 방금 위 wait_for_timeout()이 인터럽트 없이 정상 반환한 직후라
+                    # Playwright 상태가 멀쩡함이 보장됨 — 직접 호출한다
+                    # (_capture_window_bounds 상단 주석의 스레드/인터럽트 제약 참고).
+                    _capture_window_bounds(context, "cs_browser")
 
                 for console_result in console_worker.drain_results():
                     result_ticket_id = console_result.get("ticket_id")
@@ -1036,17 +1074,16 @@ def main():
         except KeyboardInterrupt:
             print("\n[종료] co-pilot을 종료합니다.")
         finally:
-            try:
-                console_worker.stop()
-            finally:
-                try:
-                    _capture_window_bounds(context, "cs_browser")
-                except Exception:
-                    pass
-                try:
-                    context.close()
-                except Exception:
-                    pass
+            console_worker.stop()
+            # 2026-07-09 실측(라이브 재현 테스트): Ctrl+C가 위 루프의
+            # alive_page.wait_for_timeout() 도중 발생하면, 그 직후 이 스레드에서 부르는
+            # 모든 Playwright 호출(창 위치 캡처든 context.close()든)이 영원히 멈출 수
+            # 있다는 것을 확인했다 — 다른 스레드로 옮겨도 해결되지 않는다(그린렛이 생성
+            # 스레드 전용이라 스레드를 옮기면 대신 즉시 에러가 난다, _capture_window_bounds
+            # 상단 주석 참고). 그래서 여기서는 아예 Playwright를 호출하지 않는다 — 위치는
+            # 이미 10초마다 저장해뒀고(WINDOW_CAPTURE_INTERVAL_SECONDS), 브라우저 프로세스
+            # 정리는 이 함수를 감싸는 `with sync_playwright() as p:` 블록 자신의 종료
+            # 처리가 맡는다(재현 테스트로 이쪽은 항상 즉시 끝나는 것까지 확인함).
 
 
 if __name__ == "__main__":
