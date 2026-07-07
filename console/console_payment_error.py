@@ -339,7 +339,14 @@ def _resolve_gcp_candidates_result(logging_service, brand, uuid_value, product_i
     )
     if err:
         notes.append(f"상품 특정(GCP 로그) 실패/불완전: {err}")
-    if len(candidates) > 1:
+    elif len(candidates) == 0:
+        # err가 없는 0건은 "조회를 안 함"이 아니라 "조회는 됐지만 매칭 없음"이다.
+        # 이 note가 없으면 화면상 (미특정)만 보여 두 경우를 구분할 수 없다(2026-07-10 사용자 확인).
+        notes.append(
+            f"GCP 로그 후보 0건 — 결제시각 이전 {CLICK_MATCH_WINDOW_SECONDS}초 내 매칭 "
+            "log_shop_click 없음(조회 자체는 정상 수행됨)"
+        )
+    elif len(candidates) > 1:
         notes.append(f"후보 {len(candidates)}건 — 자동 확정 안 함, product_candidates 참조해 사람 확인")
     product_code = candidates[0].get("shop_click_id") if len(candidates) == 1 else None
     return product_code, candidates
