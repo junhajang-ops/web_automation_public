@@ -692,12 +692,26 @@ class ConsoleJudgeWorker:
         init_dump_dir(CONSOLE_DIR / "dumps_console_copilot_worker")
 
         with console_sync_playwright() as playwright:
-            context = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(console_profile_dir),
-                headless=False,
-                no_viewport=True,
-                args=_window_launch_args("console_browser"),
-            )
+            try:
+                context = playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(console_profile_dir),
+                    headless=False,
+                    no_viewport=True,
+                    args=_window_launch_args("console_browser"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                # 여기서 잡지 않으면 예외가 스레드 밖으로 나가 Python 기본 핸들러가
+                # 전체 스택 트레이스를 PowerShell에 그대로 찍는다(데몬 스레드라
+                # main 스레드에 전파되지도 않고 그냥 콘솔만 어지럽힌다). worker
+                # 초기화 실패와 동일하게 결과 큐로만 조용히 알린다.
+                self._results.put(
+                    {
+                        "ticket_id": None,
+                        "result": None,
+                        "error": f"console 브라우저 실행 실패: {exc}",
+                    }
+                )
+                return
             try:
                 while not self._stop_event.is_set():
                     task = self._tasks.get()
