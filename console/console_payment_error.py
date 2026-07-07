@@ -16,8 +16,17 @@ console_payment_error.py — 미지급(결제오류) 판정 (설계서 3-B)
     → 상품코드=description 그대로 사용, GCP 로그는 보지 않고 곧바로 ShopData Count 조회.
     - ShopData PurchaseCode 배열에 그 코드 자체가 없음(`PurchaseCodeNotFoundError`) → 구매
       시도 기록조차 없다는 뜻이라 **미지급 확정**(`pattern3_code_not_found`, 사람 승인 후 재지급).
-    - 코드는 있고 Count 값 판정만 애매함(주차/상품유형 복잡성) → 자동 판정 보류,
-      조회·표시만 하고 사람 확인(`pattern3_count_review`).
+    - 코드는 있음 → 상품표 CSV의 `Purchase_Limit_Type`/`Purchase_Limit_Count`로 자동 판정 여부를
+      가른다(2026-07-07 Excel 확인, chart_Shop_248162 기준):
+      - `Daily`/`Weekly`/`Monthly`(주기적으로 초기화) 또는 유형 미확인 → 현재 Count만으로 과거
+        지급 여부를 단정할 수 없어 자동 판정 보류, 조회·표시만 하고 사람 확인(`pattern3_count_review`).
+      - `None`/`Onetime`(초기화 없는 상품) & `Purchase_Limit_Count`==1(진짜 단일구매) → 누적
+        Count 값 자체로 판정. Count=0 → **미지급 확정**(`pattern3_count_confirmed_missing`),
+        Count≥1 → **이미 지급됨**(`pattern3_count_confirmed_granted`, 재지급 불필요).
+      - `None`/`Onetime` & `Purchase_Limit_Count`==0(무제한) 또는 2 이상(다회구매가능) →
+        **Count≥1이 곧 지급 확정을 의미하지 않는다**(2026-07-07 피드백). 영수증검증 전체 내역에서
+        동일 Description 과거 구매 건수(attempts)와 ShopData Count를 대조해, Count가 attempts보다
+        적으면 그 차이만큼 **미지급 확정**, 아니면 **이미 지급됨**으로 자동 판정한다.
 
 코드 체계: 영수증검증 description = ShopData PurchaseCode = 상품표 Inapp_PurchaseCode
           = shop_click_id (출처별 컬럼명만 다른 같은 값). Play 영수증과 잇는 키만 StorePurchaseCode_AOS
@@ -113,6 +122,51 @@ def _select_target_row(rows, order_id):
     return rows[0] if rows else None
 
 
+# Purchase_Limit_Type 값 체계(2026-07-07 Excel 확인, chart_Shop_248162):
+# None/Onetime = 초기화 없는 상품(누적 Count 그대로 신뢰 가능) vs Daily/Weekly/Monthly =
+# 주기적으로 초기화되는 상품(현재 Count만으로 과거 지급 여부를 단정할 수 없어 사람 확인 필요).
+#
+# 다만 초기화가 없어도 Purchase_Limit_Count(구매 가능 횟수)가 1이 아니면(0=무제한, 2 이상=
+# 다회 구매 가능) "Count>=1"이 곧 "이번 결제 지급 확정"을 의미하지 않는다(2026-07-07 사용자 피드백:
+# 복수 결제 가능한 상품은 영수증검증 내역의 동일 Description 과거 구매 건수와 대조해 부족분이
+# 있는지 확인해야 한다). Purchase_Limit_Count==1(진짜 단일구매)일 때만 Count 값 자체로 판정한다.
+NO_RESET_PURCHASE_LIMIT_TYPES = {"None", "Onetime"}
+
+
+def load_purchase_limit_info_map(chart_name=None):
+    """web_docs/ 최신 chart_{chart_name}_*.csv에서
+    {Inapp_PurchaseCode: {"type": Purchase_Limit_Type, "count": Purchase_Limit_Count(int|None)}} 매핑 생성.
+
+    load_shop_aos_candidates()와 동일한 "최신 CSV = 파일명 정렬 마지막" 규칙을 따른다.
+    """
+    chart_name = chart_name or TEST_CHART_NAME
+    csvs = sorted(PAYMENT_DOCS_DIR.glob(f"chart_{chart_name}_*.csv"))
+    if not csvs:
+        raise RuntimeError(f"web_docs/ 에 '{chart_name}' CSV 없음 — console_chart_lookup.py 먼저 실행 필요")
+    csv_path = csvs[-1]
+
+    for enc in ("utf-8-sig", "utf-8", "euc-kr"):
+        try:
+            mapping = {}
+            with open(csv_path, encoding=enc, newline="") as f:
+                reader = csv_mod.DictReader(f)
+                for row in reader:
+                    inapp = (row.get("Inapp_PurchaseCode") or "").strip()
+                    if not inapp:
+                        continue
+                    limit_type = (row.get("Purchase_Limit_Type") or "").strip()
+                    limit_count_raw = (row.get("Purchase_Limit_Count") or "").strip()
+                    try:
+                        limit_count = int(limit_count_raw)
+                    except ValueError:
+                        limit_count = None
+                    mapping[inapp] = {"type": limit_type, "count": limit_count}
+            return mapping
+        except UnicodeDecodeError:
+            continue
+    raise RuntimeError(f"CSV 인코딩 판별 실패: {csv_path.name}")
+
+
 def load_shop_aos_candidates(chart_name=None):
     """web_docs/ 최신 chart_{chart_name}_*.csv에서 {StorePurchaseCode_AOS: set(Inapp_PurchaseCode)} 매핑 생성.
 
@@ -184,6 +238,10 @@ def lookup_count_readonly(page, uuid_value, table_name, purchase_code, timeout_e
     같은 세션(이미 prepare_console_project 완료) 전제 — 게임정보 메뉴 이동부터.
     console_shopdata_lookup 의 조회 함수만 재사용하며, 편집(click_detail_edit_button,
     edit_count_line_to_zero_in_edit_mode)·Ace 쓰기는 호출하지 않는다.
+
+    Count 자동/보류 판정은 여기서 내리지 않는다 — Purchase_Limit_Count>=2(다회구매가능)일 때는
+    영수증검증 전체 내역과 대조해야 하므로, 그 정보를 가진 judge_nonpayment 쪽 resolve_count_judgment()가
+    최종 판정을 담당한다.
     """
     open_game_info_menu(page)
     open_game_info_data_tab(page)
@@ -197,11 +255,71 @@ def lookup_count_readonly(page, uuid_value, table_name, purchase_code, timeout_e
     purchase_line_number, purchase_count = resolve_purchase_line_and_count(
         page, dialog, purchase_code
     )
+
+    purchase_limit_type = None
+    purchase_limit_count = None
+    try:
+        limit_info = load_purchase_limit_info_map().get(purchase_code) or {}
+        purchase_limit_type = limit_info.get("type")
+        purchase_limit_count = limit_info.get("count")
+    except Exception as exc:  # noqa: BLE001 — 조회 실패 시 기존처럼 보류(HELD)로 안전하게 처리
+        print(f"    (Purchase_Limit_Type/Count 조회 실패 — 보류 판정 유지: {exc})")
+
     return {
         "purchase_line_number": purchase_line_number,
         "purchase_count": purchase_count,
-        "count_judgment": "HELD",  # 주차/상품유형 복잡 → 자동 미지급 판정 보류(사람 확인)
+        "purchase_limit_type": purchase_limit_type,
+        "purchase_limit_count": purchase_limit_count,
     }
+
+
+def count_receipt_matches(rows, product_code):
+    """영수증검증 전체 내역 중 동일 Description(=product_code)인 행 수(과거 구매 시도 건수)."""
+    return sum(1 for row in rows if (row.get(ROW_DESCRIPTION) or "").strip() == product_code)
+
+
+def resolve_count_judgment(shopdata, rows, product_code):
+    """Purchase_Limit_Type/Count 기반 Count 자동/보류 판정.
+
+    - Daily/Weekly/Monthly 또는 유형 미확인 → 주기적 초기화로 현재 Count만으론 단정 불가 → HELD.
+    - None/Onetime(초기화 없음) & Purchase_Limit_Count==1(진짜 단일구매) → Count 값 자체로 판정
+      (Count=0 → 미지급 확정, Count>=1 → 지급 확정).
+    - None/Onetime & Purchase_Limit_Count==0(무제한) 또는 2 이상(다회구매가능) → Count>=1만으로는
+      "이번 결제가 지급됐다"를 보장하지 못한다(2026-07-07 피드백). 영수증검증 전체 내역에서 동일
+      Description 과거 구매 건수(attempts)와 ShopData Count를 대조해, Count가 attempts보다 적으면
+      그 차이만큼 미지급으로 확정한다.
+
+    반환: (count_judgment: "HELD"|"CONFIRMED_MISSING"|"CONFIRMED_GRANTED", notes: list[str])
+    """
+    notes = []
+    limit_type = shopdata.get("purchase_limit_type")
+    limit_count = shopdata.get("purchase_limit_count")
+    purchase_count = shopdata.get("purchase_count")
+
+    if limit_type not in NO_RESET_PURCHASE_LIMIT_TYPES:
+        notes.append("Count 자동 판정 보류(주차/상품유형) — 사람 확인 필요")
+        return "HELD", notes
+
+    if limit_count == 1:
+        if purchase_count == 0:
+            notes.append(f"Purchase_Limit_Type={limit_type}(단일구매, 초기화 없음) → Count=0 → 미지급 확정")
+            return "CONFIRMED_MISSING", notes
+        notes.append(f"Purchase_Limit_Type={limit_type}(단일구매, 초기화 없음) → Count={purchase_count} → 이미 지급됨(재지급 불필요)")
+        return "CONFIRMED_GRANTED", notes
+
+    attempts = count_receipt_matches(rows, product_code)
+    missing = attempts - purchase_count
+    if missing > 0:
+        notes.append(
+            f"Purchase_Limit_Type={limit_type}(다회구매가능, limit_count={limit_count}) → "
+            f"영수증검증 동일상품 구매기록 {attempts}건 vs ShopData Count {purchase_count}건 → {missing}건 미지급 확정"
+        )
+        return "CONFIRMED_MISSING", notes
+    notes.append(
+        f"Purchase_Limit_Type={limit_type}(다회구매가능, limit_count={limit_count}) → "
+        f"영수증검증 동일상품 구매기록 {attempts}건 vs ShopData Count {purchase_count}건 → 전체 지급 확인(재지급 불필요)"
+    )
+    return "CONFIRMED_GRANTED", notes
 
 
 def _resolve_gcp_candidates_result(logging_service, brand, uuid_value, product_id, order_create_time, notes):
@@ -242,7 +360,7 @@ def judge_nonpayment(
 
     반환: verdict / receipt / matched_row / product_code / product_source /
           product_candidates(list|None) / shopdata{purchase_line_number, purchase_count,
-          count_judgment} | None / notes[]
+          purchase_limit_type, purchase_limit_count, count_judgment} | None / notes[]
     """
     notes = []
     receipt = run_receipt_verification(
@@ -328,9 +446,24 @@ def judge_nonpayment(
         }
     except Exception as exc:  # noqa: BLE001 — 그 외 조회 실패는 기록만 하고 결과 반환
         notes.append(f"ShopData Count 조회 실패: {exc}")
-    notes.append("Count 자동 판정 보류(주차/상품유형) — 사람 확인 필요")
+
+    if shopdata is None:
+        count_judgment = "HELD"
+        notes.append("Count 자동 판정 보류(ShopData 조회 실패) — 사람 확인 필요")
+    else:
+        count_judgment, judgment_notes = resolve_count_judgment(shopdata, rows, product_code)
+        shopdata["count_judgment"] = count_judgment
+        notes.extend(judgment_notes)
+
+    if count_judgment == "CONFIRMED_MISSING":
+        verdict = "pattern3_count_confirmed_missing"
+    elif count_judgment == "CONFIRMED_GRANTED":
+        verdict = "pattern3_count_confirmed_granted"
+    else:
+        verdict = "pattern3_count_review"
+
     return {
-        "verdict": "pattern3_count_review",
+        "verdict": verdict,
         "receipt": receipt,
         "matched_row": matched,
         "product_code": product_code,
@@ -363,7 +496,10 @@ def print_result(result):
     shopdata = result.get("shopdata")
     if shopdata:
         print(f" ShopData Count  : line={shopdata.get('purchase_line_number')} "
-              f"count={shopdata.get('purchase_count')} judgment={shopdata.get('count_judgment')}")
+              f"count={shopdata.get('purchase_count')} "
+              f"limit_type={shopdata.get('purchase_limit_type')} "
+              f"limit_count={shopdata.get('purchase_limit_count')} "
+              f"judgment={shopdata.get('count_judgment')}")
     for note in result.get("notes", []):
         print(f" - {note}")
     print(_SEP)
@@ -401,6 +537,8 @@ def save_artifacts(page, out_dir, uuid_value, succeeded, result=None, error_mess
         shopdata = result.get("shopdata") or {}
         lines.append(f"purchase_line_number={shopdata.get('purchase_line_number')}")
         lines.append(f"purchase_count={shopdata.get('purchase_count')}")
+        lines.append(f"purchase_limit_type={shopdata.get('purchase_limit_type')}")
+        lines.append(f"purchase_limit_count={shopdata.get('purchase_limit_count')}")
         lines.append(f"count_judgment={shopdata.get('count_judgment')}")
         for note in result.get("notes", []):
             lines.append(f"note={note}")
