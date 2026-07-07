@@ -518,6 +518,7 @@ def run_receipt_verification(
     project_name,
     timeout_error,
     nickname=None,
+    nickname_source=None,
 ):
     prepare_console_project(
         page=page,
@@ -529,7 +530,9 @@ def run_receipt_verification(
     # UUID를 "기록 없음"으로 잘못 취급하지 않기 위함) — 존재하지 않으면 InvalidUuidError.
     # nickname이 있으면 ensure_uuid_registered 내부에서 '닉네임' 재검색으로 오탈자 여부까지
     # 대조하며, 동일인으로 판정되면 콘솔이 확정한 UUID(effective_uuid)를 돌려준다(2026-07-08).
-    effective_uuid = ensure_uuid_registered(page, uuid_value, timeout_error, nickname=nickname)
+    effective_uuid = ensure_uuid_registered(
+        page, uuid_value, timeout_error, nickname=nickname, nickname_source=nickname_source
+    )
     open_receipt_verification_menu(page)
     wait_for_receipt_page_render_stable(page)
     fill_uuid_search(page, effective_uuid)

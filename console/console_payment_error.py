@@ -354,6 +354,7 @@ def judge_nonpayment(
     product_id=None,
     order_create_time=None,
     nickname=None,
+    nickname_source=None,
     table_name="ShopData",
     logging_service=None,
     start_url=DEFAULT_START_URL,
@@ -380,7 +381,8 @@ def judge_nonpayment(
     notes = []
     try:
         receipt = run_receipt_verification(
-            page, uuid_value, "", start_url, project_name, timeout_error, nickname=nickname
+            page, uuid_value, "", start_url, project_name, timeout_error,
+            nickname=nickname, nickname_source=nickname_source,
         )
     except InvalidUuidError as exc:
         # '유저' 탭에서 존재하지 않는다고 이미 확정된 UUID — 오탈자 등 결정론적 문제라
@@ -404,11 +406,16 @@ def judge_nonpayment(
 
     effective_uuid = receipt.get("resolved_uuid") or uuid_value
     if effective_uuid != uuid_value:
+        source_warning = (
+            " ※ 닉네임 출처가 오qupie '보낸 사람' 표시명이라 인게임 닉네임과 다를 수 있음 — 보정 결과를 특히 신중히 확인할 것."
+            if nickname_source == "sender_display_name"
+            else ""
+        )
         notes.append(
             f"닉네임 대조로 UUID 오탈자 확정 — 제출값={uuid_value} → 확정값={effective_uuid} "
-            "(이후 조회는 확정값 기준)"
+            f"(이후 조회는 확정값 기준){source_warning}"
         )
-        print(f" [미지급 판정] 닉네임 대조로 UUID 오탈자 확정 → 이후 조회는 '{effective_uuid}' 기준으로 진행")
+        print(f" [미지급 판정] 닉네임 대조로 UUID 오탈자 확정 → 이후 조회는 '{effective_uuid}' 기준으로 진행{source_warning}")
 
     # 분기A 패턴1: 영수증검증 기록 없음 → 미지급 확정. 상품은 로그 후보로 나열.
     if not receipt.get("has_results"):
@@ -628,6 +635,16 @@ def parse_args():
             "오탈자 여부를 대조하는 데 쓰인다(선택, 미지정 시 대조 없이 바로 실패)"
         ),
     )
+    parser.add_argument(
+        "--nickname-source",
+        dest="nickname_source",
+        default="",
+        choices=["", "custom_field", "sender_display_name"],
+        help=(
+            "--nickname 값의 출처(선택). 'sender_display_name'이면 오qupie 보낸사람 "
+            "표시명이라 인게임 닉네임과 다를 수 있다는 경고를 결과에 함께 남긴다."
+        ),
+    )
     parser.add_argument("--product-id", dest="product_id", default="",
                          help="Play productId(=StorePurchaseCode_AOS). 분기A(패턴1·2) 후보 조회용, 선택")
     parser.add_argument("--order-time", dest="order_create_time", default="",
@@ -702,6 +719,7 @@ def main():
                     product_id=args.product_id or None,
                     order_create_time=args.order_create_time or None,
                     nickname=args.nickname or None,
+                    nickname_source=args.nickname_source or None,
                     table_name=args.table_name,
                     logging_service=logging_service,
                     start_url=args.start_url,

@@ -45,6 +45,12 @@ _ATTACH_EXT = re.compile(
     re.IGNORECASE,
 )
 
+# '보낸 사람' 필드는 보통 "표시명 <email>" 형식(오qupie 고객센터 계정 표시명 —
+# 인게임 닉네임과 다를 수 있음). UUID 오탈자 대조용 닉네임 claim이 티켓 폼에
+# 아예 없는 브랜드(2026-07-08 실측: "게임타이틀" 문의 양식엔 닉네임 항목 자체가
+# 없음)의 최후 폴백으로만 쓴다(2026-07-08 사용자 결정).
+_SENDER_DISPLAY_NAME_RE = re.compile(r"^(.*?)\s*<[^<>]*>\s*$")
+
 _CUSTOM_FIELD_RULES_DEFAULT_ENV = "CS_CUSTOM_FIELD_RULES_DEFAULT"
 _CUSTOM_FIELD_RULES_BRAND_ENV = "CS_CUSTOM_FIELD_RULES_BY_BRAND"
 _PACKAGE_BRAND_RULES_ENV = "CS_PACKAGE_BRAND_RULES"
@@ -334,6 +340,16 @@ def _select_custom_field_claims(field_map: dict, brand: str):
     return resolved, selected
 
 
+def _extract_sender_display_name(sender: str):
+    """'표시명 <email>'에서 표시명만 뽑는다. 형식이 안 맞으면 원문 그대로(트림)."""
+    if not sender:
+        return None
+    stripped = sender.strip()
+    match = _SENDER_DISPLAY_NAME_RE.match(stripped)
+    name = match.group(1).strip() if match else stripped
+    return name or None
+
+
 def resolve_brand_package(brand: str):
     package_name, _rules = _resolve_brand_package_entry(brand)
     return package_name
@@ -409,8 +425,10 @@ def parse_ticket(dump_json: dict) -> dict:
       order_id       : 정규화된 GPA.xxxx-… (str | None)
       order_norm_status : "ok" 또는 "digit_count=N" (str | None)
       uuid           : UUID 소문자 정규화 (str | None)
-      nickname       : 유저 닉네임 claim, 별칭 설정 시에만 (str | None) — uuid가 콘솔에서
-                       무효 판정될 때 오탈자 대조 폴백에만 쓰임(진실 판정 아님)
+      nickname       : 오탈자 대조 폴백용 닉네임 후보 (str | None) — uuid가 콘솔에서 무효
+                       판정될 때만 쓰임(진실 판정 아님). 닉네임 커스텀 필드가 있으면
+                       그 값, 없으면 '보낸 사람' 표시명(오qupie 계정 표시명, 신뢰도 낮음)
+      nickname_source: nickname의 출처 — "custom_field" | "sender_display_name" | None
       brand          : 브랜드 (str | None)
       category       : 문의유형 claim (str | None) — 채널 판정 금지
       ticket_status  : 티켓 상태 (str | None)
@@ -483,9 +501,20 @@ def parse_ticket(dump_json: dict) -> dict:
     # ── 3-1) 닉네임 추출(선택) — uuid가 콘솔에서 무효 판정될 때 오탈자 대조용
     # 폴백으로만 쓰인다(console_user_search.ensure_uuid_registered 참고). 브랜드별
     # 별칭은 uuid/order_id와 동일하게 CS_*_CUSTOM_FIELD_RULES* env로 설정한다.
+    # 커스텀 필드에 닉네임 항목이 없는 브랜드(2026-07-08 실측: "게임타이틀" 문의
+    # 양식엔 닉네임 항목 자체가 없음)는 '보낸 사람' 표시명을 최후 폴백으로 쓴다
+    # (2026-07-08 사용자 결정 — 오qupie 계정 표시명이라 인게임 닉네임과 다를 수
+    # 있어 nickname_source로 출처를 남겨 판정 시 신뢰도를 구분한다).
     nickname = None
+    nickname_source = None
     if resolved_custom_fields.get("nickname"):
         nickname = resolved_custom_fields["nickname"]["value"] or None
+        if nickname:
+            nickname_source = "custom_field"
+    if not nickname:
+        nickname = _extract_sender_display_name(sender)
+        if nickname:
+            nickname_source = "sender_display_name"
 
     # ── 4) 최초 문의 메시지 본문 ──────────────────────────────────────────
     body_text = dump_json.get("bodyText", "")
@@ -500,6 +529,7 @@ def parse_ticket(dump_json: dict) -> dict:
         "order_norm_status": order_norm_status,
         "uuid": uuid,
         "nickname": nickname,
+        "nickname_source": nickname_source,
         "brand": brand,
         "app_package": app_package,
         "category": category,
