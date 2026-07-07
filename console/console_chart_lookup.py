@@ -390,12 +390,27 @@ def open_chart_detail(page, chart_name):
 
 def find_applied_chart_file_row(page):
     rows = page.locator("table tbody tr")
+    if rows.count() == 0:
+        raise RuntimeError("차트 파일 이력 테이블에 행이 없습니다.")
+
     preferred = rows.filter(
         has=page.locator("i.checkmark, i.check.circle, i.green.check, i.check")
-    ).first
-    if wait_for_visible(preferred, 2_000):
-        return preferred
-    return rows.first
+    )
+    visible_rows = []
+    for index in range(preferred.count()):
+        row = preferred.nth(index)
+        if wait_for_visible(row, 500):
+            visible_rows.append(row)
+
+    if len(visible_rows) == 1:
+        return visible_rows[0]
+    if not visible_rows:
+        raise RuntimeError(
+            "현재 적용 중인 차트 파일 행을 찾지 못했습니다. 체크 표시 행이 없으므로 첫 행을 임의로 사용하지 않습니다."
+        )
+    raise RuntimeError(
+        f"현재 적용 중인 차트 파일 행이 {len(visible_rows)}개로 모호합니다. CSV 다운로드를 중단합니다."
+    )
 
 
 def get_applied_file_id(page) -> str:
@@ -404,11 +419,11 @@ def get_applied_file_id(page) -> str:
     table = row.locator("xpath=ancestor::table[1]")
     idx = find_column_index_by_header(table, "파일 ID")
     if idx < 0:
-        return ""
+        raise RuntimeError("차트 파일 이력 테이블에서 '파일 ID' 컬럼을 찾지 못했습니다.")
     try:
         return row.locator("td").nth(idx).inner_text().strip()
-    except Exception:
-        return ""
+    except Exception as exc:
+        raise RuntimeError("현재 적용 중인 차트 파일 행에서 파일 ID를 읽지 못했습니다.") from exc
 
 
 def click_applied_chart_file_row(page):

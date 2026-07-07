@@ -234,27 +234,6 @@ def normalize_project_name(value):
     return compact.lower()
 
 
-def score_project_name(name, project_name):
-    name_norm = normalize_project_name(name)
-    target_norm = normalize_project_name(project_name)
-    if target_norm not in name_norm:
-        return -1
-
-    score = 100
-    if "라이브" in name:
-        score += 50
-    if "live" in name.lower():
-        score += 40
-    if "엔터프라이즈" in name or "enterprise" in name.lower():
-        score += 5
-
-    penalty_words = ["ios", "dev", "test", "테스트", "qa", "stage", "azur"]
-    for word in penalty_words:
-        if word in name.lower():
-            score -= 25
-    return score
-
-
 def find_project_selector_button(page):
     return page.locator("button:has(p):has(svg[name='chevron-down'])").first
 
@@ -306,20 +285,37 @@ def select_project_by_name(page, project_name):
     ensure_project_menu_open(page)
     menu_items = page.locator("[role='menuitem']")
     count = menu_items.count()
+    target_norm = normalize_project_name(project_name)
 
-    candidates = []
+    exact_candidates = []
+    partial_candidates = []
     for index in range(count):
         item = menu_items.nth(index)
         name = item.locator("p").first.inner_text().strip()
-        score = score_project_name(name, project_name)
-        if score >= 0:
-            candidates.append((score, name, index))
+        name_norm = normalize_project_name(name)
+        if name_norm == target_norm:
+            exact_candidates.append((name, index))
+        elif target_norm and target_norm in name_norm:
+            partial_candidates.append((name, index))
 
-    if not candidates:
+    if len(exact_candidates) == 1:
+        selected_name, selected_index = exact_candidates[0]
+    elif len(exact_candidates) > 1:
+        names = ", ".join(name for name, _ in exact_candidates)
+        raise RuntimeError(
+            f"프로젝트 목록에서 '{project_name}'와 정확히 일치하는 후보가 {len(exact_candidates)}개로 모호합니다: {names}"
+        )
+    elif len(partial_candidates) == 1:
+        selected_name, selected_index = partial_candidates[0]
+    elif len(partial_candidates) > 1:
+        names = ", ".join(name for name, _ in partial_candidates)
+        raise RuntimeError(
+            f"프로젝트 목록에서 '{project_name}'를 포함하는 후보가 {len(partial_candidates)}개로 모호합니다: {names}. "
+            "--project-name 또는 TITLE_PROJECT_NAME env를 실제 표시명으로 더 정확히 지정하세요."
+        )
+    else:
         raise RuntimeError(f"프로젝트 목록에서 '{project_name}' 후보를 찾지 못했습니다.")
 
-    candidates.sort(key=lambda row: row[0], reverse=True)
-    _, selected_name, selected_index = candidates[0]
     selected_item = menu_items.nth(selected_index)
 
     print(f"[3] 프로젝트 선택: {selected_name}")

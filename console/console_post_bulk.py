@@ -12,6 +12,7 @@ CSV 필수 열: posttitle, postbody, chart category, item, value, uuid
 """
 
 import csv
+import re
 import sys
 from pathlib import Path
 
@@ -113,13 +114,34 @@ def group_rows(rows: list) -> list:
 
 # ── 아이템 선택 (bulk 전용: chart category + item 값으로 매칭) ─────────────────
 
+def _bulk_item_field_candidates(chart_category: str) -> list[str]:
+    base = (chart_category or "").strip()
+    if not base:
+        raise RuntimeError("chart category 값이 비어 있어 아이템 필드명을 만들 수 없습니다.")
+    table_base = base if base.lower().endswith("table") else f"{base}Table"
+    return [
+        f"{table_base}_ID",
+        f"{table_base}_Id",
+        f"{table_base}_id",
+    ]
+
+
+def _option_matches_bulk_item(option_text: str, field_names: list[str], item_value: str) -> bool:
+    value = (item_value or "").strip()
+    for field_name in field_names:
+        quoted_value_pattern = rf'"{re.escape(field_name)}"\s*:\s*"{re.escape(value)}"'
+        raw_value_pattern = rf'"{re.escape(field_name)}"\s*:\s*{re.escape(value)}(?=\s*[,}}\]])'
+        if re.search(quoted_value_pattern, option_text) or re.search(raw_value_pattern, option_text):
+            return True
+    return False
+
 def select_bulk_item_in_popup(page, chart_category: str, item_value: str):
     """아이템 추가 팝업에서 chart_category/item_value 로 아이템 선택.
 
-    드롭다운 옵션 텍스트는 JSON 형식이므로 item_value 를 포함하는
-    여러 후보 substring 을 순서대로 시도한다.
+    드롭다운 옵션 텍스트는 JSON 형식이므로 chart_category로 만든 Table_ID 필드와
+    item_value가 같은 옵션을 정확히 1개만 허용한다.
     예) chart_category='Coin', item_value='2000'
-        → '":\"2000\"' 또는 '":2000,' 등
+        → "CoinTable_ID":2000 또는 "CoinTable_ID":"2000"
     """
     print(f"[11] 아이템 드롭다운에서 chart='{chart_category}', item='{item_value}' 선택합니다.")
     dialog = get_item_add_dialog(page)
@@ -129,24 +151,31 @@ def select_bulk_item_in_popup(page, chart_category: str, item_value: str):
     record_step_dump(page, "bulk_item_dd_pre")
     item_dropdown.click()
 
-    # JSON 값 형식이 문자열("2000") 또는 숫자(2000) 모두 대응
-    substrs = [
-        f'":"{item_value}"',   # "CoinTable_Id":"2000"
-        f'":{item_value},',    # "CoinTable_ID":2000,
-        f'":{item_value}}}',   # "CoinTable_ID":2000} (JSON 마지막 키)
-    ]
-    option = None
-    for substr in substrs:
-        candidates = dialog.locator("[role='option']").filter(has_text=substr)
-        if candidates.count() > 0:
-            option = candidates.first
-            break
+    field_names = _bulk_item_field_candidates(chart_category)
+    options = dialog.locator("[role='option']")
+    matches = []
+    for index in range(options.count()):
+        option = options.nth(index)
+        try:
+            option_text = option.inner_text().strip()
+        except Exception:
+            continue
+        if _option_matches_bulk_item(option_text, field_names, item_value):
+            matches.append((option, option_text))
 
-    if option is None:
+    if not matches:
         raise RuntimeError(
-            f"아이템 드롭다운에서 chart='{chart_category}', item='{item_value}' 옵션을 찾지 못했습니다."
+            f"아이템 드롭다운에서 chart='{chart_category}', item='{item_value}' "
+            f"({', '.join(field_names)}) 옵션을 찾지 못했습니다."
+        )
+    if len(matches) > 1:
+        samples = " / ".join(text[:80] for _, text in matches[:3])
+        raise RuntimeError(
+            f"아이템 드롭다운에서 chart='{chart_category}', item='{item_value}' 후보가 "
+            f"{len(matches)}개로 모호합니다: {samples}"
         )
 
+    option, _ = matches[0]
     option.wait_for(state="visible", timeout=10_000)
     option.scroll_into_view_if_needed()
     record_step_dump(page, "bulk_item_option_pre")
@@ -154,6 +183,11 @@ def select_bulk_item_in_popup(page, chart_category: str, item_value: str):
 
     selected_text = item_dropdown.locator(".text, .divider.text").first.inner_text().strip()
     print(f"    선택 결과: {selected_text[:100]}...")
+    if not _option_matches_bulk_item(selected_text, field_names, item_value):
+        raise RuntimeError(
+            f"아이템 선택 결과가 기대값과 다릅니다. expected chart='{chart_category}', "
+            f"item='{item_value}', actual='{selected_text[:120]}'"
+        )
     return selected_text
 
 
