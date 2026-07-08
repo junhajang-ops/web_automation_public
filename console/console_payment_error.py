@@ -926,7 +926,7 @@ def judge_nonpayment(
     branch_label = (
         "상품코드 비어있음(로그 후보로 특정)"
         if pattern == "pattern2"
-        else "description 정상(ShopData Count 대조)"
+        else "description 정상 → 로그 미사용, ShopData Count 조회로 이동"
     )
     print(f" [지급 상태 판정] 매칭 행 발견 — description='{matched_desc}' → {branch_label}")
 
@@ -951,8 +951,9 @@ def judge_nonpayment(
     # 분기B(description 정상): 상품코드 = description → 로그는 안 보고 곧바로
     # ShopData Count 조회(판정 보류). 분기A와 완전히 분리 — product_id/order_create_time 불필요.
     # classify_receipt_row가 이미 빈값/PurchaseCodeNull을 걸러냈으므로 matched_desc는 실값이다.
+    # 위 '매칭 행 발견' 로그의 branch_label에서 이미 'description 정상 → ShopData Count 조회'를
+    # 안내했으므로 여기서 같은 문구를 다시 찍지 않는다(2026-07-08 사용자 지적: 중복 출력).
     product_code = matched_desc.strip()
-    print(f" [지급 상태 판정] description 정상('{product_code}') → 로그 미사용, ShopData Count 조회로 이동")
     shopdata = None
     try:
         shopdata = lookup_count_readonly(
