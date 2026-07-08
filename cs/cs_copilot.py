@@ -17,6 +17,7 @@ cs_copilot.py — cs 실시간 보조 co-pilot (읽기 전용 MVP)
 """
 
 import argparse
+import ctypes
 import json
 import os
 import queue
@@ -24,6 +25,7 @@ import re
 import sys
 import threading
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 try:
@@ -335,6 +337,12 @@ _STATE_LABEL = {
     "REFUNDED":           "전액 환불됨",
 }
 
+# UTC ISO8601('...Z') → KST 표시 변환용 (2026-07-08 요청: 결제일을 KST로 보이게)
+_UTC_ISO_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?Z$")
+
+ANSI_GREEN = "\033[92m"
+ANSI_RESET = "\033[0m"
+
 
 # ── 헬퍼 ──────────────────────────────────────────────────────────────────────
 
@@ -344,6 +352,50 @@ def _fmt_money(m):
     units = int(m.get("units", 0))
     nanos = int(m.get("nanos", 0))
     return f"{units + nanos / 1e9:,.2f} {m.get('currencyCode', '')}".strip()
+
+
+def _to_kst_display(iso_utc: str) -> str:
+    """Google Play API의 UTC ISO8601('...Z') 문자열을 KST(UTC+9) 표시용으로 변환.
+
+    형식이 안 맞으면 원문 그대로 반환한다(임의 보정 금지).
+    """
+    m = _UTC_ISO_RE.match(iso_utc or "")
+    if not m:
+        return iso_utc
+    base, frac = m.groups()
+    dt_kst = datetime.strptime(base, "%Y-%m-%dT%H:%M:%S") + timedelta(hours=9)
+    return dt_kst.strftime("%Y-%m-%dT%H:%M:%S") + (frac or "") + "KST"
+
+
+def _supports_color() -> bool:
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _green(text: str) -> str:
+    if not _supports_color():
+        return text
+    return f"{ANSI_GREEN}{text}{ANSI_RESET}"
+
+
+def _enable_windows_ansi() -> None:
+    """conhost 등 구형 콘솔에서도 ANSI 색상 코드가 실제 색으로 렌더링되도록
+    가상 터미널 처리를 켠다(console_step_verify.configure_console_output과 동일 패턴).
+    """
+    if os.name != "nt":
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        STD_OUTPUT_HANDLE = -11
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+    except Exception:
+        pass
 
 
 # ── 핵심 verdict 함수 — 배치 파이프라인 단계2·3 재사용 대상 ────────────────────
@@ -376,7 +428,7 @@ def build_verdict(parsed: dict, order_result: dict | None, http_status: int | No
         if total:
             detail_lines.append(f"금액     : {_fmt_money(total)}")
         if order_result.get("createTime"):
-            detail_lines.append(f"결제일   : {order_result['createTime']}")
+            detail_lines.append(f"결제일   : {_to_kst_display(order_result['createTime'])}")
 
         hist = order_result.get("orderHistory") or {}
         ref_ev = hist.get("refundEvent")
@@ -600,10 +652,15 @@ def _print_verdict(ticket_id, parsed, verdict, warnings=None, custom_fields=None
         for k, v in custom_fields.items():
             print(f" * {k} : {v}")
     print(f" 채널     : {channel_disp}")
+    is_processed = state == "PROCESSED"
     if state_disp:
-        print(f" 상태     : {state_disp}")
-    for line in verdict["detail_lines"]:
-        print(f" {line}")
+        line = f" 상태     : {state_disp}"
+        print(_green(line) if is_processed else line)
+    for detail in verdict["detail_lines"]:
+        line = f" {detail}"
+        if is_processed and (detail.startswith("결제일") or detail.startswith("Google 상품 코드")):
+            line = _green(line)
+        print(line)
     print(f" 판정     : {verdict['verdict_label']}")
     print(_SEP)
 
@@ -1164,7 +1221,14 @@ def _handle_ticket(page, ticket_id, service, console_worker=None, console_jobs=N
     else:
         packages = _ALL_PACKAGES
 
-    custom_fields = parsed.get("selected_custom_fields") or None
+    # 주문번호 커스텀 필드는 원문 라벨(예: "GPA.로 시작하는 주문번호 (카드사, 페이,
+    # 카카오톡 영수증 X)")이 그대로 찍혀 바로 아래 "* 주문번호 : ..." 줄과 중복
+    # 표시된다. 파싱(selected_custom_fields 자체)은 그대로 두고 터미널 출력에서만
+    # 값이 order_id_raw와 같은 항목을 제외한다(2026-07-08 요청, 표시 전용 간소화).
+    custom_fields = parsed.get("selected_custom_fields") or {}
+    order_id_raw = parsed.get("order_id_raw")
+    if order_id_raw:
+        custom_fields = {k: v for k, v in custom_fields.items() if v != order_id_raw}
     display_num = _find_display_ticket_num(data) or ticket_id  # #NNNNN 또는 URL ID
     order_result, http_status, _ = _fetch_order(service, packages, parsed["order_id"])
     verdict = build_verdict(parsed, order_result, http_status)
@@ -1196,6 +1260,8 @@ def _handle_ticket(page, ticket_id, service, console_worker=None, console_jobs=N
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 
 def main():
+    _enable_windows_ansi()
+
     parser = argparse.ArgumentParser(description="cs 실시간 보조 co-pilot (읽기 전용)")
     parser.add_argument("--key", help="Google 서비스 계정 JSON 키 파일 경로")
     parser.add_argument("--test", action="store_true", help="build_verdict 단위 테스트 후 종료")
@@ -1298,9 +1364,6 @@ def main():
         print("=" * 44)
         print(" cs co-pilot 실행 중 (읽기 전용)")
         print("=" * 44)
-        print(" cs 티켓 상세 페이지를 열면 자동으로 분석합니다.")
-        print(" 미지급 확정 판정이 뜨면 '재지급' 또는 '재지급 N' 입력 시 우편으로 재지급합니다(비가역, 사람 승인).")
-        print(" 종료: Ctrl+C")
         print()
 
         # 창 위치 주기 저장(2026-07-09 추가) — Ctrl+C 시점(종료 처리 중)의 저장은
