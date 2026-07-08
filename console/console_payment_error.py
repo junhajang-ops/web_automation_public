@@ -445,7 +445,9 @@ def judge_nonpayment(
     # 주문번호만 없음) 재지급 판단 기준으로는 동일한 조건이라 verdict를 나누지 않는다
     # (2026-07-07 사용자 지적 — 애초에 둘 다 "Google엔 있는데 콘솔 영수증검증엔 이 건이
     # 없다"는 하나의 사실이며, UUID 유효성은 이미 위에서 확정됐으므로 무효 UUID와도 무관).
-    # 원인 차이는 notes 텍스트로만 남긴다.
+    # 원인 차이는 아래 "[미지급 판정]" 즉시 출력 문구로만 남긴다 — notes에도 같은 문구를
+    # 중복으로 넣으면 co-pilot 최종 요약(cs_copilot._print_payment_error)에서 방금 본
+    # 문장이 그대로 한 번 더 찍혀 중복이었다(2026-07-08 사용자 지적).
     rows = receipt.get("rows") or []
     if not receipt.get("has_results"):
         matched = None
@@ -454,7 +456,7 @@ def judge_nonpayment(
         matched = _select_target_row(rows, order_id)
         no_record_reason = (
             "주문번호가 없어 대상 행을 특정하지 못함" if not order_id
-            else f"주문번호 '{order_id}'와 일치하는 행 없음(다른 구매 내역은 있음)"
+            else f"주문번호 '{order_id}'와 일치하는 행 없음"
         )
 
     if matched is None:
@@ -475,8 +477,7 @@ def judge_nonpayment(
                 "submitted_uuid": uuid_value,
                 "resolved_uuid": effective_uuid,
             }
-        print(f" [미지급 판정] {no_record_reason} → 패턴1(미지급 확정) — GCP 로그 후보 조회로 상품 특정")
-        notes.append(f"{no_record_reason} → 패턴1(미지급 확정) 취급")
+        print(f" [미지급 판정] {no_record_reason}(미지급 확정) → GCP 로그 후보 조회로 상품 특정")
         product_code, candidates = _resolve_gcp_candidates_result(
             logging_service, brand, effective_uuid, product_id, order_create_time, notes
         )

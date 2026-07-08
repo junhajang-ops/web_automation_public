@@ -1044,10 +1044,15 @@ def _print_payment_error(ticket_id, result, error):
     resolved_uuid = result.get("resolved_uuid")
     if submitted_uuid and resolved_uuid and submitted_uuid != resolved_uuid:
         print(f"   UUID       : 제출값={submitted_uuid} → 닉네임 대조로 확정={resolved_uuid}")
-    print(f"   상품코드   : {result.get('product_code') or '(미특정)'} (source={result.get('product_source')})")
+    regrant_ctx = _resolve_regrant_context(ticket_id, result)
+    is_actionable = bool(regrant_ctx)
+
+    product_line = f"   상품코드   : {result.get('product_code') or '(미특정)'}"
+    print(_green(product_line) if is_actionable else product_line)
     candidates = result.get("product_candidates")
     if candidates:
-        print(f"   GCP 로그 후보 {len(candidates)}건(자동 미확정 — 사람 확인):")
+        cand_header = f"   GCP 로그 후보 {len(candidates)}건:"
+        print(_green(cand_header) if is_actionable else cand_header)
         for i, c in enumerate(candidates, 1):
             print(f"     {i}) {c.get('shop_click_id', '?')} @ {c.get('update_date', '?')} "
                   f"(price={c.get('shop_click_price', '?')})")
@@ -1058,7 +1063,6 @@ def _print_payment_error(ticket_id, result, error):
     for note in result.get("notes", []) or []:
         print(f"   - {note}")
 
-    regrant_ctx = _resolve_regrant_context(ticket_id, result)
     if regrant_ctx:
         if regrant_ctx["candidates"]:
             print(f"   [재지급 가능] 후보 중 번호를 골라 '재지급 N' 입력(예: 재지급 1)")

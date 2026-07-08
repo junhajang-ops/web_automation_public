@@ -238,7 +238,7 @@ def _verify_uuid_input_value(uuid_input, expected_uuid: str) -> None:
 
 
 def fill_uuid_search(page, uuid_value):
-    print(f"[5] UUID 입력창(name='searchValue')에 값을 입력합니다: {uuid_value}")
+    print("[5] UUID 입력창(name='searchValue')에 값을 입력합니다")
     uuid_input = page.locator("input#searchValue").first
     uuid_input.wait_for(state="visible", timeout=15_000)
     uuid_input.scroll_into_view_if_needed()

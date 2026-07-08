@@ -47,6 +47,22 @@ DEFAULT_PROJECT_NAME = "게임타이틀"
 LOGIN_SKIP = ("/login", "/signin", "/oauth", "/logout", "about:blank")
 RETRY_MAX_RETRIES = get_retry_max_retries()
 
+ANSI_GREEN = "\033[92m"
+ANSI_RESET = "\033[0m"
+
+
+def _supports_color() -> bool:
+    try:
+        return sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _green(text: str) -> str:
+    if not _supports_color():
+        return text
+    return f"{ANSI_GREEN}{text}{ANSI_RESET}"
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -656,7 +672,7 @@ def ensure_uuid_registered(page, uuid_value, timeout_error, nickname=None, nickn
         ignore_patterns=[r"role: (gridcell|menu|rowgroup)$"] + SIDEBAR_BASE_MENU_IGNORE_PATTERNS,
     )
     if lookup_status == "valid":
-        print(f"[유저 탭] UUID 확인됨(존재함): {uuid_value}")
+        print(_green(f"[유저 탭] UUID 확인됨(존재함): {uuid_value}"))
         return uuid_value
 
     if not nickname:
