@@ -31,6 +31,7 @@ from console_step_verify import (
     retry_with_recovery,
     save_page_artifacts,
     step_and_verify_ui,
+    wait_for_loading_settled,
     wait_until,
 )
 from console_user_search import (
@@ -397,6 +398,7 @@ def find_applied_chart_file_row(page, timeout_ms=10_000):
     오판할 수 있다. 최종적으로도 0개/2개 이상이면 실제로 모호한 상태이므로 그대로
     실패 처리한다(첫 행을 임의로 쓰지 않는다).
     """
+    wait_for_loading_settled(page, timeout_ms=timeout_ms)
     table_rows = page.locator("table tbody tr")
     if not wait_for_visible(table_rows.first, timeout_ms):
         raise RuntimeError("차트 파일 이력 테이블에 행이 없습니다.")
