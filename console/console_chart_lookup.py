@@ -1,6 +1,9 @@
 ﻿# -*- coding: utf-8 -*-
 """
-Console console chart lookup smoke test.
+Console console chart CSV refresh utility.
+
+console_payment_error.py / console_post_register.py가 판정·재지급에 쓰는
+web_docs/chart_{chart_name}_*.csv 캐시를 최신화하는 도구입니다.
 
 Scope:
 - Open the Console console
@@ -10,8 +13,7 @@ Scope:
 - Search the exact chart link across paged list results
 - Open the chart detail page
 - Click the currently applied chart file row
-- Change chart-data rows per page from 10 to 100
-- Traverse all chart-data pages
+- Download the CSV for the currently applied chart file
 
 This script is intentionally read-only. It does not click any mutation action.
 """
@@ -19,7 +21,6 @@ This script is intentionally read-only. It does not click any mutation action.
 import argparse
 import csv as csv_mod
 import sys
-import time
 from pathlib import Path
 
 from console_step_verify import (
@@ -46,7 +47,7 @@ from console_user_search import (
     select_target_page,
     wait_for_visible,
 )
-from test_config import TEST_CHART_NAME, TEST_PURCHASE_CODE, apply_title_profile
+from test_config import TEST_CHART_NAME, apply_title_profile
 
 BASE_DIR = Path(__file__).resolve().parent
 PAYMENT_DOCS_DIR = BASE_DIR.parent / "web_docs"
@@ -61,7 +62,7 @@ RETRY_MAX_RETRIES = get_retry_max_retries()
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Console console chart lookup smoke test"
+        description="Console console chart CSV refresh utility"
     )
     parser.add_argument(
         "--chart-name",
@@ -388,28 +389,37 @@ def open_chart_detail(page, chart_name):
     }
 
 
-def find_applied_chart_file_row(page):
-    rows = page.locator("table tbody tr")
-    if rows.count() == 0:
+def find_applied_chart_file_row(page, timeout_ms=10_000):
+    """체크 표시(현재 적용) 행이 정확히 1개 나타날 때까지 폴링한다.
+
+    파일 이력 테이블은 상세 페이지의 다른 요소(업로드 버튼 등)보다 늦게
+    하이드레이션될 수 있어, 단발성 스냅샷 검사는 로딩 중인 화면을 "행 없음"으로
+    오판할 수 있다. 최종적으로도 0개/2개 이상이면 실제로 모호한 상태이므로 그대로
+    실패 처리한다(첫 행을 임의로 쓰지 않는다).
+    """
+    table_rows = page.locator("table tbody tr")
+    if not wait_for_visible(table_rows.first, timeout_ms):
         raise RuntimeError("차트 파일 이력 테이블에 행이 없습니다.")
 
-    preferred = rows.filter(
-        has=page.locator("i.checkmark, i.check.circle, i.green.check, i.check")
-    )
-    visible_rows = []
-    for index in range(preferred.count()):
-        row = preferred.nth(index)
-        if wait_for_visible(row, 500):
-            visible_rows.append(row)
+    checkmark = page.locator("i.checkmark, i.check.circle, i.green.check, i.check")
 
-    if len(visible_rows) == 1:
-        return visible_rows[0]
-    if not visible_rows:
+    def _single_checked_row():
+        preferred = table_rows.filter(has=checkmark)
+        if preferred.count() == 1 and wait_for_visible(preferred.first, 500):
+            return preferred.first
+        return None
+
+    row = wait_until(page, _single_checked_row, timeout_ms=timeout_ms, wait_ms=POLL_WAIT_MS)
+    if row is not None:
+        return row
+
+    final_count = table_rows.filter(has=checkmark).count()
+    if final_count == 0:
         raise RuntimeError(
             "현재 적용 중인 차트 파일 행을 찾지 못했습니다. 체크 표시 행이 없으므로 첫 행을 임의로 사용하지 않습니다."
         )
     raise RuntimeError(
-        f"현재 적용 중인 차트 파일 행이 {len(visible_rows)}개로 모호합니다. CSV 다운로드를 중단합니다."
+        f"현재 적용 중인 차트 파일 행이 {final_count}개로 모호합니다. CSV 다운로드를 중단합니다."
     )
 
 
@@ -459,62 +469,6 @@ def click_applied_chart_file_row(page):
         return None
 
     wait_until(page, _csv_enabled, timeout_ms=5_000, wait_ms=300)
-
-
-
-def get_chart_data_rows_per_page_dropdown(page):
-    dropdown = page.locator("[role='listbox']").last
-    dropdown.wait_for(state="visible", timeout=15_000)
-    return dropdown
-
-
-def set_chart_data_rows_per_page(page, rows_per_page):
-    print(f"[11] 차트 데이터 {rows_per_page}개씩 보기로 변경합니다.")
-    set_dropdown_value(
-        get_chart_data_rows_per_page_dropdown(page),
-        f"{rows_per_page}개씩 보기",
-        "차트 데이터 표시 개수",
-        verify_prefix="chart_data_rows",
-    )
-
-
-def get_chart_data_next_page_button(page):
-    return page.locator(
-        "[aria-label='Pagination Navigation'] a[type='nextItem']"
-    ).last
-
-
-def navigate_all_chart_data_pages(page):
-    print("[12] 차트 데이터 전체 페이지를 순회합니다.")
-    start_ts = time.time()
-    page_count = 1
-
-    while True:
-        next_button = get_chart_data_next_page_button(page)
-        if not wait_for_visible(next_button, 2_000):
-            break
-
-        aria_disabled = (next_button.get_attribute("aria-disabled") or "").lower()
-        class_name = (next_button.get_attribute("class") or "").lower()
-        if aria_disabled == "true" or "disabled" in class_name:
-            break
-
-        next_button.scroll_into_view_if_needed()
-        record_step_dump(page, "chart_data_next_pre")
-        next_button.click()
-        safe_wait_for_load(page, "networkidle", 10_000)
-        page.locator("table").last.locator("tbody tr").first.wait_for(
-            state="visible",
-            timeout=10_000,
-        )
-        page_count += 1
-
-    elapsed = round(time.time() - start_ts, 1)
-    print(f"    완료: {page_count}페이지, 소요시간 {elapsed}초")
-    return {
-        "data_page_count": page_count,
-        "data_elapsed_seconds": elapsed,
-    }
 
 
 def _read_csv_and_lookup(csv_path: Path, purchase_code: str) -> dict:
@@ -575,7 +529,7 @@ def _do_download_csv(page, csv_path: Path):
 
 
 def download_chart_csv(page, chart_name: str, applied_file_id: str) -> dict:
-    """파일 ID 기반 캐시 확인 → 필요 시 다운로드 → ShopTable_ID 탐색."""
+    """파일 ID 기반 캐시 확인 → 필요 시 다운로드 → 행/열 수 집계."""
     print("[11] CSV 파일을 확인합니다.")
     PAYMENT_DOCS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -594,7 +548,7 @@ def download_chart_csv(page, chart_name: str, applied_file_id: str) -> dict:
         click_applied_chart_file_row(page)
         _do_download_csv(page, csv_path)
 
-    stats = _read_csv_and_lookup(csv_path, TEST_PURCHASE_CODE)
+    stats = _read_csv_and_lookup(csv_path, "")
     print(f"    행 수: {stats['csv_row_count']}, 열 수: {stats['csv_col_count']}")
     return {**stats, "csv_file": csv_filename, "applied_file_id": applied_file_id}
 
@@ -654,7 +608,6 @@ def save_artifacts(
             "csv_file",
             "csv_row_count",
             "csv_col_count",
-            "shop_table_id",
         ]:
             summary_lines.append(f"{key}={result_summary.get(key, '')}")
     if error_message:
@@ -687,7 +640,7 @@ def main():
     init_dump_dir(out_dir)
 
     print("=" * 60)
-    print(" Console chart lookup smoke test")
+    print(" Console 차트 CSV 갱신")
     print("=" * 60)
     print(f"프로필 폴더: {profile_dir.name}")
     print(f"출력 폴더  : {out_dir.name}")
