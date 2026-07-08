@@ -658,10 +658,11 @@ def _print_verdict(ticket_id, parsed, verdict, warnings=None, custom_fields=None
         print(_green(line) if is_processed else line)
     for detail in verdict["detail_lines"]:
         line = f" {detail}"
-        if is_processed and (detail.startswith("결제일") or detail.startswith("Google 상품 코드")):
+        if is_processed and detail.startswith("결제일"):
             line = _green(line)
         print(line)
-    print(f" 판정     : {verdict['verdict_label']}")
+    verdict_line = f" 판정     : {verdict['verdict_label']}"
+    print(_green(verdict_line) if is_processed else verdict_line)
     print(_SEP)
 
 
