@@ -11,16 +11,18 @@ console_payment_error.py — 미지급(결제오류) 판정 (설계서 3-B)
   항상 "실존하는 UUID인데 기록이 없음"만을 의미한다 — 무효 UUID를 미지급으로 오판하지 않는다.
 
 판정은 두 분기로 완전히 나뉘며 서로 의존하지 않는다(영수증검증 description 주축):
-  - 분기A(패턴1·2, 미지급 확정): 이 주문 건이 영수증검증에 없음(`pattern1_no_receipt_record`)
-    / description=PurchaseCodeNull(또는 빈값, `pattern2_purchase_code_null`).
-    → 이미 미지급이 확정된 상태이므로 남은 목적은 "무엇을 재지급할지 상품만 특정"하는 것.
-    Play `productId`(=StorePurchaseCode_AOS) → CSV로 Inapp 후보 집합 산출 → 결제 시각
-    기준 이전 300초 이내(env `PAYMENT_ERROR_CLICK_WINDOW_SECONDS`) log_shop_click 중
-    후보에 속하는 것만 필터 → 0/1/N건 그대로 나열(자동으로 1건을 확정하지 않음 — 2건
-    이상이면 사람이 최종 선택).
-    `pattern1_no_receipt_record`의 "이 주문 건이 없음"은 실제로 두 형태를 하나로 묶은
-    것이다(2026-07-07 사용자 지적 — 재지급 판단 기준으로는 완전히 동일한 조건이라
-    verdict를 나누지 않는다, 원인 차이는 notes로만 구분):
+  - 분기A(패턴1·2): 이 주문 건이 영수증검증에 없음 / description=PurchaseCodeNull(또는 빈값).
+    패턴1(orders.get 결제 성공 + 영수증검증에 해당 주문번호 없음)은 상품 특정 후 재구매 흔적을
+    대조해 `재지급` / `환불` / `미결정`으로 최종 분기한다. Play `productId`(=StorePurchaseCode_AOS)
+    → CSV Inapp 후보 집합 → 결제 시각 이전 300초 이내(env `PAYMENT_ERROR_CLICK_WINDOW_SECONDS`)
+    log_shop_click 후보를 본다. shop_click 후보 1건이면 그 상품으로 진행하고, shop_click 후보가
+    0건이어도 CSV Inapp 후보가 1건이면 그 상품으로 진행한다. CSV 후보가 2건 이상인데
+    shop_click 후보가 0건이면 `상품미특정 환불`, shop_click 후보가 다수이면 `미결정`으로 둔다.
+    상품 확정 후 `None`/`Onetime`은 최근 영수증검증 100건, `Daily`/`Weekly`/`Monthly`는
+    마지막 초기화 이후(KST Daily=매일 00시, Weekly=월요일 00시, Monthly=매달 1일 00시)
+    같은 Code 존재 여부를 본다. 단일구매/한도도 찬 상태면 환불, 누락 상태면 재지급한다.
+    패턴1의 "이 주문 건이 없음"은 실제로 두 형태를 하나로 묶은 것이다
+    (2026-07-07 사용자 지적 — 원인 차이는 즉시 출력 문구로만 구분):
     ① 그 UUID로 영수증검증을 조회했더니 행이 통째로 0건.
     ② 그 UUID는 다른 결제 행이 있지만(has_results=True), 이 주문번호(order_id)와
        일치하는 행만 없음 — UUID 유효성은 이미 위에서 확정했으므로(무효 UUID면
@@ -57,6 +59,7 @@ import csv as csv_mod
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -118,6 +121,8 @@ PAYMENT_ERROR_JSON_MARKER = "===PAYMENT_ERROR_JSON==="
 # 영수증검증 결과 row 의 키는 한글 라벨(RECEIPT_FIELDS 의 두번째 값)
 ROW_DESCRIPTION = "Description"
 ROW_ORDER_ID = "주문 ID"
+ROW_PURCHASE_TIME = "거래일시"
+KST = timezone(timedelta(hours=9))
 
 
 # ── 판정 헬퍼 ─────────────────────────────────────────────────────────────────
@@ -155,6 +160,7 @@ def _select_target_row(rows, order_id):
 # 복수 결제 가능한 상품은 영수증검증 내역의 동일 Description 과거 구매 건수와 대조해 부족분이
 # 있는지 확인해야 한다). Purchase_Limit_Count==1(진짜 단일구매)일 때만 Count 값 자체로 판정한다.
 NO_RESET_PURCHASE_LIMIT_TYPES = {"None", "Onetime"}
+RESET_PURCHASE_LIMIT_TYPES = {"Daily", "Weekly", "Monthly"}
 
 
 def load_purchase_limit_info_map(chart_name=None):
@@ -221,6 +227,28 @@ def load_shop_aos_candidates(chart_name=None):
     raise RuntimeError(f"CSV 인코딩 판별 실패: {csv_path.name}")
 
 
+def resolve_inapp_candidates_from_aos(product_id, chart_name=None):
+    """Play productId(StorePurchaseCode_AOS)에 대응하는 Inapp 후보 목록을 반환한다."""
+    if not product_id:
+        return [], "Play productId(AOS) 없음 — 후보 조회 불가"
+    try:
+        aos_candidates = load_shop_aos_candidates(chart_name)
+    except Exception as exc:  # noqa: BLE001
+        return [], f"CSV 후보 로드 실패: {exc}"
+    inapp_candidates = sorted(aos_candidates.get(product_id) or [])
+    if not inapp_candidates:
+        return [], f"CSV에서 AOS '{product_id}'에 대응하는 Inapp 후보 없음"
+    return inapp_candidates, None
+
+
+def get_purchase_limit_info(product_code):
+    """상품코드의 Purchase_Limit_Type/Count를 CSV에서 읽는다."""
+    info = load_purchase_limit_info_map().get(product_code)
+    if not info:
+        raise RuntimeError(f"CSV에서 Inapp_PurchaseCode '{product_code}'의 Purchase_Limit 정보 없음")
+    return info.get("type"), info.get("count")
+
+
 def resolve_product_candidates_via_gcp(logging_service, brand, uuid_value, product_id, order_create_time):
     """분기A(패턴1·2) 상품 특정: AOS(product_id) → CSV 후보(Inapp) → 결제 시각 이전
     CLICK_MATCH_WINDOW_SECONDS초 이내 log_shop_click 중 후보에 속하는 것만 매칭.
@@ -239,14 +267,9 @@ def resolve_product_candidates_via_gcp(logging_service, brand, uuid_value, produ
     if not (project and log_name):
         return [], f"브랜드 '{brand}' GCP 프로젝트/로그 규칙 없음(env 확인)"
 
-    try:
-        aos_candidates = load_shop_aos_candidates()
-    except Exception as exc:  # noqa: BLE001
-        return [], f"CSV 후보 로드 실패: {exc}"
-
-    inapp_candidates = aos_candidates.get(product_id)
-    if not inapp_candidates:
-        return [], f"CSV에서 AOS '{product_id}'에 대응하는 Inapp 후보 없음"
+    inapp_candidates, err = resolve_inapp_candidates_from_aos(product_id)
+    if err:
+        return [], err
 
     entries, err = fetch_shop_click_candidates_in_window(
         logging_service, project, log_name, uuid_value, order_create_time,
@@ -300,6 +323,77 @@ def lookup_count_readonly(page, uuid_value, table_name, purchase_code, timeout_e
 def count_receipt_matches(rows, product_code):
     """영수증검증 전체 내역 중 동일 Description(=product_code)인 행 수(과거 구매 시도 건수)."""
     return sum(1 for row in rows if (row.get(ROW_DESCRIPTION) or "").strip() == product_code)
+
+
+def _parse_receipt_time(value):
+    """영수증검증 거래일시를 KST aware datetime으로 변환한다."""
+    if value is None or value == "":
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        try:
+            numeric = float(text)
+            if numeric > 10 ** 12:
+                numeric /= 1000.0
+            return datetime.fromtimestamp(numeric, tz=timezone.utc).astimezone(KST)
+        except (OSError, OverflowError, ValueError):
+            return None
+
+    normalized = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        dt = None
+    if dt is None:
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y.%m.%d %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y.%m.%d %H:%M",
+            "%Y/%m/%d %H:%M",
+        ):
+            try:
+                dt = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=KST)
+    return dt.astimezone(KST)
+
+
+def _last_reset_at(limit_type, now=None):
+    """Daily/Weekly/Monthly 구매 제한의 마지막 KST 초기화 시각."""
+    now = (now or datetime.now(KST)).astimezone(KST)
+    if limit_type == "Daily":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if limit_type == "Weekly":
+        base = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return base - timedelta(days=base.weekday())
+    if limit_type == "Monthly":
+        return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return None
+
+
+def count_receipt_matches_since(rows, product_code, since_dt):
+    """영수증검증 rows 중 since_dt 이후 동일 Description 행 수와 파싱 실패 수를 반환한다."""
+    count = 0
+    unparsed = 0
+    for row in rows:
+        if (row.get(ROW_DESCRIPTION) or "").strip() != product_code:
+            continue
+        row_dt = _parse_receipt_time(row.get(ROW_PURCHASE_TIME))
+        if row_dt is None:
+            unparsed += 1
+            continue
+        if row_dt >= since_dt:
+            count += 1
+    return count, unparsed
 
 
 def resolve_count_judgment(shopdata, rows, product_code):
@@ -368,6 +462,339 @@ def _resolve_gcp_candidates_result(logging_service, brand, uuid_value, product_i
         notes.append(f"후보 {len(candidates)}건 — 자동 확정 안 함, product_candidates 참조해 사람 확인")
     product_code = candidates[0].get("shop_click_id") if len(candidates) == 1 else None
     return product_code, candidates
+
+
+def _pattern1_result(
+    *,
+    verdict,
+    receipt,
+    product_code,
+    product_source,
+    product_candidates,
+    inapp_candidates,
+    shopdata,
+    notes,
+    uuid_value,
+    effective_uuid,
+    recommended_action,
+    decision_label,
+):
+    return {
+        "verdict": verdict,
+        "receipt": receipt,
+        "matched_row": None,
+        "product_code": product_code,
+        "product_source": product_source,
+        "product_candidates": product_candidates,
+        "inapp_candidates": inapp_candidates,
+        "shopdata": shopdata,
+        "notes": notes,
+        "submitted_uuid": uuid_value,
+        "resolved_uuid": effective_uuid,
+        "recommended_action": recommended_action,
+        "decision_label": decision_label,
+    }
+
+
+def _resolve_pattern1_product_code(logging_service, brand, uuid_value, product_id, order_create_time, notes):
+    """패턴1 상품 특정. 반환: (status, product_code, source, gcp_candidates, inapp_candidates)."""
+    inapp_candidates, err = resolve_inapp_candidates_from_aos(product_id)
+    if err:
+        notes.append(f"상품 특정(CSV) 실패: {err}")
+        return "lookup_failed", None, None, [], []
+
+    notes.append(f"AOS '{product_id}' → Inapp 후보 {len(inapp_candidates)}건")
+    if len(inapp_candidates) == 1:
+        product_code = inapp_candidates[0]
+        notes.append(f"Inapp 후보 1건 — shop_click 없이 상품 확정: {product_code}")
+        return "resolved", product_code, "aos_single_candidate", [], inapp_candidates
+
+    candidates, gcp_err = resolve_product_candidates_via_gcp(
+        logging_service, brand, uuid_value, product_id, order_create_time
+    )
+    if gcp_err:
+        notes.append(f"상품 특정(GCP 로그) 실패/불완전: {gcp_err}")
+        return "lookup_failed", None, "gcp_log_candidates", candidates, inapp_candidates
+    if len(candidates) == 0:
+        notes.append(
+            f"GCP 로그 후보 0건 — Inapp 후보 {len(inapp_candidates)}건 중 상품을 특정할 수 없음"
+        )
+        return "unspecified_refund", None, "gcp_log_candidates", [], inapp_candidates
+    if len(candidates) > 1:
+        notes.append(f"GCP 로그 후보 {len(candidates)}건 — 자동 확정 안 함")
+        return "ambiguous", None, "gcp_log_candidates", candidates, inapp_candidates
+
+    product_code = candidates[0].get("shop_click_id")
+    if not product_code:
+        notes.append("GCP 로그 후보 1건이나 shop_click_id가 비어 있음")
+        return "lookup_failed", None, "gcp_log_candidates", candidates, inapp_candidates
+    notes.append(f"GCP 로그 후보 1건 — 상품 확정: {product_code}")
+    return "resolved", product_code, "gcp_log_candidates", candidates, inapp_candidates
+
+
+def _compare_shopdata_limit(page, effective_uuid, table_name, product_code, limit_count, timeout_error, notes):
+    try:
+        shopdata = lookup_count_readonly(page, effective_uuid, table_name, product_code, timeout_error)
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"ShopData Count 조회 실패: {exc}")
+        return "review", None
+    purchase_count = shopdata.get("purchase_count")
+    if purchase_count is None:
+        shopdata["count_judgment"] = "HELD"
+        notes.append("ShopData Count 값 없음 — 사람 확인 필요")
+        return "review", shopdata
+    if purchase_count < limit_count:
+        shopdata["count_judgment"] = "LIMIT_NOT_REACHED_REGRANT"
+        notes.append(f"ShopData Count {purchase_count} < Purchase_Limit_Count {limit_count} → 재지급")
+        return "regrant", shopdata
+    shopdata["count_judgment"] = "LIMIT_REACHED_REFUND"
+    notes.append(f"ShopData Count {purchase_count} >= Purchase_Limit_Count {limit_count} → 환불")
+    return "refund", shopdata
+
+
+def judge_pattern1_missing_receipt(
+    page,
+    *,
+    receipt,
+    rows,
+    uuid_value,
+    effective_uuid,
+    brand,
+    product_id,
+    order_create_time,
+    table_name,
+    logging_service,
+    timeout_error,
+    notes,
+):
+    """orders.get 결제 성공이나 영수증검증에 해당 주문번호가 없는 패턴1 최종 분기."""
+    status, product_code, product_source, gcp_candidates, inapp_candidates = _resolve_pattern1_product_code(
+        logging_service, brand, effective_uuid, product_id, order_create_time, notes
+    )
+    if status == "lookup_failed":
+        return _pattern1_result(
+            verdict="pattern1_product_lookup_review",
+            receipt=receipt,
+            product_code=None,
+            product_source=product_source,
+            product_candidates=gcp_candidates,
+            inapp_candidates=inapp_candidates,
+            shopdata=None,
+            notes=notes,
+            uuid_value=uuid_value,
+            effective_uuid=effective_uuid,
+            recommended_action="review",
+            decision_label="상품조회실패 미결정",
+        )
+    if status == "ambiguous":
+        return _pattern1_result(
+            verdict="pattern1_product_ambiguous_review",
+            receipt=receipt,
+            product_code=None,
+            product_source=product_source,
+            product_candidates=gcp_candidates,
+            inapp_candidates=inapp_candidates,
+            shopdata=None,
+            notes=notes,
+            uuid_value=uuid_value,
+            effective_uuid=effective_uuid,
+            recommended_action="review",
+            decision_label="상품후보다수 미결정",
+        )
+    if status == "unspecified_refund":
+        return _pattern1_result(
+            verdict="pattern1_product_unspecified_refund",
+            receipt=receipt,
+            product_code=None,
+            product_source=product_source,
+            product_candidates=None,
+            inapp_candidates=inapp_candidates,
+            shopdata=None,
+            notes=notes,
+            uuid_value=uuid_value,
+            effective_uuid=effective_uuid,
+            recommended_action="refund",
+            decision_label="상품미특정 환불",
+        )
+
+    try:
+        limit_type, limit_count = get_purchase_limit_info(product_code)
+    except Exception as exc:  # noqa: BLE001
+        notes.append(f"Purchase_Limit 정보 조회 실패: {exc}")
+        return _pattern1_result(
+            verdict="pattern1_limit_info_review",
+            receipt=receipt,
+            product_code=product_code,
+            product_source=product_source,
+            product_candidates=gcp_candidates,
+            inapp_candidates=inapp_candidates,
+            shopdata=None,
+            notes=notes,
+            uuid_value=uuid_value,
+            effective_uuid=effective_uuid,
+            recommended_action="review",
+            decision_label="상품제한정보 미결정",
+        )
+
+    notes.append(f"Purchase_Limit_Type={limit_type}, Purchase_Limit_Count={limit_count}")
+    matching_count = count_receipt_matches(rows, product_code)
+    if limit_type in NO_RESET_PURCHASE_LIMIT_TYPES:
+        if matching_count == 0:
+            notes.append("최근 영수증검증 100건 Description 내 해당 Code 없음 → 재지급")
+            return _pattern1_result(
+                verdict="pattern1_regrant_no_receipt_code",
+                receipt=receipt,
+                product_code=product_code,
+                product_source=product_source,
+                product_candidates=gcp_candidates,
+                inapp_candidates=inapp_candidates,
+                shopdata=None,
+                notes=notes,
+                uuid_value=uuid_value,
+                effective_uuid=effective_uuid,
+                recommended_action="regrant",
+                decision_label="재지급",
+            )
+        notes.append(f"최근 영수증검증 100건 Description 내 해당 Code {matching_count}건 존재")
+        if limit_count == 1:
+            return _pattern1_result(
+                verdict="pattern1_refund_repurchase_detected",
+                receipt=receipt,
+                product_code=product_code,
+                product_source=product_source,
+                product_candidates=gcp_candidates,
+                inapp_candidates=inapp_candidates,
+                shopdata=None,
+                notes=notes,
+                uuid_value=uuid_value,
+                effective_uuid=effective_uuid,
+                recommended_action="refund",
+                decision_label="환불",
+            )
+        if limit_count == 0:
+            notes.append("무제한 구매 예외 상품(Purchase_Limit_Count=0) → ShopData Count 없이 재지급")
+            return _pattern1_result(
+                verdict="pattern1_regrant_unlimited",
+                receipt=receipt,
+                product_code=product_code,
+                product_source=product_source,
+                product_candidates=gcp_candidates,
+                inapp_candidates=inapp_candidates,
+                shopdata=None,
+                notes=notes,
+                uuid_value=uuid_value,
+                effective_uuid=effective_uuid,
+                recommended_action="regrant",
+                decision_label="재지급",
+            )
+        if isinstance(limit_count, int) and limit_count > 1:
+            action, shopdata = _compare_shopdata_limit(
+                page, effective_uuid, table_name, product_code, limit_count, timeout_error, notes
+            )
+            verdict = "pattern1_regrant_limit_not_reached" if action == "regrant" else "pattern1_refund_limit_reached"
+            return _pattern1_result(
+                verdict=verdict if action != "review" else "pattern1_count_review",
+                receipt=receipt,
+                product_code=product_code,
+                product_source=product_source,
+                product_candidates=gcp_candidates,
+                inapp_candidates=inapp_candidates,
+                shopdata=shopdata,
+                notes=notes,
+                uuid_value=uuid_value,
+                effective_uuid=effective_uuid,
+                recommended_action=action,
+                decision_label="재지급" if action == "regrant" else ("환불" if action == "refund" else "미결정"),
+            )
+
+    if limit_type in RESET_PURCHASE_LIMIT_TYPES:
+        reset_at = _last_reset_at(limit_type)
+        period_count, unparsed_count = count_receipt_matches_since(rows, product_code, reset_at)
+        notes.append(
+            f"{limit_type} 마지막 초기화(KST)={reset_at.isoformat()} 이후 "
+            f"영수증검증 Description 해당 Code {period_count}건"
+        )
+        if period_count == 0:
+            if unparsed_count:
+                notes.append(f"해당 Code 행 {unparsed_count}건의 거래일시 파싱 실패 — 사람 확인 필요")
+                return _pattern1_result(
+                    verdict="pattern1_period_time_review",
+                    receipt=receipt,
+                    product_code=product_code,
+                    product_source=product_source,
+                    product_candidates=gcp_candidates,
+                    inapp_candidates=inapp_candidates,
+                    shopdata=None,
+                    notes=notes,
+                    uuid_value=uuid_value,
+                    effective_uuid=effective_uuid,
+                    recommended_action="review",
+                    decision_label="미결정",
+                )
+            return _pattern1_result(
+                verdict="pattern1_regrant_no_period_receipt_code",
+                receipt=receipt,
+                product_code=product_code,
+                product_source=product_source,
+                product_candidates=gcp_candidates,
+                inapp_candidates=inapp_candidates,
+                shopdata=None,
+                notes=notes,
+                uuid_value=uuid_value,
+                effective_uuid=effective_uuid,
+                recommended_action="regrant",
+                decision_label="재지급",
+            )
+        if limit_count == 1:
+            return _pattern1_result(
+                verdict="pattern1_refund_period_repurchase_detected",
+                receipt=receipt,
+                product_code=product_code,
+                product_source=product_source,
+                product_candidates=gcp_candidates,
+                inapp_candidates=inapp_candidates,
+                shopdata=None,
+                notes=notes,
+                uuid_value=uuid_value,
+                effective_uuid=effective_uuid,
+                recommended_action="refund",
+                decision_label="환불",
+            )
+        if isinstance(limit_count, int) and limit_count > 1:
+            action, shopdata = _compare_shopdata_limit(
+                page, effective_uuid, table_name, product_code, limit_count, timeout_error, notes
+            )
+            verdict = "pattern1_regrant_period_limit_not_reached" if action == "regrant" else "pattern1_refund_period_limit_reached"
+            return _pattern1_result(
+                verdict=verdict if action != "review" else "pattern1_period_count_review",
+                receipt=receipt,
+                product_code=product_code,
+                product_source=product_source,
+                product_candidates=gcp_candidates,
+                inapp_candidates=inapp_candidates,
+                shopdata=shopdata,
+                notes=notes,
+                uuid_value=uuid_value,
+                effective_uuid=effective_uuid,
+                recommended_action=action,
+                decision_label="재지급" if action == "regrant" else ("환불" if action == "refund" else "미결정"),
+            )
+        notes.append(f"{limit_type} 상품의 Purchase_Limit_Count={limit_count} — 예상 밖 값, 사람 확인 필요")
+
+    return _pattern1_result(
+        verdict="pattern1_limit_type_review",
+        receipt=receipt,
+        product_code=product_code,
+        product_source=product_source,
+        product_candidates=gcp_candidates,
+        inapp_candidates=inapp_candidates,
+        shopdata=None,
+        notes=notes,
+        uuid_value=uuid_value,
+        effective_uuid=effective_uuid,
+        recommended_action="review",
+        decision_label="미결정",
+    )
 
 
 def judge_nonpayment(
@@ -477,22 +904,21 @@ def judge_nonpayment(
                 "submitted_uuid": uuid_value,
                 "resolved_uuid": effective_uuid,
             }
-        print(f" [미지급 판정] {no_record_reason}(미지급 확정) → GCP 로그 후보 조회로 상품 특정")
-        product_code, candidates = _resolve_gcp_candidates_result(
-            logging_service, brand, effective_uuid, product_id, order_create_time, notes
+        print(f" [미지급 판정] {no_record_reason} → 패턴1 최종 분기(상품 특정/재구매 흔적 확인)")
+        return judge_pattern1_missing_receipt(
+            page,
+            receipt=receipt,
+            rows=rows,
+            uuid_value=uuid_value,
+            effective_uuid=effective_uuid,
+            brand=brand,
+            product_id=product_id,
+            order_create_time=order_create_time,
+            table_name=table_name,
+            logging_service=logging_service,
+            timeout_error=timeout_error,
+            notes=notes,
         )
-        return {
-            "verdict": "pattern1_no_receipt_record",
-            "receipt": receipt,
-            "matched_row": None,
-            "product_code": product_code,
-            "product_source": "gcp_log_candidates",
-            "product_candidates": candidates,
-            "shopdata": None,
-            "notes": notes,
-            "submitted_uuid": uuid_value,
-            "resolved_uuid": effective_uuid,
-        }
 
     pattern = classify_receipt_row(matched)
     matched_desc = matched.get(ROW_DESCRIPTION) or "(빈값)"
@@ -591,7 +1017,14 @@ def print_result(result):
         print(f" UUID            : 제출값={submitted_uuid} → 닉네임 대조로 확정={resolved_uuid}")
     receipt = result.get("receipt") or {}
     print(f" 영수증검증 결과 : has_results={receipt.get('has_results')} row_count={receipt.get('row_count')}")
+    if result.get("decision_label"):
+        print(f" 처리분기        : {result.get('decision_label')} (action={result.get('recommended_action')})")
     print(f" 상품코드        : {result.get('product_code') or '(미특정)'} (source={result.get('product_source')})")
+    inapp_candidates = result.get("inapp_candidates")
+    if inapp_candidates:
+        print(f" Inapp 후보      : {len(inapp_candidates)}건")
+        for code in inapp_candidates:
+            print(f"   - {code}")
     candidates = result.get("product_candidates")
     if candidates:
         print(f" GCP 로그 후보 {len(candidates)}건(자동 미확정 — 사람 확인):")
@@ -623,7 +1056,10 @@ def emit_json_result(result, succeeded, error_message):
         "product_code": (result or {}).get("product_code"),
         "product_source": (result or {}).get("product_source"),
         "product_candidates": (result or {}).get("product_candidates"),
+        "inapp_candidates": (result or {}).get("inapp_candidates"),
         "shopdata": (result or {}).get("shopdata"),
+        "recommended_action": (result or {}).get("recommended_action"),
+        "decision_label": (result or {}).get("decision_label"),
         "notes": (result or {}).get("notes", []),
         "error": error_message or None,
     }
@@ -637,8 +1073,14 @@ def save_artifacts(page, out_dir, uuid_value, succeeded, result=None, error_mess
         lines.append(f"verdict={result.get('verdict')}")
         lines.append(f"submitted_uuid={result.get('submitted_uuid')}")
         lines.append(f"resolved_uuid={result.get('resolved_uuid')}")
+        lines.append(f"recommended_action={result.get('recommended_action')}")
+        lines.append(f"decision_label={result.get('decision_label')}")
         lines.append(f"product_code={result.get('product_code')}")
         lines.append(f"product_source={result.get('product_source')}")
+        inapp_candidates = result.get("inapp_candidates") or []
+        lines.append(f"inapp_candidates_count={len(inapp_candidates)}")
+        for code in inapp_candidates:
+            lines.append(f"inapp_candidate={code}")
         candidates = result.get("product_candidates") or []
         lines.append(f"product_candidates_count={len(candidates)}")
         for c in candidates:

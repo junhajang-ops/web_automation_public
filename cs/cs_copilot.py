@@ -965,11 +965,15 @@ class ConsoleJudgeWorker:
 #    1건이면 SINGLE과 동일하게 product_code가 이미 확정돼 있고, 2건 이상이면
 #    번호 지정이 필요하다.
 REGRANT_SINGLE_VERDICTS = {
+    "pattern1_regrant_no_receipt_code",  # 패턴1: 같은 상품 정상 영수증 기록 없음 → 재지급
+    "pattern1_regrant_unlimited",  # 패턴1: 무제한 구매 예외 상품 → 재지급
+    "pattern1_regrant_limit_not_reached",  # 패턴1: ShopData Count가 구매 제한보다 작음 → 재지급
+    "pattern1_regrant_no_period_receipt_code",  # 패턴1: 주기 초기화 이후 같은 상품 기록 없음 → 재지급
+    "pattern1_regrant_period_limit_not_reached",  # 패턴1: 주기형 상품 Count가 제한보다 작음 → 재지급
     "pattern3_count_confirmed_missing",  # ShopData Count 기준 미지급 확정 (None/Onetime 한정)
     "pattern3_code_not_found",  # ShopData PurchaseCode 자체가 없음 → 구매 시도 기록조차 없어 미지급 확정
 }
 REGRANT_CANDIDATE_VERDICTS = {
-    "pattern1_no_receipt_record",  # 이 주문 건이 영수증검증에 없음(전체 0건이든 다른 건만 있든 동일 취급) → GCP 로그 후보로 상품 특정
     "pattern2_purchase_code_null",  # description=PurchaseCodeNull/빈값 → GCP 로그 후보로 상품 특정
 }
 REGRANT_COMMAND_RE = re.compile(r"^재지급(?:\s+(\d+))?$")
@@ -987,6 +991,8 @@ def _resolve_regrant_context(ticket_id, result):
     verdict = result.get("verdict")
     uuid_value = result.get("resolved_uuid") or result.get("submitted_uuid")
     if not uuid_value:
+        return None
+    if result.get("recommended_action") and result.get("recommended_action") != "regrant":
         return None
 
     if verdict in REGRANT_SINGLE_VERDICTS:
@@ -1018,7 +1024,9 @@ def _payment_error_sources_label(result):
     verdict = (result or {}).get("verdict") or ""
     if verdict.startswith("pattern3"):
         return "영수증검증 + ShopData"
-    if verdict in ("pattern1_no_receipt_record", "pattern2_purchase_code_null"):
+    if verdict and verdict.startswith("pattern1_"):
+        return "영수증검증 + 상품분기"
+    if verdict == "pattern2_purchase_code_null":
         return "영수증검증 + GCP 로그 후보"
     if verdict == "invalid_uuid":
         return "유저 탭 UUID 존재 확인"
@@ -1041,6 +1049,8 @@ def _print_payment_error(ticket_id, result, error):
         print(_SEP)
         return None
     print(f"   판정       : {result.get('verdict')}")
+    if result.get("decision_label"):
+        print(f"   처리분기   : {result.get('decision_label')} (action={result.get('recommended_action')})")
     submitted_uuid = result.get("submitted_uuid")
     resolved_uuid = result.get("resolved_uuid")
     if submitted_uuid and resolved_uuid and submitted_uuid != resolved_uuid:
@@ -1050,6 +1060,11 @@ def _print_payment_error(ticket_id, result, error):
 
     product_line = f"   상품코드   : {result.get('product_code') or '(미특정)'}"
     print(_green(product_line) if is_actionable else product_line)
+    inapp_candidates = result.get("inapp_candidates")
+    if inapp_candidates:
+        print(f"   Inapp 후보 {len(inapp_candidates)}건:")
+        for code in inapp_candidates:
+            print(f"     - {code}")
     candidates = result.get("product_candidates")
     if candidates:
         cand_header = f"   GCP 로그 후보 {len(candidates)}건:"
@@ -1069,6 +1084,10 @@ def _print_payment_error(ticket_id, result, error):
             print(f"   [재지급 가능] 후보 중 번호를 골라 '재지급 N' 입력(예: 재지급 1)")
         else:
             print(f"   [재지급 가능] 상품코드={regrant_ctx['product_code']} — 터미널에 '재지급' 입력 시 우편 발송")
+    elif result.get("recommended_action") == "refund":
+        print(f"   [환불 후보] {result.get('decision_label') or result.get('verdict')}")
+    elif result.get("recommended_action") == "review":
+        print(f"   [미결정] 사람 확인 필요")
     print(_SEP)
     return regrant_ctx
 
