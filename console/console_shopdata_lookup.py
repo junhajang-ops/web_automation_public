@@ -54,20 +54,6 @@ DEFAULT_PURCHASE_CODE = TEST_PURCHASE_CODE
 POLL_WAIT_MS = 1_000
 HIGHLIGHT_WAIT_MS = 3_000
 RETRY_MAX_RETRIES = get_retry_max_retries()
-# 'gameinfo_data_tab_pre' 전용: 실제 HTML 덤프 대조로 원인 확인(2026-07-08,
-# dumps_console_copilot_worker/dump_20260708_193251_..._gameinfo_data_tab_pre*.html vs
-# dump_20260708_194952_..._gameinfo_data_tab_pre*.html). role="navigation"의 출처는
-# 이 스텝의 화면 요소가 아니라 aria-label="Pagination Navigation" class="ui pagination
-# menu" — 세션 내 이전 동작이 남긴 데이터 그리드의 페이지네이션 tfoot이다. 이 화면에
-# 도달하기 전에 그리드가 남아 있던 회차(193251)에는 있었고, 깨끗한 상태로 도달한
-# 회차(194952)에는 없었다. console_receipt_verification.py의
-# RECEIPT_PRE_SEARCH_IGNORE_PATTERNS와 같은 종류(직전 조회 결과 잔존 여부 = 이번 스텝의
-# 구조 변경이 아님). 페이지네이션의 이전/다음 링크는 <a>라 buttons 추출 대상이 아니어서
-# role 외 다른 필드는 흔들리지 않는다 — 그래서 diff가 role: navigation 단독(items=1)으로만
-# 나타난다.
-GAME_INFO_DATA_TAB_IGNORE_PATTERNS = SIDEBAR_BASE_MENU_IGNORE_PATTERNS + [
-    r"role: navigation$",
-]
 
 
 def parse_args():
@@ -154,7 +140,17 @@ def open_game_info_data_tab(page):
     ).first
     data_tab.wait_for(state="visible", timeout=15_000)
     data_tab.scroll_into_view_if_needed()
-    record_step_dump(page, "gameinfo_data_tab_pre", ignore_patterns=GAME_INFO_DATA_TAB_IGNORE_PATTERNS)
+    # '게임 정보' 기본 화면(테이블 탭)의 테이블 목록은 로딩이 끝나야 페이지네이션
+    # footer(aria-label="Pagination Navigation")가 렌더된다. 탭 링크 자체는 그보다
+    # 먼저 보이므로, 이 footer를 기다리지 않고 바로 스냅샷을 찍으면 로딩 완료 여부에
+    # 따라 role=navigation 유무가 회차마다 갈려 매번 오탐이 났다(2026-07-08 라이브
+    # 재확인 — 화이트리스트로 덮었던 이전 판단은 원인 오진이었음: 이전 화면 잔존이
+    # 아니라 이 화면 자체의 로딩 타이밍 문제). 화이트리스트 대신 이 요소를 명시적으로
+    # 기다려 로딩이 실제로 끝난 뒤에만 스냅샷을 찍도록 수정.
+    page.locator("[aria-label='Pagination Navigation']").first.wait_for(
+        state="visible", timeout=15_000
+    )
+    record_step_dump(page, "gameinfo_data_tab_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     data_tab.click()
     safe_wait_for_load(page, "domcontentloaded", 15_000)
     safe_wait_for_load(page, "networkidle", 5_000)
