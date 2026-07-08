@@ -1043,30 +1043,6 @@ def _is_final_verdict_note(note: str) -> bool:
     return any(marker in note for marker in _FINAL_NOTE_MARKERS)
 
 
-def _resolve_limit_info_for_display(result):
-    """확인된 상품의 Purchase_Limit_Type/Purchase_Limit_Count를 (type, count)로 반환.
-
-    ShopData 조회가 된 경우(shopdata)에는 그때 함께 읽은 값을 그대로 쓰고, 코드 자체가
-    없어(shopdata=None) 조회가 안 된 경우에도 product_code로 상품표 CSV에서 직접 읽어
-    표시한다. 판정 로직이 쓴 것과 동일한 load_purchase_limit_info_map()(기본 차트) 경로다.
-    실패하면 (None, None) — 표시를 생략한다.
-    """
-    sd = result.get("shopdata") or {}
-    limit_type = sd.get("purchase_limit_type")
-    limit_count = sd.get("purchase_limit_count")
-    if limit_type is not None or limit_count is not None:
-        return limit_type, limit_count
-    product_code = result.get("product_code")
-    if not product_code:
-        return None, None
-    try:
-        from console_payment_error import load_purchase_limit_info_map
-        info = load_purchase_limit_info_map().get(product_code) or {}
-        return info.get("type"), info.get("count")
-    except Exception:  # noqa: BLE001 — 표시용 부가정보라 실패해도 판정 출력은 계속한다
-        return None, None
-
-
 def _print_payment_error(ticket_id, result, error):
     from console_payment_error import describe_decision, describe_verdict
     print(_SEP)
@@ -1096,12 +1072,6 @@ def _print_payment_error(ticket_id, result, error):
 
     product_line = f"   상품코드   : {result.get('product_code') or '(미특정)'}"
     print(_green(product_line) if is_actionable else product_line)
-    # 확인된 상품의 구매 제한 유형(Onetime 등)/횟수 — 항상 초록색으로 강조(2026-07-08 사용자 요청).
-    limit_type, limit_count = _resolve_limit_info_for_display(result)
-    if limit_type is not None or limit_count is not None:
-        limit_type_disp = limit_type or "(미확인)"
-        limit_count_disp = limit_count if limit_count is not None else "(미확인)"
-        print(_green(f"   구매제한   : 유형={limit_type_disp}, Purchase_Limit_Count={limit_count_disp}"))
     inapp_candidates = result.get("inapp_candidates")
     if inapp_candidates:
         print(f"   Inapp 후보 {len(inapp_candidates)}건:")

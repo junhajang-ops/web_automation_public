@@ -73,6 +73,7 @@ if str(_CS_DIR) not in sys.path:
 from console_step_verify import (
     configure_console_output,
     get_retry_max_retries,
+    green,
     init_dump_dir,
     retry_with_recovery,
     save_page_artifacts,
@@ -248,6 +249,33 @@ def get_purchase_limit_info(product_code):
     if not info:
         raise RuntimeError(f"CSV에서 Inapp_PurchaseCode '{product_code}'의 Purchase_Limit 정보 없음")
     return info.get("type"), info.get("count")
+
+
+def _print_matched_limit_info(limit_type, limit_count):
+    """상품이 매칭/확정된 직후 구매 제한 유형·횟수를 초록색으로 즉시 출력한다.
+
+    사용자 요청(2026-07-08): ShopData Count 조회 이후가 아니라, GCP 로그든 영수증검증이든
+    상품이 매칭되는 순간 유형(Onetime 등)·Purchase_Limit_Count를 초록색으로 보여준다.
+    """
+    if limit_type is None and limit_count is None:
+        return
+    type_disp = limit_type or "(미확인)"
+    count_disp = limit_count if limit_count is not None else "(미확인)"
+    print(green(
+        f" [지급 상태 판정] 확인된 상품 구매제한 — 유형={type_disp}, "
+        f"Purchase_Limit_Count={count_disp}"
+    ))
+
+
+def _print_matched_limit_info_by_code(product_code):
+    """product_code만 알 때 상품표 CSV에서 유형·횟수를 읽어 초록색으로 출력한다(실패 시 조용히 생략)."""
+    if not product_code:
+        return
+    try:
+        info = load_purchase_limit_info_map().get(product_code) or {}
+    except Exception:  # noqa: BLE001 — 표시용 부가정보라 실패해도 판정은 계속한다
+        return
+    _print_matched_limit_info(info.get("type"), info.get("count"))
 
 
 def resolve_product_candidates_via_gcp(logging_service, brand, uuid_value, product_id, order_create_time):
@@ -638,6 +666,8 @@ def judge_pattern1_missing_receipt(
         )
 
     notes.append(f"Purchase_Limit_Type={limit_type}, Purchase_Limit_Count={limit_count}")
+    # 상품 특정(CSV 단일 후보 또는 GCP 로그) 완료 → 유형·횟수를 즉시 초록색으로 표시.
+    _print_matched_limit_info(limit_type, limit_count)
     matching_count = count_receipt_matches(rows, product_code)
     if limit_type in NO_RESET_PURCHASE_LIMIT_TYPES:
         if matching_count == 0:
@@ -928,7 +958,7 @@ def judge_nonpayment(
         if pattern == "pattern2"
         else "description 정상 → 로그 미사용, ShopData Count 조회로 이동"
     )
-    print(f" [지급 상태 판정] 매칭 행 발견 — description='{matched_desc}' → {branch_label}")
+    print(green(f" [지급 상태 판정] 매칭 행 발견 — description='{matched_desc}' → {branch_label}"))
 
     # 분기A(상품코드 비었음): description = PurchaseCodeNull/빈값 → 미지급 확정. 상품은 로그 후보로 나열.
     if pattern == "pattern2":
@@ -936,6 +966,8 @@ def judge_nonpayment(
         product_code, candidates = _resolve_gcp_candidates_result(
             logging_service, brand, effective_uuid, product_id, order_create_time, notes
         )
+        # GCP 로그로 상품이 단일 확정된 경우에만 유형·횟수를 즉시 초록색으로 표시(다수/미특정은 생략).
+        _print_matched_limit_info_by_code(product_code)
         return {
             "verdict": "pattern2_purchase_code_null",
             "receipt": receipt,
@@ -954,6 +986,8 @@ def judge_nonpayment(
     # 위 '매칭 행 발견' 로그의 branch_label에서 이미 'description 정상 → ShopData Count 조회'를
     # 안내했으므로 여기서 같은 문구를 다시 찍지 않는다(2026-07-08 사용자 지적: 중복 출력).
     product_code = matched_desc.strip()
+    # 영수증검증 description으로 상품이 확정됨 → ShopData 조회 전에 유형·횟수를 초록색으로 표시.
+    _print_matched_limit_info_by_code(product_code)
     shopdata = None
     try:
         shopdata = lookup_count_readonly(

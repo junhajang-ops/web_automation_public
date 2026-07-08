@@ -165,6 +165,7 @@ def get_step_wait_ms() -> int:
 
 
 ANSI_RED = "\033[91m"
+ANSI_GREEN = "\033[92m"
 ANSI_RESET = "\033[0m"
 
 
@@ -182,6 +183,16 @@ def _red(text: str) -> str:
     if not _supports_color():
         return text
     return f"{ANSI_RED}{text}{ANSI_RESET}"
+
+
+def green(text: str) -> str:
+    """터미널이 색상을 지원할 때만 초록색 ANSI 코드를 입힌다(공용 헬퍼).
+
+    파일 리다이렉트(예약 실행 로그 등)에서는 _supports_color()가 False라 원문 그대로 둔다.
+    """
+    if not _supports_color():
+        return text
+    return f"{ANSI_GREEN}{text}{ANSI_RESET}"
 
 
 def configure_console_output() -> str:
