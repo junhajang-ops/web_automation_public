@@ -677,7 +677,7 @@ def _format_config_error(error_code: str):
 
 
 class ConsoleJudgeWorker:
-    """콘솔 미지급 판정을 별도 worker thread에서 처리한다."""
+    """콘솔 지급 상태 판정을 별도 worker thread에서 처리한다."""
 
     def __init__(self, key_path: Path):
         self.key_path = key_path
@@ -1035,13 +1035,13 @@ def _payment_error_sources_label(result):
 
 
 def _print_payment_error(ticket_id, result, error):
-    from console_payment_error import describe_verdict
+    from console_payment_error import describe_decision, describe_verdict
     print(_SEP)
     if error or not result:
         # 판정을 못 끝냈으면(예외/결과 없음) 조회 소스를 특정할 수 없으므로 단정하지 않는다.
-        print(f" [콘솔 미지급 판정] 티켓 {ticket_id} (읽기 전용)")
+        print(f" [콘솔 지급 상태 판정] 티켓 {ticket_id} (읽기 전용)")
     else:
-        print(f" [콘솔 미지급 판정] 티켓 {ticket_id} — {_payment_error_sources_label(result)} (읽기 전용)")
+        print(f" [콘솔 지급 상태 판정] 티켓 {ticket_id} — {_payment_error_sources_label(result)} (읽기 전용)")
     if error:
         print(f"   판정 실패: {error}")
         print(_SEP)
@@ -1051,8 +1051,9 @@ def _print_payment_error(ticket_id, result, error):
         print(_SEP)
         return None
     print(f"   판정       : {describe_verdict(result.get('verdict'))}")
-    if result.get("decision_label"):
-        print(f"   처리분기   : {result.get('decision_label')} (action={result.get('recommended_action')})")
+    decision_text = describe_decision(result)
+    if decision_text:
+        print(f"   처리분기   : {decision_text}")
     submitted_uuid = result.get("submitted_uuid")
     resolved_uuid = result.get("resolved_uuid")
     if submitted_uuid and resolved_uuid and submitted_uuid != resolved_uuid:
@@ -1087,7 +1088,7 @@ def _print_payment_error(ticket_id, result, error):
         else:
             print(f"   [재지급 가능] 상품코드={regrant_ctx['product_code']} — 터미널에 '재지급' 입력 시 우편 발송")
     elif result.get("recommended_action") == "refund":
-        print(f"   [환불 후보] {result.get('decision_label') or describe_verdict(result.get('verdict'))}")
+        print(f"   [환불 후보] {describe_decision(result) or describe_verdict(result.get('verdict'))}")
     elif result.get("recommended_action") == "review":
         print(f"   [미결정] 사람 확인 필요")
     print(_SEP)
@@ -1261,18 +1262,18 @@ def _handle_ticket(page, ticket_id, service, console_worker=None, console_jobs=N
     _print_verdict(display_num, parsed, verdict, warnings=warnings or None,
                    custom_fields=custom_fields or None)
 
-    # 영수증(주문) 조회됨 → 콘솔 미지급 판정 작업을 console worker에 비동기 등록
+    # 영수증(주문) 조회됨 → 콘솔 지급 상태 판정 작업을 console worker에 비동기 등록
     if verdict.get("channel") == "google":
         if not parsed.get("uuid"):
-            print(" [콘솔 미지급 판정] UUID 없음 — 생략")
+            print(" [콘솔 지급 상태 판정] UUID 없음 — 생략")
         elif verdict.get("is_refunded"):
-            print(" [콘솔 미지급 판정] 환불/취소 상태 — 생략")
+            print(" [콘솔 지급 상태 판정] 환불/취소 상태 — 생략")
         elif verdict.get("state") != "PROCESSED":
-            print(f" [콘솔 미지급 판정] Google 주문 상태가 PROCESSED가 아님({verdict.get('state')}) — 생략")
+            print(f" [콘솔 지급 상태 판정] Google 주문 상태가 PROCESSED가 아님({verdict.get('state')}) — 생략")
         elif console_worker is None or console_jobs is None:
-            print(" [콘솔 미지급 판정] worker 없음 — 생략")
+            print(" [콘솔 지급 상태 판정] worker 없음 — 생략")
         elif ticket_id in console_jobs:
-            print(" [콘솔 미지급 판정] 이미 진행 중 — 중복 등록 생략")
+            print(" [콘솔 지급 상태 판정] 이미 진행 중 — 중복 등록 생략")
         else:
             console_jobs[ticket_id] = {
                 "uuid": parsed.get("uuid"),
@@ -1280,7 +1281,7 @@ def _handle_ticket(page, ticket_id, service, console_worker=None, console_jobs=N
                 "order_id": parsed.get("order_id"),
             }
             console_worker.submit(ticket_id, parsed, order_result=order_result)
-            print(" [콘솔 미지급 판정] 콘솔 worker에 등록했습니다. 결과는 준비되면 이어서 출력합니다.")
+            print(" [콘솔 지급 상태 판정] 콘솔 worker에 등록했습니다. 결과는 준비되면 이어서 출력합니다.")
 
 
 # ── 메인 ──────────────────────────────────────────────────────────────────────

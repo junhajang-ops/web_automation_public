@@ -846,7 +846,7 @@ def judge_nonpayment(
         # 전파시키지 않고 여기서 바로 정상 반환해 재시도로 시간을 낭비하지 않는다
         # (2026-07-08 사용자 제보: 무효 UUID 판정 실패까지 시간이 너무 걸림). 닉네임 대조
         # 결과(있었다면)도 이미 이 예외 메시지에 포함돼 있다(ensure_uuid_registered 참고).
-        print(f" [미지급 판정] '{uuid_value}' — '유저' 탭에서 존재하지 않는 UUID로 확인됨(재시도 없이 즉시 종료)")
+        print(f" [지급 상태 판정] '{uuid_value}' — '유저' 탭에서 존재하지 않는 UUID로 확인됨(재시도 없이 즉시 종료)")
         return {
             "verdict": "invalid_uuid",
             "receipt": None,
@@ -866,14 +866,14 @@ def judge_nonpayment(
             f"닉네임 대조로 UUID 오탈자 확정 — 제출값={uuid_value} → 확정값={effective_uuid} "
             f"(이후 조회는 확정값 기준, nickname_source={nickname_source})"
         )
-        print(f" [미지급 판정] 닉네임 대조로 UUID 오탈자 확정 → 이후 조회는 '{effective_uuid}' 기준으로 진행")
+        print(f" [지급 상태 판정] 닉네임 대조로 UUID 오탈자 확정 → 이후 조회는 '{effective_uuid}' 기준으로 진행")
 
     # 분기A(주문번호 미기록): 이 주문 건이 영수증검증에 없음 → 미지급 확정. 상품은 로그 후보로 나열.
     # "없음"의 실제 형태는 두 가지이나(① UUID 전체가 0건 ② 다른 구매 행은 있으나 이
     # 주문번호만 없음) 재지급 판단 기준으로는 동일한 조건이라 verdict를 나누지 않는다
     # (2026-07-07 사용자 지적 — 애초에 둘 다 "Google엔 있는데 콘솔 영수증검증엔 이 건이
     # 없다"는 하나의 사실이며, UUID 유효성은 이미 위에서 확정됐으므로 무효 UUID와도 무관).
-    # 원인 차이는 아래 "[미지급 판정]" 즉시 출력 문구로만 남긴다 — notes에도 같은 문구를
+    # 원인 차이는 아래 "[지급 상태 판정]" 즉시 출력 문구로만 남긴다 — notes에도 같은 문구를
     # 중복으로 넣으면 co-pilot 최종 요약(cs_copilot._print_payment_error)에서 방금 본
     # 문장이 그대로 한 번 더 찍혀 중복이었다(2026-07-08 사용자 지적).
     rows = receipt.get("rows") or []
@@ -905,7 +905,7 @@ def judge_nonpayment(
                 "submitted_uuid": uuid_value,
                 "resolved_uuid": effective_uuid,
             }
-        print(f" [미지급 판정] {no_record_reason} → 상품 특정·재구매 흔적 확인으로 진행")
+        print(f" [지급 상태 판정] {no_record_reason} → 상품 특정·재구매 흔적 확인으로 진행")
         return judge_pattern1_missing_receipt(
             page,
             receipt=receipt,
@@ -928,11 +928,11 @@ def judge_nonpayment(
         if pattern == "pattern2"
         else "description 정상(ShopData Count 대조)"
     )
-    print(f" [미지급 판정] 매칭 행 발견 — description='{matched_desc}' → {branch_label}")
+    print(f" [지급 상태 판정] 매칭 행 발견 — description='{matched_desc}' → {branch_label}")
 
     # 분기A(상품코드 비었음): description = PurchaseCodeNull/빈값 → 미지급 확정. 상품은 로그 후보로 나열.
     if pattern == "pattern2":
-        print(" [미지급 판정] description=PurchaseCodeNull/빈값 → 미지급 확정 — GCP 로그 후보 조회로 상품 특정")
+        print(" [지급 상태 판정] description=PurchaseCodeNull/빈값 → 미지급 확정 — GCP 로그 후보 조회로 상품 특정")
         product_code, candidates = _resolve_gcp_candidates_result(
             logging_service, brand, effective_uuid, product_id, order_create_time, notes
         )
@@ -952,7 +952,7 @@ def judge_nonpayment(
     # ShopData Count 조회(판정 보류). 분기A와 완전히 분리 — product_id/order_create_time 불필요.
     # classify_receipt_row가 이미 빈값/PurchaseCodeNull을 걸러냈으므로 matched_desc는 실값이다.
     product_code = matched_desc.strip()
-    print(f" [미지급 판정] description 정상('{product_code}') → 로그 미사용, ShopData Count 조회로 이동")
+    print(f" [지급 상태 판정] description 정상('{product_code}') → 로그 미사용, ShopData Count 조회로 이동")
     shopdata = None
     try:
         shopdata = lookup_count_readonly(
@@ -962,7 +962,7 @@ def judge_nonpayment(
         # ShopData PurchaseCode 배열 자체에 해당 코드가 없음 = 구매 시도 기록조차 없음 → 미지급 확정
         # (Count 값 판정 보류와는 다르다 — 여기는 코드 존재 여부라 주차/상품유형 애매성이 없다).
         notes.append(f"ShopData PurchaseCode에 해당 코드 자체가 없음 → 미지급 확정: {exc}")
-        print(f" [미지급 판정] ShopData에 '{product_code}' 코드 자체가 없음 → 미지급 확정")
+        print(f" [지급 상태 판정] ShopData에 '{product_code}' 코드 자체가 없음 → 미지급 확정")
         return {
             "verdict": "pattern3_code_not_found",
             "receipt": receipt,
@@ -1051,10 +1051,30 @@ def describe_verdict(verdict):
     return _VERDICT_DESCRIPTIONS.get(verdict, verdict)
 
 
+def describe_decision(result):
+    """recommended_action/decision_label을 터미널용 자연어 처리분기로 바꾼다."""
+    if not result:
+        return None
+    action = result.get("recommended_action")
+    label = result.get("decision_label")
+    verdict_text = describe_verdict(result.get("verdict"))
+    if action == "regrant":
+        if label and label != "재지급":
+            return label
+        return "재지급 가능"
+    if action == "refund":
+        if label and label != "환불":
+            return label if "후보" in label else f"{label} 후보"
+        return verdict_text
+    if action == "review":
+        return label or verdict_text
+    return label
+
+
 def print_result(result):
     print()
     print(_SEP)
-    print(f" 미지급 판정: {describe_verdict(result.get('verdict'))}")
+    print(f" 지급 상태 판정: {describe_verdict(result.get('verdict'))}")
     print(_SEP)
     submitted_uuid = result.get("submitted_uuid")
     resolved_uuid = result.get("resolved_uuid")
@@ -1062,8 +1082,9 @@ def print_result(result):
         print(f" UUID            : 제출값={submitted_uuid} → 닉네임 대조로 확정={resolved_uuid}")
     receipt = result.get("receipt") or {}
     print(f" 영수증검증 결과 : has_results={receipt.get('has_results')} row_count={receipt.get('row_count')}")
-    if result.get("decision_label"):
-        print(f" 처리분기        : {result.get('decision_label')} (action={result.get('recommended_action')})")
+    decision_text = describe_decision(result)
+    if decision_text:
+        print(f" 처리분기        : {decision_text}")
     print(f" 상품코드        : {result.get('product_code') or '(미특정)'} (source={result.get('product_source')})")
     inapp_candidates = result.get("inapp_candidates")
     if inapp_candidates:
@@ -1257,7 +1278,7 @@ def main():
                     start_url=args.start_url,
                     project_name=args.project_name,
                 ),
-                label=f"미지급 판정 UUID {args.uuid} 재시도",
+                label=f"지급 상태 판정 UUID {args.uuid} 재시도",
                 recovery_desc=f"콘솔 초기화면({args.start_url})/프로젝트 선택부터 다시 준비합니다.",
                 max_retries=RETRY_MAX_RETRIES,
             )
