@@ -961,15 +961,15 @@ class ConsoleJudgeWorker:
 # '재지급 N'(GCP 후보 여러 건 중 N번)을 입력하면 우편으로 재지급한다.
 # 대상 verdict는 두 그룹으로 나뉜다:
 #  - SINGLE: product_code가 이미 하나로 확정됨 → '재지급'만으로 충분.
-#  - CANDIDATE: GCP 로그 후보로 상품을 특정하는 분기(pattern1/2) → 후보가 정확히
+#  - CANDIDATE: GCP 로그 후보로 상품을 특정하는 분기 → 후보가 정확히
 #    1건이면 SINGLE과 동일하게 product_code가 이미 확정돼 있고, 2건 이상이면
 #    번호 지정이 필요하다.
 REGRANT_SINGLE_VERDICTS = {
-    "pattern1_regrant_no_receipt_code",  # 패턴1: 같은 상품 정상 영수증 기록 없음 → 재지급
-    "pattern1_regrant_unlimited",  # 패턴1: 무제한 구매 예외 상품 → 재지급
-    "pattern1_regrant_limit_not_reached",  # 패턴1: ShopData Count가 구매 제한보다 작음 → 재지급
-    "pattern1_regrant_no_period_receipt_code",  # 패턴1: 주기 초기화 이후 같은 상품 기록 없음 → 재지급
-    "pattern1_regrant_period_limit_not_reached",  # 패턴1: 주기형 상품 Count가 제한보다 작음 → 재지급
+    "pattern1_regrant_no_receipt_code",  # 같은 상품 정상 영수증 기록 없음 → 재지급
+    "pattern1_regrant_unlimited",  # 무제한 구매 예외 상품 → 재지급
+    "pattern1_regrant_limit_not_reached",  # ShopData Count가 구매 제한보다 작음 → 재지급
+    "pattern1_regrant_no_period_receipt_code",  # 주기 초기화 이후 같은 상품 기록 없음 → 재지급
+    "pattern1_regrant_period_limit_not_reached",  # 주기형 상품 Count가 제한보다 작음 → 재지급
     "pattern3_count_confirmed_missing",  # ShopData Count 기준 미지급 확정 (None/Onetime 한정)
     "pattern3_code_not_found",  # ShopData PurchaseCode 자체가 없음 → 구매 시도 기록조차 없어 미지급 확정
 }
@@ -1016,10 +1016,11 @@ def _resolve_regrant_context(ticket_id, result):
 def _payment_error_sources_label(result):
     """이번 판정에서 실제로 조회한 데이터 소스를 판정 결과에서 도출해 헤더에 쓴다.
 
-    분기마다 조회 소스가 다르다 — pattern1·2(미지급 확정)는 영수증검증 + GCP 로그
-    후보만 보고 ShopData는 열지 않으며, pattern3만 ShopData Count를 조회한다. 따라서
-    "영수증검증 + ShopData"를 모든 판정에 고정으로 찍으면 사실과 다른 출력이 된다
-    (pattern2인데 ShopData를 본 것처럼 보임). verdict 기준으로 실제 소스를 표기한다.
+    분기마다 조회 소스가 다르다 — 주문번호 미기록/상품코드 비었음 분기(미지급 확정)는
+    영수증검증 + GCP 로그 후보만 보고 ShopData는 열지 않으며, description 정상 분기만
+    ShopData Count를 조회한다. 따라서 "영수증검증 + ShopData"를 모든 판정에 고정으로
+    찍으면 사실과 다른 출력이 된다(상품코드 비었음 분기인데 ShopData를 본 것처럼 보임).
+    verdict 기준으로 실제 소스를 표기한다.
     """
     verdict = (result or {}).get("verdict") or ""
     if verdict.startswith("pattern3"):
@@ -1034,6 +1035,7 @@ def _payment_error_sources_label(result):
 
 
 def _print_payment_error(ticket_id, result, error):
+    from console_payment_error import describe_verdict
     print(_SEP)
     if error or not result:
         # 판정을 못 끝냈으면(예외/결과 없음) 조회 소스를 특정할 수 없으므로 단정하지 않는다.
@@ -1048,7 +1050,7 @@ def _print_payment_error(ticket_id, result, error):
         print("   판정 결과 없음")
         print(_SEP)
         return None
-    print(f"   판정       : {result.get('verdict')}")
+    print(f"   판정       : {describe_verdict(result.get('verdict'))}")
     if result.get("decision_label"):
         print(f"   처리분기   : {result.get('decision_label')} (action={result.get('recommended_action')})")
     submitted_uuid = result.get("submitted_uuid")
@@ -1085,7 +1087,7 @@ def _print_payment_error(ticket_id, result, error):
         else:
             print(f"   [재지급 가능] 상품코드={regrant_ctx['product_code']} — 터미널에 '재지급' 입력 시 우편 발송")
     elif result.get("recommended_action") == "refund":
-        print(f"   [환불 후보] {result.get('decision_label') or result.get('verdict')}")
+        print(f"   [환불 후보] {result.get('decision_label') or describe_verdict(result.get('verdict'))}")
     elif result.get("recommended_action") == "review":
         print(f"   [미결정] 사람 확인 필요")
     print(_SEP)

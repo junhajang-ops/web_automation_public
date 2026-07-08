@@ -7,13 +7,14 @@ console_payment_error.py — 미지급(결제오류) 판정 (설계서 3-B)
 
 ★ 2026-07-07: run_receipt_verification이 영수증검증 UUID 입력 전 '유저' 탭에서 UUID
   존재 여부를 먼저 확인한다(ensure_uuid_registered, console_user_search.py). 존재하지
-  않는(오탈자 등) UUID는 InvalidUuidError로 여기서 실패하므로, 아래 패턴1("기록 없음")은
+  않는(오탈자 등) UUID는 InvalidUuidError로 여기서 실패하므로, 아래 "기록 없음" 분기는
   항상 "실존하는 UUID인데 기록이 없음"만을 의미한다 — 무효 UUID를 미지급으로 오판하지 않는다.
 
 판정은 두 분기로 완전히 나뉘며 서로 의존하지 않는다(영수증검증 description 주축):
-  - 분기A(패턴1·2): 이 주문 건이 영수증검증에 없음 / description=PurchaseCodeNull(또는 빈값).
-    패턴1(orders.get 결제 성공 + 영수증검증에 해당 주문번호 없음)은 상품 특정 후 재구매 흔적을
-    대조해 `재지급` / `환불` / `미결정`으로 최종 분기한다. Play `productId`(=StorePurchaseCode_AOS)
+  - 분기A(주문번호 미기록 / 상품코드 비었음): 이 주문 건이 영수증검증에 없거나
+    description=PurchaseCodeNull(또는 빈값)인 경우.
+    주문번호 미기록(orders.get 결제 성공 + 영수증검증에 해당 주문번호 없음)은 상품 특정 후
+    재구매 흔적을 대조해 `재지급` / `환불` / `미결정`으로 최종 분기한다. Play `productId`(=StorePurchaseCode_AOS)
     → CSV Inapp 후보 집합 → 결제 시각 이전 300초 이내(env `PAYMENT_ERROR_CLICK_WINDOW_SECONDS`)
     log_shop_click 후보를 본다. shop_click 후보 1건이면 그 상품으로 진행하고, shop_click 후보가
     0건이어도 CSV Inapp 후보가 1건이면 그 상품으로 진행한다. CSV 후보가 2건 이상인데
@@ -21,7 +22,7 @@ console_payment_error.py — 미지급(결제오류) 판정 (설계서 3-B)
     상품 확정 후 `None`/`Onetime`은 최근 영수증검증 100건, `Daily`/`Weekly`/`Monthly`는
     마지막 초기화 이후(KST Daily=매일 00시, Weekly=월요일 00시, Monthly=매달 1일 00시)
     같은 Code 존재 여부를 본다. 단일구매/한도도 찬 상태면 환불, 누락 상태면 재지급한다.
-    패턴1의 "이 주문 건이 없음"은 실제로 두 형태를 하나로 묶은 것이다
+    분기A의 "이 주문 건이 없음"은 실제로 두 형태를 하나로 묶은 것이다
     (2026-07-07 사용자 지적 — 원인 차이는 즉시 출력 문구로만 구분):
     ① 그 UUID로 영수증검증을 조회했더니 행이 통째로 0건.
     ② 그 UUID는 다른 결제 행이 있지만(has_results=True), 이 주문번호(order_id)와
@@ -31,7 +32,7 @@ console_payment_error.py — 미지급(결제오류) 판정 (설계서 3-B)
        것이므로 ①과 실질적으로 동일한 미지급 확정으로 취급한다(예전엔 이 경우 임의로
        다른 행을 골라 판정을 이어가는 버그가 있었음 — 지금은 그 행 선택 자체를 하지
        않고 곧바로 이 분기로 옴).
-  - 분기B(패턴3): description 정상(상품코드 있음).
+  - 분기B(description 정상): 상품코드가 정상적으로 있음.
     → 상품코드=description 그대로 사용, GCP 로그는 보지 않고 곧바로 ShopData Count 조회.
     - ShopData PurchaseCode 배열에 그 코드 자체가 없음(`PurchaseCodeNotFoundError`) → 구매
       시도 기록조차 없다는 뜻이라 **미지급 확정**(`pattern3_code_not_found`, 사람 승인 후 재지급).
@@ -111,7 +112,7 @@ DEFAULT_TABLE_NAME = TEST_TABLE_NAME
 DEFAULT_BRAND = "Gametitle_Raid(en)"
 PURCHASE_CODE_NULL = "PurchaseCodeNull"
 RETRY_MAX_RETRIES = get_retry_max_retries()
-# 분기A(패턴1·2) click 매칭 시각 윈도우 — 결제(orders.get createTime) 기준 이전 N초.
+# 분기A(주문번호 미기록/상품코드 비었음) click 매칭 시각 윈도우 — 결제(orders.get createTime) 기준 이전 N초.
 # 분석 근거: click→purchase 전환 최대 287초·99%가 60초 이내 → 300초면 여유있게 충분.
 CLICK_MATCH_WINDOW_SECONDS = max(1, int(os.environ.get("PAYMENT_ERROR_CLICK_WINDOW_SECONDS", "300")))
 # subprocess 호출자(cs co-pilot)가 결과를 회수할 때 쓰는 마커.
@@ -128,7 +129,7 @@ KST = timezone(timedelta(hours=9))
 # ── 판정 헬퍼 ─────────────────────────────────────────────────────────────────
 
 def classify_receipt_row(row: dict) -> str:
-    """영수증검증 한 행을 패턴으로 분류. description 주축."""
+    """영수증검증 한 행을 description 기준으로 분류. 반환값은 내부 분기 키."""
     desc = (row.get(ROW_DESCRIPTION) or "").strip()
     if desc == "" or desc == PURCHASE_CODE_NULL:
         return "pattern2"   # 기록은 있으나 PurchaseCodeNull/빈값 → 미지급
@@ -250,7 +251,7 @@ def get_purchase_limit_info(product_code):
 
 
 def resolve_product_candidates_via_gcp(logging_service, brand, uuid_value, product_id, order_create_time):
-    """분기A(패턴1·2) 상품 특정: AOS(product_id) → CSV 후보(Inapp) → 결제 시각 이전
+    """분기A(주문번호 미기록/상품코드 비었음) 상품 특정: AOS(product_id) → CSV 후보(Inapp) → 결제 시각 이전
     CLICK_MATCH_WINDOW_SECONDS초 이내 log_shop_click 중 후보에 속하는 것만 매칭.
 
     매칭된 후보를 전부 반환한다(자동으로 1건을 확정하지 않음 — 2건 이상이면 사람이
@@ -441,7 +442,7 @@ def resolve_count_judgment(shopdata, rows, product_code):
 
 
 def _resolve_gcp_candidates_result(logging_service, brand, uuid_value, product_id, order_create_time, notes):
-    """분기A(패턴1·2) 공용: 후보 조회 결과를 product_code/product_candidates로 정리.
+    """분기A(주문번호 미기록/상품코드 비었음) 공용: 후보 조회 결과를 product_code/product_candidates로 정리.
 
     후보 0건 → product_code=None. 1건 → 그 shop_click_id로 확정. 2건 이상 →
     product_code=None, product_candidates에 전부 담아 사람이 최종 선택하게 한다.
@@ -497,7 +498,7 @@ def _pattern1_result(
 
 
 def _resolve_pattern1_product_code(logging_service, brand, uuid_value, product_id, order_create_time, notes):
-    """패턴1 상품 특정. 반환: (status, product_code, source, gcp_candidates, inapp_candidates)."""
+    """주문번호 미기록 분기의 상품 특정. 반환: (status, product_code, source, gcp_candidates, inapp_candidates)."""
     inapp_candidates, err = resolve_inapp_candidates_from_aos(product_id)
     if err:
         notes.append(f"상품 특정(CSV) 실패: {err}")
@@ -567,7 +568,7 @@ def judge_pattern1_missing_receipt(
     timeout_error,
     notes,
 ):
-    """orders.get 결제 성공이나 영수증검증에 해당 주문번호가 없는 패턴1 최종 분기."""
+    """orders.get 결제 성공이나 영수증검증에 해당 주문번호가 없을 때의 최종 분기(상품 특정·재구매 흔적 대조)."""
     status, product_code, product_source, gcp_candidates, inapp_candidates = _resolve_pattern1_product_code(
         logging_service, brand, effective_uuid, product_id, order_create_time, notes
     )
@@ -816,7 +817,7 @@ def judge_nonpayment(
     """미지급 판정. (전제) Play 영수증 존재는 호출자가 확인.
 
     product_id(Play productId=StorePurchaseCode_AOS)·order_create_time(Play createTime)은
-    분기A(패턴1·2)의 GCP 로그 후보 조회에만 쓰인다. 분기B(패턴3)는 description만 쓰므로 불필요.
+    분기A(주문번호 미기록/상품코드 비었음)의 GCP 로그 후보 조회에만 쓰인다. 분기B(description 정상)는 description만 쓰므로 불필요.
 
     nickname(티켓 제출 닉네임, 선택)은 uuid_value가 '유저' 탭에서 존재하지 않을 때만 쓰인다
     (2026-07-08 사용자 지시): '닉네임'으로 재검색해 나온 후보와 uuid_value의 편집거리가
@@ -867,7 +868,7 @@ def judge_nonpayment(
         )
         print(f" [미지급 판정] 닉네임 대조로 UUID 오탈자 확정 → 이후 조회는 '{effective_uuid}' 기준으로 진행")
 
-    # 분기A 패턴1: 이 주문 건이 영수증검증에 없음 → 미지급 확정. 상품은 로그 후보로 나열.
+    # 분기A(주문번호 미기록): 이 주문 건이 영수증검증에 없음 → 미지급 확정. 상품은 로그 후보로 나열.
     # "없음"의 실제 형태는 두 가지이나(① UUID 전체가 0건 ② 다른 구매 행은 있으나 이
     # 주문번호만 없음) 재지급 판단 기준으로는 동일한 조건이라 verdict를 나누지 않는다
     # (2026-07-07 사용자 지적 — 애초에 둘 다 "Google엔 있는데 콘솔 영수증검증엔 이 건이
@@ -904,7 +905,7 @@ def judge_nonpayment(
                 "submitted_uuid": uuid_value,
                 "resolved_uuid": effective_uuid,
             }
-        print(f" [미지급 판정] {no_record_reason} → 패턴1 최종 분기(상품 특정/재구매 흔적 확인)")
+        print(f" [미지급 판정] {no_record_reason} → 상품 특정·재구매 흔적 확인으로 진행")
         return judge_pattern1_missing_receipt(
             page,
             receipt=receipt,
@@ -922,11 +923,16 @@ def judge_nonpayment(
 
     pattern = classify_receipt_row(matched)
     matched_desc = matched.get(ROW_DESCRIPTION) or "(빈값)"
-    print(f" [미지급 판정] 매칭 행 발견 — description='{matched_desc}' → {pattern}")
+    branch_label = (
+        "상품코드 비어있음(로그 후보로 특정)"
+        if pattern == "pattern2"
+        else "description 정상(ShopData Count 대조)"
+    )
+    print(f" [미지급 판정] 매칭 행 발견 — description='{matched_desc}' → {branch_label}")
 
-    # 분기A 패턴2: description = PurchaseCodeNull/빈값 → 미지급 확정. 상품은 로그 후보로 나열.
+    # 분기A(상품코드 비었음): description = PurchaseCodeNull/빈값 → 미지급 확정. 상품은 로그 후보로 나열.
     if pattern == "pattern2":
-        print(" [미지급 판정] description=PurchaseCodeNull/빈값 → 패턴2(미지급 확정) — GCP 로그 후보 조회로 상품 특정")
+        print(" [미지급 판정] description=PurchaseCodeNull/빈값 → 미지급 확정 — GCP 로그 후보 조회로 상품 특정")
         product_code, candidates = _resolve_gcp_candidates_result(
             logging_service, brand, effective_uuid, product_id, order_create_time, notes
         )
@@ -942,11 +948,11 @@ def judge_nonpayment(
             "submitted_uuid": uuid_value,
             "resolved_uuid": effective_uuid,
         }
-    # 분기B 패턴3: description 정상 → 상품코드 = description → 로그는 안 보고 곧바로
+    # 분기B(description 정상): 상품코드 = description → 로그는 안 보고 곧바로
     # ShopData Count 조회(판정 보류). 분기A와 완전히 분리 — product_id/order_create_time 불필요.
-    # classify_receipt_row가 이미 pattern2(빈값/PurchaseCodeNull)를 걸러냈으므로 matched_desc는 실값이다.
+    # classify_receipt_row가 이미 빈값/PurchaseCodeNull을 걸러냈으므로 matched_desc는 실값이다.
     product_code = matched_desc.strip()
-    print(f" [미지급 판정] description 정상('{product_code}') → 패턴3(로그 미사용) — ShopData Count 조회로 이동")
+    print(f" [미지급 판정] description 정상('{product_code}') → 로그 미사용, ShopData Count 조회로 이동")
     shopdata = None
     try:
         shopdata = lookup_count_readonly(
@@ -1005,11 +1011,50 @@ def judge_nonpayment(
 
 _SEP = "=" * 60
 
+# 내부 verdict 코드(분기 로직용 식별자)를 사람이 읽는 자연어 문구로 옮긴다.
+# 코드 값 자체는 두 스크립트가 공유하는 분기 키라 그대로 두고, 화면 출력에서만 이 표를 쓴다.
+_VERDICT_DESCRIPTIONS = {
+    "invalid_uuid": "존재하지 않는 UUID (유저 탭에서 확인)",
+    "inconclusive": "판정 보류 — 사람 확인 필요",
+    # 주문번호 미기록 분기 — 상품 특정 후 재구매 흔적 대조
+    "pattern1_product_lookup_review": "상품 조회 실패 — 미결정(사람 확인 필요)",
+    "pattern1_product_ambiguous_review": "상품 후보 다수 — 미결정(사람 확인 필요)",
+    "pattern1_product_unspecified_refund": "상품 미특정 — 환불 후보",
+    "pattern1_limit_info_review": "상품 제한 정보 조회 실패 — 미결정(사람 확인 필요)",
+    "pattern1_regrant_no_receipt_code": "재지급 — 같은 상품의 정상 영수증 기록 없음",
+    "pattern1_refund_repurchase_detected": "환불 — 재구매 흔적 확인됨",
+    "pattern1_regrant_unlimited": "재지급 — 무제한 구매 예외 상품",
+    "pattern1_regrant_limit_not_reached": "재지급 — 구매 한도 미도달(누락분 있음)",
+    "pattern1_refund_limit_reached": "환불 — 구매 한도까지 이미 채워짐",
+    "pattern1_count_review": "미결정 — ShopData Count로 판정 불가(사람 확인 필요)",
+    "pattern1_period_time_review": "미결정 — 주기 초기화 시각 확인 불가(사람 확인 필요)",
+    "pattern1_regrant_no_period_receipt_code": "재지급 — 주기 초기화 이후 같은 상품 기록 없음",
+    "pattern1_refund_period_repurchase_detected": "환불 — 주기 내 재구매 흔적 확인됨",
+    "pattern1_regrant_period_limit_not_reached": "재지급 — 주기형 상품 한도 미도달(누락분 있음)",
+    "pattern1_refund_period_limit_reached": "환불 — 주기형 상품 한도까지 이미 채워짐",
+    "pattern1_period_count_review": "미결정 — 주기형 Count로 판정 불가(사람 확인 필요)",
+    "pattern1_limit_type_review": "미결정 — 구매 제한 유형 확인 불가(사람 확인 필요)",
+    # 주문번호 기록의 상품코드가 비었음 → 로그 후보로 상품 특정
+    "pattern2_purchase_code_null": "미지급 — 영수증검증 상품코드 비어있음(로그 후보로 상품 특정)",
+    # description 정상 → ShopData Count 대조
+    "pattern3_count_confirmed_missing": "미지급 확정 — ShopData Count 부족",
+    "pattern3_count_confirmed_granted": "이미 지급됨 — ShopData Count 충족(재지급 불필요)",
+    "pattern3_count_review": "미결정 — ShopData Count 자동 판정 보류(사람 확인 필요)",
+    "pattern3_code_not_found": "미지급 확정 — ShopData에 상품코드 자체가 없음(구매 시도 기록 없음)",
+}
+
+
+def describe_verdict(verdict):
+    """내부 verdict 코드를 사람이 읽는 자연어 문구로 바꾼다. 미등록 코드는 원본 그대로."""
+    if not verdict:
+        return "(판정 없음)"
+    return _VERDICT_DESCRIPTIONS.get(verdict, verdict)
+
 
 def print_result(result):
     print()
     print(_SEP)
-    print(f" 미지급 판정: {result.get('verdict')}")
+    print(f" 미지급 판정: {describe_verdict(result.get('verdict'))}")
     print(_SEP)
     submitted_uuid = result.get("submitted_uuid")
     resolved_uuid = result.get("resolved_uuid")
@@ -1126,11 +1171,11 @@ def parse_args():
         help="--nickname 값의 출처(선택, 참고용 표기일 뿐 판정에는 영향 없음)",
     )
     parser.add_argument("--product-id", dest="product_id", default="",
-                         help="Play productId(=StorePurchaseCode_AOS). 분기A(패턴1·2) 후보 조회용, 선택")
+                         help="Play productId(=StorePurchaseCode_AOS). 분기A(주문번호 미기록/상품코드 비었음) 후보 조회용, 선택")
     parser.add_argument("--order-time", dest="order_create_time", default="",
-                         help="Play orders.get createTime(RFC3339). 분기A(패턴1·2) 후보 조회용, 선택")
+                         help="Play orders.get createTime(RFC3339). 분기A(주문번호 미기록/상품코드 비었음) 후보 조회용, 선택")
     parser.add_argument("--table-name", default=DEFAULT_TABLE_NAME, help="ShopData 테이블명")
-    parser.add_argument("--key", default="", help="GCP 서비스계정 JSON 키(패턴1·2 로그 후보조회용, 선택)")
+    parser.add_argument("--key", default="", help="GCP 서비스계정 JSON 키(분기A 로그 후보 조회용, 선택)")
     parser.add_argument("--profile", default=DEFAULT_PROFILE)
     parser.add_argument("--out", default=DEFAULT_OUTPUT)
     parser.add_argument("--start-url", default=DEFAULT_START_URL)
@@ -1166,7 +1211,7 @@ def main():
 
     logging_service = build_logging_service(args.key) if args.key else None
     if args.key and logging_service is None:
-        print("[경고] GCP logging service 생성 실패 — 패턴1/2 상품 특정(로그)이 불가합니다.")
+        print("[경고] GCP logging service 생성 실패 — 로그 후보로 상품을 특정하는 분기가 동작하지 않습니다.")
 
     print("=" * 60)
     print(" Console 미지급(결제오류) 판정 — 읽기 전용")

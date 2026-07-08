@@ -70,7 +70,7 @@ RECEIPT_PRE_SEARCH_IGNORE_PATTERNS = RECEIPT_IGNORE_PATTERNS + [
 # 이전 실행 baseline과의 타이밍 차이일 뿐 실제 화면 구조 변경이 아니다(오탐).
 # gridcell/rowgroup도 2026-07-07부터 여기 포함(사용자 라이브 실행 제보): 서로 다른
 # UUID로 실행할 때마다 "결과 있음"↔"결과 없음"이 자연스럽게 뒤바뀌는데(특히
-# console_payment_error.py의 패턴1 = 영수증 기록 없음이 정상 케이스), 그때마다 이전
+# console_payment_error.py에서 영수증 기록 없음이 정상 케이스), 그때마다 이전
 # baseline과 gridcell/rowgroup 유무가 갈려 매번 [UI change]가 떴다. 이 결과 유무 자체는
 # collect_result()가 has_results/row_count로 이미 명시적으로 반환·검증하므로(원칙:
 # fingerprint는 구조 감시용이며 명시적 값 검증을 대체하지 않는다) fingerprint가 같은
