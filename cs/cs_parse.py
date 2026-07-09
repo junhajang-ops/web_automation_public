@@ -231,6 +231,31 @@ def _resolve_brand_package_entry(brand: str):
     return None, {}
 
 
+def _resolve_raw_package_brand_entry(brand: str):
+    raw = _load_json_env(_PACKAGE_BRAND_RULES_ENV)
+    if not isinstance(raw, dict) or not brand:
+        return None, None, {}
+
+    normalized_brand = _normalize_brand_key(brand)
+    for package_name, block in raw.items():
+        if not isinstance(package_name, str) or not isinstance(block, dict):
+            continue
+        brands = block.get("brands") if isinstance(block.get("brands"), dict) else block
+        if not isinstance(brands, dict):
+            continue
+        if brand in brands and isinstance(brands.get(brand), dict):
+            return package_name, block, brands[brand]
+        for brand_name, rule_map in brands.items():
+            if (
+                isinstance(brand_name, str)
+                and _normalize_brand_key(brand_name) == normalized_brand
+                and isinstance(rule_map, dict)
+            ):
+                return package_name, block, rule_map
+
+    return None, None, {}
+
+
 def _load_custom_field_rules(brand: str) -> dict:
     rules = _normalize_rule_map(_load_json_env(_CUSTOM_FIELD_RULES_DEFAULT_ENV))
 
@@ -358,6 +383,26 @@ def resolve_brand_package(brand: str):
 
 def list_known_packages():
     return list(_load_package_brand_rules().keys())
+
+
+def resolve_brand_regrant_mail(brand: str):
+    """브랜드 → 재지급 우편 제목/내용.
+
+    `CS_PACKAGE_BRAND_RULES`의 **브랜드 레벨**
+    `regrant_mail_title`/`regrant_mail_content`를 읽는다. 언어별로 유저에게
+    보이는 문구가 달라야 하므로 패키지 공통값이 아니라 브랜드별 설정만 인정한다.
+    둘 중 하나라도 없으면 (None, None)을 반환해 호출자가 발송 전 중단하게 한다.
+    """
+    _package_name, _package_block, brand_rules = _resolve_raw_package_brand_entry(brand)
+    if not brand_rules:
+        return None, None
+
+    title = brand_rules.get("regrant_mail_title")
+    content = brand_rules.get("regrant_mail_content")
+    return (
+        _clean_text(title) if isinstance(title, str) and _clean_text(title) else None,
+        _clean_text(content) if isinstance(content, str) and _clean_text(content) else None,
+    )
 
 
 def resolve_brand_gcp_log(brand: str):

@@ -49,7 +49,12 @@ from cs_parse import parse_ticket  # import-time 부작용 없음, 직접 import
 
 # ── EXTRACT_JS ────────────────────────────────────────────────────────────────
 # cs_field_dump.py 동일 상수. import 시 DUMP_DIR.mkdir() 부작용이 있어 복사 사용.
-from cs_parse import list_known_packages, resolve_brand_console_project, resolve_brand_package
+from cs_parse import (
+    list_known_packages,
+    resolve_brand_console_project,
+    resolve_brand_package,
+    resolve_brand_regrant_mail,
+)
 from cs_gcp_logging import build_logging_service
 
 EXTRACT_JS = r"""
@@ -837,6 +842,22 @@ class ConsoleJudgeWorker:
                                 "error": f"브랜드 '{task.get('brand')}'의 console_project_name 설정 없음(CS_PACKAGE_BRAND_RULES 확인)",
                             })
                             continue
+                        mail_title, mail_content = resolve_brand_regrant_mail(task.get("brand"))
+                        if not mail_title or not mail_content:
+                            self._results.put({
+                                "task_type": "regrant",
+                                "ticket_id": ticket_id,
+                                "result": {
+                                    "status": "failed",
+                                    "uuid": task["uuid"],
+                                    "product_code": task["product_code"],
+                                },
+                                "error": (
+                                    f"브랜드 '{task.get('brand')}'의 재지급 우편 제목/내용 설정 없음"
+                                    "(CS_PACKAGE_BRAND_RULES regrant_mail_title/regrant_mail_content 확인)"
+                                ),
+                            })
+                            continue
                         try:
                             page = context.pages[0] if context.pages else context.new_page()
                             page = select_console_target_page(context, page)
@@ -844,8 +865,8 @@ class ConsoleJudgeWorker:
                                 page,
                                 task["uuid"],
                                 task["product_code"],
-                                title=REGRANT_TITLE,
-                                content=REGRANT_TITLE,
+                                title=mail_title,
+                                content=mail_content,
                                 start_url=CONSOLE_START_URL,
                                 project_name=console_project_name,
                             )
@@ -977,9 +998,6 @@ REGRANT_CANDIDATE_VERDICTS = {
     "pattern2_purchase_code_null",  # description=PurchaseCodeNull/빈값 → GCP 로그 후보로 상품 특정
 }
 REGRANT_COMMAND_RE = re.compile(r"^재지급(?:\s+(\d+))?$")
-REGRANT_TITLE = "결제상품지급"
-
-
 def _resolve_regrant_context(ticket_id, result):
     """판정 결과에서 재지급 가능 여부/대상을 뽑는다. 대상 아니면 None.
 
