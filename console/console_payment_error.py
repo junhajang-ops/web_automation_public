@@ -1124,8 +1124,6 @@ def print_result(result):
     inapp_candidates = result.get("inapp_candidates")
     if inapp_candidates:
         print(f" Inapp 후보      : {len(inapp_candidates)}건")
-        for code in inapp_candidates:
-            print(f"   - {code}")
     candidates = result.get("product_candidates")
     if candidates:
         print(f" GCP 로그 후보 {len(candidates)}건(자동 미확정 — 사람 확인):")
