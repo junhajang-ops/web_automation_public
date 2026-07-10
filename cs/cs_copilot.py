@@ -752,9 +752,14 @@ class ConsoleJudgeWorker:
                 PostSendUncertainError,
                 run_post_register_for_recipient,
             )
-            from console_step_verify import init_dump_dir
+            from console_step_verify import (
+                get_retry_max_retries,
+                init_dump_dir,
+                retry_with_recovery,
+            )
             from console_user_search import (
                 DEFAULT_START_URL as CONSOLE_START_URL,
+                prepare_console_project,
                 select_target_page as select_console_target_page,
             )
         except Exception as exc:  # noqa: BLE001
@@ -865,10 +870,20 @@ class ConsoleJudgeWorker:
                                 ),
                             })
                             continue
-                        try:
+                        # 발송 전 단계 실패만 재시도한다(AGENTS.md 원칙 4·10·11).
+                        #  - action: 페이지 확보 + 발송 전체 절차(prepare→우편 화면→아이템→
+                        #    수신자 등록→발송 확인)까지 포함(원칙 7). 발송 전에서 죽으면
+                        #    아무것도 발송되지 않았으므로 멱등하게 다시 시작해도 안전하다.
+                        #  - recovery: 다음 시도 전 초기 상태 복구 — 콘솔 홈으로 이동하며,
+                        #    로그인 만료 시 prepare_console_project 내부 click_login_if_needed가
+                        #    재로그인한다(원칙 8, 목표 화면으로 직접 URL 이동 금지).
+                        #  - no_retry_exceptions: PostSendUncertainError(발송 확인 클릭 이후
+                        #    불확실)는 재시도하면 중복 지급 위험 → 복구·재시도 없이 즉시 전파해
+                        #    아래 except에서 "불확실"로 멈춘다(원칙 11).
+                        def _do_regrant():
                             page = context.pages[0] if context.pages else context.new_page()
                             page = select_console_target_page(context, page)
-                            summary = run_post_register_for_recipient(
+                            return run_post_register_for_recipient(
                                 page,
                                 task["uuid"],
                                 task["product_code"],
@@ -876,6 +891,21 @@ class ConsoleJudgeWorker:
                                 content=mail_content,
                                 start_url=CONSOLE_START_URL,
                                 project_name=console_project_name,
+                            )
+
+                        def _recover_regrant():
+                            page = context.pages[0] if context.pages else context.new_page()
+                            page = select_console_target_page(context, page)
+                            prepare_console_project(page, "", CONSOLE_START_URL, console_project_name)
+
+                        try:
+                            summary = retry_with_recovery(
+                                _do_regrant,
+                                _recover_regrant,
+                                label="재지급",
+                                recovery_desc="콘솔 홈부터 재시작(필요 시 재로그인)",
+                                max_retries=get_retry_max_retries(),
+                                no_retry_exceptions=(PostSendUncertainError,),
                             )
                             self._results.put({
                                 "task_type": "regrant",
