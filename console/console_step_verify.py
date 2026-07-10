@@ -458,6 +458,18 @@ def _save_fingerprint(name: str, fp: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _rebaseline_enabled() -> bool:
+    """의도적 재베이스라인 모드 여부(UI_FP_REBASELINE).
+
+    켜져 있으면 changed 상태에서도 현재 화면을 새 기준으로 채택한다("지금 화면을
+    무조건 정답으로 받아들여라"). 진짜 UI 변경을 사람이 로그·스크린샷으로 확인한 뒤,
+    그 플로우를 지켜보며 한 번 재실행할 때만 쓴다. 무인 실행(copilot 백그라운드
+    워커)에서는 이 env가 새어들지 않도록 호출부에서 제거한다 — 켜진 채로 일시적
+    이상 화면을 지나가면 기준이 오염되기 때문이다.
+    """
+    return os.environ.get("UI_FP_REBASELINE", "").strip().lower() in ("1", "true", "yes")
+
+
 def _diff_fingerprints(prev: dict, curr: dict) -> list[str]:
     changes: list[str] = []
 
@@ -576,7 +588,9 @@ def snap_and_check_ui(
     changed = False
 
     if not prev:
+        # 최초 실행 — 비교 대상이 없으므로 현재 화면을 첫 베이스라인으로 채택한다.
         print(f"  [UI monitor] '{name}' baseline saved.")
+        _save_fingerprint(name, curr)
     else:
         diffs = _diff_fingerprints(prev, curr)
         kept_diffs, ignored_diffs = _split_ignored_diffs(diffs, ignore_patterns=ignore_patterns)
@@ -587,11 +601,18 @@ def snap_and_check_ui(
                 print(_red(diff))
             print(_red("  -> See console/ui_fingerprints/ui_change_log.txt"))
             _append_change_log(name, kept_diffs, ignored_diffs)
+            # 근본 원칙: changed 지문은 베이스라인으로 덮어쓰지 않는다. 마지막으로 확인된
+            # 정상 화면을 기준으로 보존해야, 일시적 이상 화면(로그인 만료·미개봉 팝업 등)이
+            # 기준을 오염시켜 다음 정상 화면을 무조건 changed로 뒤집는 flip-flop을 막는다.
+            # 진짜 UI 변경이라 기준 교체가 필요하면 사람이 UI_FP_REBASELINE로 명시 채택한다.
+            if _rebaseline_enabled():
+                print(f"  [UI monitor] '{name}' rebaselined (UI_FP_REBASELINE).")
+                _save_fingerprint(name, curr)
         else:
             # 변화 없음(unchanged)·화이트리스트 스킵([UI ignore])은 콘솔에 출력하지 않는다 — 변경 감지 시에만 출력.
-            pass
+            # 구조가 일치하므로 스키마 버전 최신화 겸 그대로 재저장(무해).
+            _save_fingerprint(name, curr)
 
-    _save_fingerprint(name, curr)
     return changed
 
 

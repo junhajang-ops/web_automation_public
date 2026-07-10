@@ -778,6 +778,13 @@ class ConsoleJudgeWorker:
         if copilot_wait_ms:
             os.environ["CONSOLE_STEP_WAIT_MS"] = copilot_wait_ms
 
+        # 재베이스라인(UI_FP_REBASELINE)은 사람이 화면을 지켜보며 실행할 때만 안전하다
+        # (켜진 채 일시적 이상 화면을 지나가면 fingerprint 기준이 오염됨). 이 워커는
+        # 무인 백그라운드 스레드이므로, 외부에서 이 env가 켜져 있어도 이 프로세스
+        # 안에서는 무조건 꺼서 새어들지 않게 한다(console_step_verify는 이 프로세스에서
+        # 이 워커만 쓴다).
+        os.environ.pop("UI_FP_REBASELINE", None)
+
         # console_leaderboard.py 등이 쓰는 pw_profile_console와는 별도 프로필을 쓴다
         # (2026-07-10 사용자 요청). 창 위치/크기 기억("console_browser" 키)이 프로필에
         # 새겨져 그 값을 console_leaderboard.py로도 새어가게 했던 문제를 프로필 분리로
