@@ -1104,6 +1104,17 @@ def _is_final_verdict_note(note: str) -> bool:
     return any(marker in note for marker in _FINAL_NOTE_MARKERS)
 
 
+def _short_date(date_str):
+    """GCP 로그 후보 발생 시각에서 연도 접두사만 뺀다(2026-07-09T.. → 07-09T..).
+
+    같은 티켓 안에서는 연도가 항상 현재 연도라 화면 표시엔 불필요하다는
+    사용자 요청(2026-07-10). 형식이 다르면(연도 4자리+'-'가 아니면) 원본 그대로 둔다.
+    """
+    if isinstance(date_str, str) and len(date_str) > 5 and date_str[4] == "-" and date_str[:4].isdigit():
+        return date_str[5:]
+    return date_str
+
+
 def _print_payment_error(ticket_id, result, error):
     from console_payment_error import describe_decision, describe_verdict, load_purchase_limit_info_map
     print(_SEP)
@@ -1131,8 +1142,9 @@ def _print_payment_error(ticket_id, result, error):
     regrant_ctx = _resolve_regrant_context(ticket_id, result)
     is_actionable = bool(regrant_ctx)
 
-    product_line = f"   상품코드   : {result.get('product_code') or '(미특정)'}"
-    print(_green(product_line) if is_actionable else product_line)
+    # 상품코드는 아래 Inapp/GCP 후보 조회로 확정되는 결과이므로, 후보 나열보다 먼저
+    # 보여주면 "이미 정해진 값"처럼 보여 인과관계가 뒤바뀐다(2026-07-10 사용자 지적) —
+    # 후보 블록을 먼저 찍고 상품코드는 그 결과로서 마지막에 찍는다.
     inapp_candidates = result.get("inapp_candidates")
     if inapp_candidates:
         print(f"   Inapp 후보 {len(inapp_candidates)}건:")
@@ -1158,7 +1170,7 @@ def _print_payment_error(ticket_id, result, error):
             c = candidates[0]
             code = c.get("shop_click_id", "?")
             cand_line = (
-                f"   GCP 로그 후보 1건: {code} @ {c.get('update_date', '?')} "
+                f"   GCP 로그 후보 1건: {code} @ {_short_date(c.get('update_date', '?'))} "
                 f"({_candidate_limit_str(code)})"
             )
             print(_green(cand_line) if is_actionable else cand_line)
@@ -1167,8 +1179,10 @@ def _print_payment_error(ticket_id, result, error):
             print(_green(cand_header) if is_actionable else cand_header)
             for i, c in enumerate(candidates, 1):
                 code = c.get("shop_click_id", "?")
-                print(f"     {i}) {code} @ {c.get('update_date', '?')} "
+                print(f"     {i}) {code} @ {_short_date(c.get('update_date', '?'))} "
                       f"({_candidate_limit_str(code)})")
+    product_line = f"   상품코드   : {result.get('product_code') or '(미특정)'}"
+    print(_green(product_line) if is_actionable else product_line)
     sd = result.get("shopdata")
     if sd:
         print(f"   ShopData   : line={sd.get('purchase_line_number')} "
