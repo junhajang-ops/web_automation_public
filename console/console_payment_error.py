@@ -267,6 +267,48 @@ def _print_matched_limit_info(limit_type, limit_count):
     ))
 
 
+# 첨부 결정 트리(2026-07-10 사용자 스크린샷)의 노드 텍스트를 그대로 상수화한다.
+# judge_pattern1_missing_receipt가 어느 경로를 탔는지 이 노드들을 이어붙여 터미널에 찍어,
+# 사용자가 화면 로그와 스크린샷을 1:1로 대조할 수 있게 한다.
+_NODE_NO_RESET = "Onetime/None 상품"
+_NODE_RESET = "Daily/Weekly/Monthly 상품"
+_NODE_RECEIPT_CODE_YES = "최근 영수증검증 100건 Description 내 해당 Code 존재 O(유저 재구매)"
+_NODE_RECEIPT_CODE_NO = "최근 영수증검증 100건 Description 내 해당 Code 존재 X"
+_NODE_PERIOD_CODE_YES = "마지막 초기화 이후 영수증검증 Description 내 해당 Code 존재 O"
+_NODE_PERIOD_CODE_NO = "마지막 초기화 이후 영수증검증 Description 내 해당 Code 존재 X"
+_NODE_LIMIT_EQ1 = "Purchase_Limit_Count = 1"
+_NODE_LIMIT_EQ0 = "Purchase_Limit_Count = 0"
+_NODE_LIMIT_GT1 = "Purchase_Limit_Count > 1"
+_NODE_SHOP_LT = "ShopData Count < Purchase_Limit_Count"
+_NODE_SHOP_GE = "ShopData Count >= Purchase_Limit_Count"
+_LEAF_REGRANT = "재지급"
+_LEAF_REFUND = "환불"
+
+
+def _branch_path(nodes, notes=None):
+    """결정 트리에서 실제로 탄 노드들을 ` → `로 이어붙여 초록색으로 출력하고 그 문장을 반환한다.
+
+    사용자 요청(2026-07-10): 스크린샷 분기 트리가 코드에 반영돼 있는지, 어느 분기를 탔는지
+    터미널에서 바로 확인할 수 있게 판정 경로를 명시한다. 반환 문장은 notes에도 남겨
+    print_result 요약과 JSON 결과에서도 동일 경로가 보이게 한다.
+    """
+    path = " → ".join(str(n) for n in nodes)
+    print(green(f" [지급 상태 판정] 판정 경로: {path}"))
+    sentence = f"판정 경로: {path}"
+    if notes is not None:
+        notes.append(sentence)
+    return sentence
+
+
+def _shop_node_for_action(action):
+    """Count>1 분기에서 ShopData 대조 결과(action)를 스크린샷 노드 텍스트로 바꾼다."""
+    if action == "regrant":
+        return _NODE_SHOP_LT
+    if action == "refund":
+        return _NODE_SHOP_GE
+    return "ShopData Count 확인 불가 → 미결정"
+
+
 def _print_matched_limit_info_by_code(product_code):
     """product_code만 알 때 상품표 CSV에서 유형·횟수를 읽어 초록색으로 출력한다(실패 시 조용히 생략)."""
     if not product_code:
@@ -672,6 +714,7 @@ def judge_pattern1_missing_receipt(
     if limit_type in NO_RESET_PURCHASE_LIMIT_TYPES:
         if matching_count == 0:
             notes.append("최근 영수증검증 100건 Description 내 해당 Code 없음 → 재지급")
+            _branch_path([_NODE_NO_RESET, _NODE_RECEIPT_CODE_NO, _LEAF_REGRANT], notes)
             return _pattern1_result(
                 verdict="pattern1_regrant_no_receipt_code",
                 receipt=receipt,
@@ -688,6 +731,7 @@ def judge_pattern1_missing_receipt(
             )
         notes.append(f"최근 영수증검증 100건 Description 내 해당 Code {matching_count}건 존재")
         if limit_count == 1:
+            _branch_path([_NODE_NO_RESET, _NODE_RECEIPT_CODE_YES, _NODE_LIMIT_EQ1, _LEAF_REFUND], notes)
             return _pattern1_result(
                 verdict="pattern1_refund_repurchase_detected",
                 receipt=receipt,
@@ -704,6 +748,7 @@ def judge_pattern1_missing_receipt(
             )
         if limit_count == 0:
             notes.append("무제한 구매 예외 상품(Purchase_Limit_Count=0) → ShopData Count 없이 재지급")
+            _branch_path([_NODE_NO_RESET, _NODE_RECEIPT_CODE_YES, _NODE_LIMIT_EQ0, _LEAF_REGRANT], notes)
             return _pattern1_result(
                 verdict="pattern1_regrant_unlimited",
                 receipt=receipt,
@@ -723,6 +768,11 @@ def judge_pattern1_missing_receipt(
                 page, effective_uuid, table_name, product_code, limit_count, timeout_error, notes
             )
             verdict = "pattern1_regrant_limit_not_reached" if action == "regrant" else "pattern1_refund_limit_reached"
+            _branch_path(
+                [_NODE_NO_RESET, _NODE_RECEIPT_CODE_YES, _NODE_LIMIT_GT1, _shop_node_for_action(action),
+                 _LEAF_REGRANT if action == "regrant" else (_LEAF_REFUND if action == "refund" else "미결정")],
+                notes,
+            )
             return _pattern1_result(
                 verdict=verdict if action != "review" else "pattern1_count_review",
                 receipt=receipt,
@@ -748,6 +798,11 @@ def judge_pattern1_missing_receipt(
         if period_count == 0:
             if unparsed_count:
                 notes.append(f"해당 Code 행 {unparsed_count}건의 거래일시 파싱 실패 — 사람 확인 필요")
+                _branch_path(
+                    [_NODE_RESET, _NODE_PERIOD_CODE_NO,
+                     "단, 해당 Code 행 거래일시 파싱 실패 → 트리 이탈, 미결정(사람 확인)"],
+                    notes,
+                )
                 return _pattern1_result(
                     verdict="pattern1_period_time_review",
                     receipt=receipt,
@@ -762,6 +817,7 @@ def judge_pattern1_missing_receipt(
                     recommended_action="review",
                     decision_label="미결정",
                 )
+            _branch_path([_NODE_RESET, _NODE_PERIOD_CODE_NO, _LEAF_REGRANT], notes)
             return _pattern1_result(
                 verdict="pattern1_regrant_no_period_receipt_code",
                 receipt=receipt,
@@ -777,6 +833,7 @@ def judge_pattern1_missing_receipt(
                 decision_label="재지급",
             )
         if limit_count == 1:
+            _branch_path([_NODE_RESET, _NODE_PERIOD_CODE_YES, _NODE_LIMIT_EQ1, _LEAF_REFUND], notes)
             return _pattern1_result(
                 verdict="pattern1_refund_period_repurchase_detected",
                 receipt=receipt,
@@ -796,6 +853,11 @@ def judge_pattern1_missing_receipt(
                 page, effective_uuid, table_name, product_code, limit_count, timeout_error, notes
             )
             verdict = "pattern1_regrant_period_limit_not_reached" if action == "regrant" else "pattern1_refund_period_limit_reached"
+            _branch_path(
+                [_NODE_RESET, _NODE_PERIOD_CODE_YES, _NODE_LIMIT_GT1, _shop_node_for_action(action),
+                 _LEAF_REGRANT if action == "regrant" else (_LEAF_REFUND if action == "refund" else "미결정")],
+                notes,
+            )
             return _pattern1_result(
                 verdict=verdict if action != "review" else "pattern1_period_count_review",
                 receipt=receipt,
@@ -811,6 +873,17 @@ def judge_pattern1_missing_receipt(
                 decision_label="재지급" if action == "regrant" else ("환불" if action == "refund" else "미결정"),
             )
         notes.append(f"{limit_type} 상품의 Purchase_Limit_Count={limit_count} — 예상 밖 값, 사람 확인 필요")
+        _branch_path(
+            [_NODE_RESET, _NODE_PERIOD_CODE_YES,
+             f"Purchase_Limit_Count={limit_count}(스크린샷 트리에 없는 값) → 미결정(사람 확인)"],
+            notes,
+        )
+    else:
+        _branch_path(
+            [f"Purchase_Limit_Type={limit_type}, Purchase_Limit_Count={limit_count}"
+             "(스크린샷 트리의 Onetime/None·Daily/Weekly/Monthly 어디에도 속하지 않음) → 미결정(사람 확인)"],
+            notes,
+        )
 
     return _pattern1_result(
         verdict="pattern1_limit_type_review",
