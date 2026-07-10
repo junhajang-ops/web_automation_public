@@ -1076,17 +1076,23 @@ def _payment_error_sources_label(result):
     ShopData Count를 조회한다. 따라서 "영수증검증 + ShopData"를 모든 판정에 고정으로
     찍으면 사실과 다른 출력이 된다(상품코드 비었음 분기인데 ShopData를 본 것처럼 보임).
     verdict 기준으로 실제 소스를 표기한다.
+
+    "영수증검증 O/X"의 O/X는 영수증검증에서 매칭 행을 확인했는지(matched_row 존재
+    여부, 2026-07-10 사용자 요청) 여부다 — pattern1(주문번호 미기록)은 매칭 행이
+    없어 X, pattern2/3(매칭 행은 있으나 상품코드/Count로 갈림)은 O.
     """
     verdict = (result or {}).get("verdict") or ""
-    if verdict.startswith("pattern3"):
-        return "영수증검증 + ShopData"
-    if verdict and verdict.startswith("pattern1_"):
-        return "영수증검증 + 상품분기"
-    if verdict == "pattern2_purchase_code_null":
-        return "영수증검증 + GCP 로그 후보"
     if verdict == "invalid_uuid":
         return "유저 탭 UUID 존재 확인"
-    return "영수증검증"
+    matched_mark = "O" if (result or {}).get("matched_row") is not None else "X"
+    receipt_label = f"영수증검증 {matched_mark}"
+    if verdict.startswith("pattern3"):
+        return f"{receipt_label} + ShopData"
+    if verdict and verdict.startswith("pattern1_"):
+        return f"{receipt_label} + 상품분기"
+    if verdict == "pattern2_purchase_code_null":
+        return f"{receipt_label} + GCP 로그 후보"
+    return receipt_label
 
 
 # 판정 결과 note 중 최종 확정 결론(초록색 강조 대상)을 가려내는 표식.
@@ -1099,13 +1105,13 @@ def _is_final_verdict_note(note: str) -> bool:
 
 
 def _print_payment_error(ticket_id, result, error):
-    from console_payment_error import describe_decision, describe_verdict
+    from console_payment_error import describe_decision, describe_verdict, load_purchase_limit_info_map
     print(_SEP)
     if error or not result:
         # 판정을 못 끝냈으면(예외/결과 없음) 조회 소스를 특정할 수 없으므로 단정하지 않는다.
-        print(f" [콘솔 지급 상태 판정] 티켓 {ticket_id} (읽기 전용)")
+        print(f" [지급 상태 판정] 티켓 {ticket_id}")
     else:
-        print(f" [콘솔 지급 상태 판정] 티켓 {ticket_id} — {_payment_error_sources_label(result)} (읽기 전용)")
+        print(f" [지급 상태 판정] 티켓 {ticket_id} — {_payment_error_sources_label(result)}")
     if error:
         print(f"   판정 실패: {error}")
         print(_SEP)
@@ -1134,11 +1140,35 @@ def _print_payment_error(ticket_id, result, error):
             print(f"     - {code}")
     candidates = result.get("product_candidates")
     if candidates:
-        cand_header = f"   GCP 로그 후보 {len(candidates)}건:"
-        print(_green(cand_header) if is_actionable else cand_header)
-        for i, c in enumerate(candidates, 1):
-            print(f"     {i}) {c.get('shop_click_id', '?')} @ {c.get('update_date', '?')} "
-                  f"(price={c.get('shop_click_price', '?')})")
+        # 구매제한(유형/횟수)은 후보 상품마다 다르므로 후보 하나당 한 번씩 붙여 표시한다
+        # (2026-07-10 사용자 요청 — 후보가 여럿이면 상품별로 값이 다를 수 있어 공용 한 줄로는 모호함).
+        try:
+            limit_map = load_purchase_limit_info_map()
+        except Exception:  # noqa: BLE001 — 표시용 부가정보라 실패해도 판정은 계속한다
+            limit_map = {}
+
+        def _candidate_limit_str(code):
+            info = limit_map.get(code) or {}
+            limit_type = info.get("type") or "(미확인)"
+            limit_count = info.get("count")
+            count_disp = limit_count if limit_count is not None else "(미확인)"
+            return f"{limit_type}, {count_disp}"
+
+        if len(candidates) == 1:
+            c = candidates[0]
+            code = c.get("shop_click_id", "?")
+            cand_line = (
+                f"   GCP 로그 후보 1건: {code} @ {c.get('update_date', '?')} "
+                f"({_candidate_limit_str(code)})"
+            )
+            print(_green(cand_line) if is_actionable else cand_line)
+        else:
+            cand_header = f"   GCP 로그 후보 {len(candidates)}건:"
+            print(_green(cand_header) if is_actionable else cand_header)
+            for i, c in enumerate(candidates, 1):
+                code = c.get("shop_click_id", "?")
+                print(f"     {i}) {code} @ {c.get('update_date', '?')} "
+                      f"({_candidate_limit_str(code)})")
     sd = result.get("shopdata")
     if sd:
         print(f"   ShopData   : line={sd.get('purchase_line_number')} "

@@ -953,21 +953,19 @@ def judge_nonpayment(
 
     pattern = classify_receipt_row(matched)
     matched_desc = matched.get(ROW_DESCRIPTION) or "(빈값)"
-    branch_label = (
-        "상품코드 비어있음(로그 후보로 특정)"
-        if pattern == "pattern2"
-        else "description 정상 → 로그 미사용, ShopData Count 조회로 이동"
-    )
-    print(green(f" [지급 상태 판정] 매칭 행 발견 — description='{matched_desc}' → {branch_label}"))
 
     # 분기A(상품코드 비었음): description = PurchaseCodeNull/빈값 → 미지급 확정. 상품은 로그 후보로 나열.
     if pattern == "pattern2":
-        print(" [지급 상태 판정] description=PurchaseCodeNull/빈값 → 미지급 확정 — GCP 로그 후보 조회로 상품 특정")
+        print(green(f" [지급 상태 판정] 매칭 행 발견 — description='{matched_desc}'"))
+        # 실제 GCP 로그 조회 전에 CSV(AOS→Inapp 매핑)로 추려지는 후보 폭만 먼저 안내한다
+        # (아래 _resolve_gcp_candidates_result가 이 중 결제 시각과 맞는 로그만 다시 골라낸다).
+        preview_candidates, _preview_err = resolve_inapp_candidates_from_aos(product_id)
+        print(f" 미지급 확정 - GCP 로그 상품 후보 {len(preview_candidates)}건 조회")
         product_code, candidates = _resolve_gcp_candidates_result(
             logging_service, brand, effective_uuid, product_id, order_create_time, notes
         )
-        # GCP 로그로 상품이 단일 확정된 경우에만 유형·횟수를 즉시 초록색으로 표시(다수/미특정은 생략).
-        _print_matched_limit_info_by_code(product_code)
+        # 구매제한(유형/횟수)은 후보 상품마다 다르므로 여기서 단일 표시하지 않고,
+        # 최종 요약(cs_copilot._print_payment_error)에서 후보별로 표시한다.
         return {
             "verdict": "pattern2_purchase_code_null",
             "receipt": receipt,
@@ -983,8 +981,10 @@ def judge_nonpayment(
     # 분기B(description 정상): 상품코드 = description → 로그는 안 보고 곧바로
     # ShopData Count 조회(판정 보류). 분기A와 완전히 분리 — product_id/order_create_time 불필요.
     # classify_receipt_row가 이미 빈값/PurchaseCodeNull을 걸러냈으므로 matched_desc는 실값이다.
-    # 위 '매칭 행 발견' 로그의 branch_label에서 이미 'description 정상 → ShopData Count 조회'를
-    # 안내했으므로 여기서 같은 문구를 다시 찍지 않는다(2026-07-08 사용자 지적: 중복 출력).
+    print(green(
+        f" [지급 상태 판정] 매칭 행 발견 — description='{matched_desc}' → "
+        "description 정상 → 로그 미사용, ShopData Count 조회로 이동"
+    ))
     product_code = matched_desc.strip()
     # 영수증검증 description으로 상품이 확정됨 → ShopData 조회 전에 유형·횟수를 초록색으로 표시.
     _print_matched_limit_info_by_code(product_code)
@@ -1070,7 +1070,7 @@ _VERDICT_DESCRIPTIONS = {
     "pattern1_period_count_review": "미결정 — 주기형 Count로 판정 불가(사람 확인 필요)",
     "pattern1_limit_type_review": "미결정 — 구매 제한 유형 확인 불가(사람 확인 필요)",
     # 주문번호 기록의 상품코드가 비었음 → 로그 후보로 상품 특정
-    "pattern2_purchase_code_null": "미지급 — 영수증검증 상품코드 비어있음(로그 후보로 상품 특정)",
+    "pattern2_purchase_code_null": "미지급 — 영수증검증 PurchaseCodeNull(로그 후보로 상품 특정)",
     # description 정상 → ShopData Count 대조
     "pattern3_count_confirmed_missing": "미지급 확정 — ShopData Count 부족",
     "pattern3_count_confirmed_granted": "이미 지급됨 — ShopData Count 충족(재지급 불필요)",
