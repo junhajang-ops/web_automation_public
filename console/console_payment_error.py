@@ -1448,7 +1448,8 @@ def describe_decision(result):
 def print_result(result):
     print()
     print(_SEP)
-    print(f" 지급 상태 판정: {describe_verdict(result.get('verdict'))}")
+    verdict_text = describe_verdict(result.get("verdict"))
+    print(f" 지급 상태 판정: {verdict_text}")
     print(_SEP)
     submitted_uuid = result.get("submitted_uuid")
     resolved_uuid = result.get("resolved_uuid")
@@ -1457,7 +1458,7 @@ def print_result(result):
     receipt = result.get("receipt") or {}
     print(f" 영수증검증 결과 : has_results={receipt.get('has_results')} row_count={receipt.get('row_count')}")
     decision_text = describe_decision(result)
-    if decision_text:
+    if decision_text and decision_text != verdict_text:
         print(f" 처리분기        : {decision_text}")
     print(f" 상품코드        : {result.get('product_code') or '(미특정)'} (source={result.get('product_source')})")
     inapp_candidates = result.get("inapp_candidates")

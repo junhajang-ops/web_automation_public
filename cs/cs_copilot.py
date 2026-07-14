@@ -1145,9 +1145,10 @@ def _print_payment_error(ticket_id, result, error):
         print("   판정 결과 없음")
         print(_SEP)
         return None
-    print(f"   판정       : {describe_verdict(result.get('verdict'))}")
+    verdict_text = describe_verdict(result.get("verdict"))
+    print(f"   판정       : {verdict_text}")
     decision_text = describe_decision(result)
-    if decision_text:
+    if decision_text and decision_text != verdict_text:
         print(f"   처리분기   : {decision_text}")
     submitted_uuid = result.get("submitted_uuid")
     resolved_uuid = result.get("resolved_uuid")
