@@ -616,6 +616,30 @@ def _resolve_unidentified_product_code(logging_service, brand, uuid_value, produ
         if code:
             distinct_by_code.setdefault(code, candidate)
     candidates = list(distinct_by_code.values())
+
+    # 이전 버전처럼 GCP 조회 결과를 최종 요약까지 기다리지 않고 PowerShell에 즉시 보여준다.
+    # 판정은 아래의 서로 다른 상품코드 수를 그대로 사용하며, 이 블록은 출력만 담당한다.
+    print(f" [지급 상태 판정] GCP log_shop_click 매칭 로그 {len(raw_candidates)}건")
+    for index, candidate in enumerate(raw_candidates, start=1):
+        print(
+            f"   {index}) {candidate.get('shop_click_id', '?')} "
+            f"@ {candidate.get('update_date', '?')} "
+            f"(price={candidate.get('shop_click_price', '?')}, "
+            f"category={candidate.get('shop_click_category', '?')})"
+        )
+    if gcp_err:
+        print(f" [지급 상태 판정] GCP log_shop_click 조회 실패/불완전 — {gcp_err}")
+    else:
+        print(f" [지급 상태 판정] GCP 로그 구매상품 {len(candidates)}개")
+        if len(candidates) == 1:
+            print(green(
+                " [지급 상태 판정] GCP 로그 구매상품 1개 확정 — "
+                f"{candidates[0].get('shop_click_id', '?')}"
+            ))
+        elif len(candidates) > 1:
+            for index, candidate in enumerate(candidates, start=1):
+                print(f"   상품 {index}) {candidate.get('shop_click_id', '?')}")
+
     if len(raw_candidates) != len(candidates):
         notes.append(
             f"GCP log_shop_click {len(raw_candidates)}행 → 서로 다른 구매상품 {len(candidates)}개로 중복 제거"
