@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-cs_copilot.py — cs 실시간 보조 co-pilot (읽기 전용 MVP)
-================================================================
+cs_copilot.py — cs 실시간 보조 co-pilot
+=================================================
 
 상담원이 cs 티켓 상세 페이지를 열면 자동으로:
   필드 추출 → UUID·주문번호 정규화 → Play API orders.get 조회
-  → 채널·환불상태 verdict를 PowerShell 패널에 출력.
+  → 채널·환불상태 verdict를 PowerShell 패널에 출력
+  → 판정 분기에 따라 사람이 터미널에 '재지급'/'환불'을 입력한 경우에만 실행.
 
 실행:
   .venv\\Scripts\\python.exe cs_copilot.py --key <JSON키파일>
@@ -561,6 +562,89 @@ def _run_verdict_tests():
         sys.exit(1)
 
 
+def _run_refund_tests():
+    """외부 API 없이 합성 서비스로 환불 안전장치를 검증한다."""
+    passed = failed = 0
+
+    def check(name, cond):
+        nonlocal passed, failed
+        if cond:
+            print(f"  [PASS] {name}")
+            passed += 1
+        else:
+            print(f"  [FAIL] {name}")
+            failed += 1
+
+    class _Call:
+        def __init__(self, value=None, error=None):
+            self.value = value
+            self.error = error
+
+        def execute(self):
+            if self.error:
+                raise self.error
+            return self.value
+
+    class _Orders:
+        def __init__(self, states, refund_error=None):
+            self.states = list(states)
+            self.refund_error = refund_error
+            self.refund_calls = []
+
+        def get(self, **_kwargs):
+            value = self.states.pop(0)
+            if isinstance(value, Exception):
+                return _Call(error=value)
+            return _Call(value={"state": value})
+
+        def refund(self, **kwargs):
+            self.refund_calls.append(kwargs)
+            return _Call(value={}, error=self.refund_error)
+
+    class _Service:
+        def __init__(self, orders):
+            self._orders = orders
+
+        def orders(self):
+            return self._orders
+
+    orders = _Orders(["PROCESSED", "PENDING_REFUND"])
+    result = _execute_refund(_Service(orders), "pkg.test", "GPA.test")
+    check("PROCESSED 주문은 환불 요청", result["status"] == "submitted" and len(orders.refund_calls) == 1)
+    check("환불은 아이템 회수 없이 실행", orders.refund_calls[0].get("revoke") is False)
+
+    orders = _Orders(["REFUNDED"])
+    result = _execute_refund(_Service(orders), "pkg.test", "GPA.test")
+    check("이미 환불된 주문은 중복 요청 차단", result["status"] == "already_done" and not orders.refund_calls)
+
+    orders = _Orders(["PENDING"])
+    result = _execute_refund(_Service(orders), "pkg.test", "GPA.test")
+    check("PROCESSED 외 상태는 환불 차단", result["status"] == "blocked" and not orders.refund_calls)
+
+    orders = _Orders(["PROCESSED"], refund_error=RuntimeError("응답 유실"))
+    result = _execute_refund(_Service(orders), "pkg.test", "GPA.test")
+    check("환불 호출 중 오류는 불확실 처리", result["status"] == "uncertain")
+
+    ctx = _resolve_refund_context(
+        "ticket",
+        {"recommended_action": "refund", "order_id": "GPA.test", "package_name": "pkg.test"},
+    )
+    check("환불 분기와 정확한 주문 대상이 있어야 명령 허용", bool(ctx))
+    check(
+        "재지급 분기에서는 환불 명령 문맥 미생성",
+        _resolve_refund_context(
+            "ticket",
+            {"recommended_action": "regrant", "order_id": "GPA.test", "package_name": "pkg.test"},
+        ) is None,
+    )
+    check("정확한 '환불' 명령 허용", REFUND_COMMAND_RE.fullmatch("환불") is not None)
+    check("추가 인자가 붙은 환불 명령 차단", REFUND_COMMAND_RE.fullmatch("환불 1") is None)
+
+    print(f"\n환불 안전장치 결과: 통과 {passed}건 / 실패 {failed}건")
+    if failed:
+        sys.exit(1)
+
+
 # ── Playwright 헬퍼 ────────────────────────────────────────────────────────────
 
 def _extract_from_page(page):
@@ -710,7 +794,13 @@ class ConsoleJudgeWorker:
         self._tasks.put(None)
         self._thread.join(timeout=10)
 
-    def submit(self, ticket_id: str, parsed: dict, order_result: dict | None = None) -> None:
+    def submit(
+        self,
+        ticket_id: str,
+        parsed: dict,
+        order_result: dict | None = None,
+        package_name: str | None = None,
+    ) -> None:
         order_result = order_result or {}
         line_items = order_result.get("lineItems") or []
         product_id = line_items[0].get("productId") if line_items else None
@@ -723,6 +813,7 @@ class ConsoleJudgeWorker:
                 "nickname_source": parsed.get("nickname_source"),
                 "brand": parsed.get("brand"),
                 "order_id": parsed.get("order_id"),
+                "package_name": package_name,
                 "product_id": product_id,
                 "order_create_time": order_result.get("createTime"),
                 "inquiry_time": parsed.get("inquiry_time"),
@@ -987,6 +1078,12 @@ class ConsoleJudgeWorker:
                             project_name=console_project_name,
                             timeout_error=PlaywrightTimeoutError,
                         )
+                        # 환불 실행 후보에는 Google 조회에서 실제로 사용한 패키지명과
+                        # 주문번호가 반드시 함께 있어야 한다. 브랜드로 다시 추정하지 않고
+                        # orders.get에 성공한 정확한 대상을 그대로 넘긴다.
+                        result["order_id"] = task.get("order_id")
+                        result["package_name"] = task.get("package_name")
+                        result["brand"] = task.get("brand")
                         self._results.put(
                             {
                                 "task_type": "judge",
@@ -1049,6 +1146,9 @@ REGRANT_CANDIDATE_VERDICTS = {
     "pattern2_purchase_code_null",  # description=PurchaseCodeNull/빈값 → GCP 로그 후보로 상품 특정
 }
 REGRANT_COMMAND_RE = re.compile(r"^재지급(?:\s+(\d+))?$")
+REFUND_COMMAND_RE = re.compile(r"^환불$")
+
+
 def _resolve_regrant_context(ticket_id, result):
     """판정 결과에서 재지급 가능 여부/대상을 뽑는다. 대상 아니면 None.
 
@@ -1068,18 +1168,55 @@ def _resolve_regrant_context(ticket_id, result):
         product_code = result.get("product_code")
         if not product_code:
             return None
-        return {"ticket_id": ticket_id, "uuid": uuid_value, "product_code": product_code, "candidates": None}
+        return {
+            "action_type": "regrant",
+            "ticket_id": ticket_id,
+            "uuid": uuid_value,
+            "product_code": product_code,
+            "candidates": None,
+            "brand": result.get("brand"),
+        }
 
     if verdict in REGRANT_CANDIDATE_VERDICTS:
         product_code = result.get("product_code")
         candidates = result.get("product_candidates") or []
         if product_code and len(candidates) == 1:
-            return {"ticket_id": ticket_id, "uuid": uuid_value, "product_code": product_code, "candidates": None}
+            return {
+                "action_type": "regrant",
+                "ticket_id": ticket_id,
+                "uuid": uuid_value,
+                "product_code": product_code,
+                "candidates": None,
+                "brand": result.get("brand"),
+            }
         if len(candidates) > 1:
-            return {"ticket_id": ticket_id, "uuid": uuid_value, "product_code": None, "candidates": candidates}
+            return {
+                "action_type": "regrant",
+                "ticket_id": ticket_id,
+                "uuid": uuid_value,
+                "product_code": None,
+                "candidates": candidates,
+                "brand": result.get("brand"),
+            }
         return None
 
     return None
+
+
+def _resolve_refund_context(ticket_id, result):
+    """환불 판정이며 주문 대상이 완전하게 특정된 경우에만 실행 문맥을 만든다."""
+    if not result or result.get("recommended_action") != "refund":
+        return None
+    order_id = (result.get("order_id") or "").strip()
+    package_name = (result.get("package_name") or "").strip()
+    if not order_id or not package_name:
+        return None
+    return {
+        "action_type": "refund",
+        "ticket_id": ticket_id,
+        "order_id": order_id,
+        "package_name": package_name,
+    }
 
 
 def _payment_error_sources_label(result):
@@ -1155,7 +1292,9 @@ def _print_payment_error(ticket_id, result, error):
     if submitted_uuid and resolved_uuid and submitted_uuid != resolved_uuid:
         print(f"   UUID       : 제출값={submitted_uuid} → 닉네임 대조로 확정={resolved_uuid}")
     regrant_ctx = _resolve_regrant_context(ticket_id, result)
-    is_actionable = bool(regrant_ctx)
+    refund_ctx = _resolve_refund_context(ticket_id, result)
+    action_ctx = regrant_ctx or refund_ctx
+    is_actionable = bool(action_ctx)
 
     # 상품코드는 아래 Inapp/GCP 후보 조회로 확정되는 결과이므로, 후보 나열보다 먼저
     # 보여주면 "이미 정해진 값"처럼 보여 인과관계가 뒤바뀐다(2026-07-10 사용자 지적) —
@@ -1207,12 +1346,15 @@ def _print_payment_error(ticket_id, result, error):
             print(f"   [재지급 가능] 후보 중 번호를 골라 '재지급 N' 입력(예: 재지급 1)")
         else:
             print(f"   [재지급 가능] 상품코드={regrant_ctx['product_code']} — 터미널에 '재지급' 입력 시 우편 발송")
+    elif refund_ctx:
+        print(f"   [환불 가능] {describe_decision(result) or describe_verdict(result.get('verdict'))}")
+        print(f"   [환불 가능] 터미널에 '환불' 입력 시 해당 주문번호로 Google Play API 환불 실행")
     elif result.get("recommended_action") == "refund":
-        print(f"   [환불 후보] {describe_decision(result) or describe_verdict(result.get('verdict'))}")
+        print("   [환불 후보] 주문번호 또는 조회 패키지를 확정하지 못해 자동 환불 실행 불가")
     elif result.get("recommended_action") == "review":
         print(f"   [미결정] 사람 확인 필요")
     print(_SEP)
-    return regrant_ctx
+    return action_ctx
 
 
 def _print_regrant_result(ticket_id, result, error):
@@ -1231,6 +1373,80 @@ def _print_regrant_result(ticket_id, result, error):
     else:
         print("   상태       : 실패 (발송 전 단계에서 중단 — 우편이 발송되지 않았습니다)")
         print(f"   오류       : {error}")
+    print(_SEP)
+
+
+def _execute_refund(service, package_name: str, order_id: str) -> dict:
+    """주문 상태를 재확인한 뒤 Google Play 환불을 한 번만 요청한다.
+
+    refund 요청 전 오류는 failed, 요청 호출 중 오류는 서버 접수 여부를 확정할 수
+    없으므로 uncertain으로 구분한다. 호출자는 uncertain을 자동 재시도하면 안 된다.
+    """
+    try:
+        before = service.orders().get(
+            packageName=package_name, orderId=order_id
+        ).execute()
+    except Exception as exc:  # noqa: BLE001 — API/네트워크 오류를 사용자용 한 줄로 정리
+        short_msg = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        return {"status": "failed", "error": f"환불 전 주문 상태 재조회 실패: {short_msg}"}
+
+    before_state = before.get("state", "STATE_UNSPECIFIED")
+    if before_state in REFUNDED_STATES:
+        return {"status": "already_done", "before_state": before_state, "after_state": before_state}
+    if before_state != "PROCESSED":
+        return {"status": "blocked", "before_state": before_state}
+
+    try:
+        service.orders().refund(
+            packageName=package_name,
+            orderId=order_id,
+            revoke=False,
+        ).execute()
+    except Exception as exc:  # noqa: BLE001 — 비가역 요청 도중 오류는 성공/실패 단정 금지
+        short_msg = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        return {"status": "uncertain", "before_state": before_state, "error": short_msg}
+
+    # refund 요청 자체가 성공 반환했으면 이후 재조회 실패와 무관하게 접수 완료다.
+    try:
+        after = service.orders().get(
+            packageName=package_name, orderId=order_id
+        ).execute()
+        after_state = after.get("state", "STATE_UNSPECIFIED")
+        return {"status": "submitted", "before_state": before_state, "after_state": after_state}
+    except Exception as exc:  # noqa: BLE001 — 접수 후 상태 표시에만 쓰는 부가 조회
+        short_msg = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        return {
+            "status": "submitted",
+            "before_state": before_state,
+            "after_state": None,
+            "warning": f"환불 요청 접수 후 상태 재조회 실패: {short_msg}",
+        }
+
+
+def _print_refund_result(ctx: dict, result: dict) -> None:
+    status = result.get("status")
+    print(_SEP)
+    print(f" [환불] 티켓 {ctx['ticket_id']}")
+    print(f"   주문번호   : {ctx['order_id']}")
+    if status == "submitted":
+        print("   상태       : Google Play API 환불 요청 접수 완료")
+        if result.get("after_state"):
+            print(f"   환불 후 상태: {result['after_state']} ({_STATE_LABEL.get(result['after_state'], '?')})")
+        if result.get("warning"):
+            print(f"   참고       : {result['warning']}")
+    elif status == "already_done":
+        state = result.get("before_state")
+        print(f"   상태       : 실행 생략 — 이미 환불/취소 상태({state})")
+    elif status == "blocked":
+        state = result.get("before_state")
+        print(f"   상태       : 실행 중단 — 환불 가능한 PROCESSED 상태가 아님({state})")
+    elif status == "uncertain":
+        print("   상태       : 불확실 — 환불 API 호출 중 오류, 같은 주문을 다시 환불하지 마세요")
+        print("   조치       : Play Console에서 주문 상태를 직접 확인하세요.")
+        print(f"   오류       : {result.get('error')}")
+    else:
+        print("   상태       : 실패 — 환불 API 호출 전 단계에서 중단")
+        print(f"   오류       : {result.get('error')}")
     print(_SEP)
 
 
@@ -1272,19 +1488,36 @@ class TerminalCommandReader:
         return items
 
 
-def _handle_command(command_text, regrant_state, console_worker):
-    """'재지급'/'재지급 N' 명령 처리. 그 외 명령은 안내만 하고 무시한다."""
-    m = REGRANT_COMMAND_RE.match(command_text.strip())
-    if not m:
-        print(f"[안내] 알 수 없는 명령: '{command_text}' (지원: 재지급, 재지급 N)")
+def _handle_command(command_text, action_state, console_worker, service):
+    """최신 판정과 일치하는 '재지급'/'환불' 명령만 한 번 실행한다."""
+    command_text = command_text.strip()
+    regrant_match = REGRANT_COMMAND_RE.match(command_text)
+    refund_match = REFUND_COMMAND_RE.match(command_text)
+    if not regrant_match and not refund_match:
+        print(f"[안내] 알 수 없는 명령: '{command_text}' (지원: 재지급, 재지급 N, 환불)")
         return
 
-    ctx = regrant_state.get("last_actionable")
+    ctx = action_state.get("last_actionable")
     if not ctx:
-        print("[재지급] 재지급 가능한 판정 결과가 없습니다.")
+        print(f"[{command_text.split()[0]}] 실행 가능한 최신 판정 결과가 없습니다.")
         return
 
-    index_str = m.group(1)
+    if refund_match:
+        if ctx.get("action_type") != "refund":
+            print("[환불] 최신 판정 결과가 환불 분기가 아닙니다.")
+            return
+        # 1회성 소비: API가 응답을 잃어 결과가 불확실해도 같은 명령으로 재호출하지 않는다.
+        action_state["last_actionable"] = None
+        print(f"[환불] 티켓 {ctx['ticket_id']} — 주문번호 {ctx['order_id']} 환불을 요청합니다.")
+        result = _execute_refund(service, ctx["package_name"], ctx["order_id"])
+        _print_refund_result(ctx, result)
+        return
+
+    if ctx.get("action_type") != "regrant":
+        print("[재지급] 최신 판정 결과가 재지급 분기가 아닙니다.")
+        return
+
+    index_str = regrant_match.group(1)
     index = int(index_str) if index_str else None
 
     if ctx["candidates"]:
@@ -1302,7 +1535,7 @@ def _handle_command(command_text, regrant_state, console_worker):
         product_code = ctx["product_code"]
 
     # 1회성 소비 — 같은 결과에 '재지급'을 두 번 입력해도 중복 발송되지 않는다.
-    regrant_state["last_actionable"] = None
+    action_state["last_actionable"] = None
     print(f"[재지급] 티켓 {ctx['ticket_id']} — UUID={ctx['uuid']}, 상품코드={product_code} 발송을 등록합니다.")
     console_worker.submit_regrant(ctx["ticket_id"], ctx["uuid"], product_code, ctx.get("brand"))
 
@@ -1377,7 +1610,7 @@ def _handle_ticket(page, ticket_id, service, console_worker=None, console_jobs=N
     if order_id_raw:
         custom_fields = {k: v for k, v in custom_fields.items() if v != order_id_raw}
     display_num = _find_display_ticket_num(data) or ticket_id  # #NNNNN 또는 URL ID
-    order_result, http_status, _ = _fetch_order(service, packages, parsed["order_id"])
+    order_result, http_status, package_used = _fetch_order(service, packages, parsed["order_id"])
     verdict = build_verdict(parsed, order_result, http_status)
     _print_verdict(display_num, parsed, verdict, warnings=warnings or None,
                    custom_fields=custom_fields or None)
@@ -1400,7 +1633,12 @@ def _handle_ticket(page, ticket_id, service, console_worker=None, console_jobs=N
                 "brand": parsed.get("brand"),
                 "order_id": parsed.get("order_id"),
             }
-            console_worker.submit(ticket_id, parsed, order_result=order_result)
+            console_worker.submit(
+                ticket_id,
+                parsed,
+                order_result=order_result,
+                package_name=package_used,
+            )
             print(" [콘솔 지급 상태 판정] 콘솔 worker에 등록했습니다. 결과는 준비되면 이어서 출력합니다.")
 
 
@@ -1409,7 +1647,7 @@ def _handle_ticket(page, ticket_id, service, console_worker=None, console_jobs=N
 def main():
     _enable_windows_ansi()
 
-    parser = argparse.ArgumentParser(description="cs 실시간 보조 co-pilot (읽기 전용)")
+    parser = argparse.ArgumentParser(description="cs 실시간 보조 co-pilot")
     parser.add_argument("--key", help="Google 서비스 계정 JSON 키 파일 경로")
     parser.add_argument("--test", action="store_true", help="build_verdict 단위 테스트 후 종료")
     args = parser.parse_args()
@@ -1417,6 +1655,8 @@ def main():
     if args.test:
         print("[build_verdict 단위 테스트]")
         _run_verdict_tests()
+        print("\n[환불 안전장치 단위 테스트]")
+        _run_refund_tests()
         return
 
     if not args.key:
@@ -1446,7 +1686,7 @@ def main():
     console_worker.start()
     command_reader = TerminalCommandReader()
     command_reader.start()
-    regrant_state = {"last_actionable": None}  # 재지급 대상 판정 1건(1회성 소비)
+    action_state = {"last_actionable": None}  # 최신 재지급/환불 판정 1건(1회성 소비)
 
     def _register_page(page):
         pid = id(page)
@@ -1509,7 +1749,7 @@ def main():
 
         print()
         print("=" * 44)
-        print(" cs co-pilot 실행 중 (읽기 전용)")
+        print(" cs co-pilot 실행 중 (조회 + 명령 승인 후 재지급/환불)")
         print("=" * 44)
         print()
 
@@ -1565,19 +1805,19 @@ def main():
                             console_result.get("error"),
                         )
                         continue
-                    regrant_ctx = _print_payment_error(
+                    action_ctx = _print_payment_error(
                         result_ticket_id or "(unknown)",
                         console_result.get("result"),
                         console_result.get("error"),
                     )
-                    if regrant_ctx:
-                        regrant_ctx["brand"] = console_result.get("brand")
-                        regrant_state["last_actionable"] = regrant_ctx
+                    # 최신 판정만 실행할 수 있게 교체한다. 실행 불가 판정이 뒤이어 오면
+                    # 이전 티켓의 오래된 재지급/환불 문맥도 즉시 폐기한다.
+                    action_state["last_actionable"] = action_ctx
                     if result_ticket_id in console_jobs:
                         console_jobs.pop(result_ticket_id, None)
 
                 for command_text in command_reader.drain():
-                    _handle_command(command_text, regrant_state, console_worker)
+                    _handle_command(command_text, action_state, console_worker, service)
 
                 # ── 1) 이벤트 기반 감지 (framenavigated) ─────────────────
                 to_handle = {}
