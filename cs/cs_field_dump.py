@@ -228,6 +228,10 @@ EXTRACT_JS = r"""
   });
 
   // 4) "라벨 : 값" 형태의 텍스트 줄 (한글/영문 콜론 모두)
+  const ticketMetaTimes = Array.from(
+    document.querySelectorAll(".box-aside-body-top-upper p.text-xs.text-dark-grey span")
+  ).map(el => clean(el.innerText)).filter(Boolean);
+
   const bodyText = document.body ? document.body.innerText : "";
   const labeledLines = [];
   bodyText.split("\n").forEach(line => {
@@ -245,6 +249,7 @@ EXTRACT_JS = r"""
     formFields,
     labeledLines,
     bodyText,
+    ticketMetaTimes,
     customFields: customFields.pairs,
     customFieldMap: customFields.map
   };

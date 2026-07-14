@@ -18,6 +18,7 @@ import re
 import sys
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -52,6 +53,10 @@ _ATTACH_EXT = re.compile(
 # 인게임 닉네임과 동일하게 취급한다(추측성 폴백이 아니라 정확한 값).
 _SENDER_DISPLAY_NAME_RE = re.compile(r"^(.*?)\s*<[^<>]*>\s*$")
 
+# 문의 상세 우측 메타 영역의 KST 시각 값. UI 라벨 언어에 의존하지 않고 값 패턴만 읽는다.
+_KST_META_TIME_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\(KST\)")
+KST = timezone(timedelta(hours=9))
+
 _CUSTOM_FIELD_RULES_DEFAULT_ENV = "CS_CUSTOM_FIELD_RULES_DEFAULT"
 _CUSTOM_FIELD_RULES_BRAND_ENV = "CS_CUSTOM_FIELD_RULES_BY_BRAND"
 _PACKAGE_BRAND_RULES_ENV = "CS_PACKAGE_BRAND_RULES"
@@ -61,6 +66,37 @@ _WARNED_ENV_NAMES = set()
 
 def _clean_text(value: str):
     return re.sub(r"\s+", " ", (value or "")).strip()
+
+
+def _extract_inquiry_time(dump_json: dict):
+    """현재 문의의 생성 시각을 KST 분 단위 ISO 문자열로 반환한다.
+
+    co-pilot이 우측 티켓 메타 영역에서 구조적으로 수집한 `ticketMetaTimes`를 우선한다.
+    이 영역은 생성/업데이트 시각을 함께 보여주므로 서로 다른 값이 2개면 이 중 이른 값이
+    생성 시각이다. 값이 3개 이상이면 예상 구조가 아니므로 임의 선택하지 않는다.
+    반환: (iso_time | None, "ok" | "missing" | "ambiguous")
+    """
+    source_values = dump_json.get("ticketMetaTimes") or []
+    if not source_values:
+        # 과거 dump 호환: 우측 메타 문자열이 bodyText에만 저장된 파일도 값 패턴으로 읽는다.
+        source_values = [dump_json.get("bodyText", "")]
+    raw_values = []
+    for value in source_values:
+        raw_values.extend(_KST_META_TIME_RE.findall(str(value or "")))
+    values = sorted(set(raw_values))
+    if not values:
+        return None, "missing"
+    if len(values) > 2:
+        return None, "ambiguous"
+    try:
+        parsed_values = [
+            datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+            for value in values
+        ]
+    except ValueError:
+        return None, "missing"
+    created_at = min(parsed_values).replace(second=0, microsecond=0)
+    return created_at.isoformat(), "ok"
 
 
 def _warn_env_once(name: str, message: str):
@@ -507,6 +543,7 @@ def parse_ticket(dump_json: dict) -> dict:
       brand          : 브랜드 (str | None)
       category       : 문의유형 claim (str | None) — 채널 판정 금지
       ticket_status  : 티켓 상태 (str | None)
+      inquiry_time   : 문의 생성 시각(KST 분 단위 ISO 문자열 | None)
       sender         : 보낸 사람 (str | None)
       body           : 최초 문의 메시지 본문 (str | None)
       attachments    : 첨부 파일명 목록 (list[str])
@@ -593,6 +630,9 @@ def parse_ticket(dump_json: dict) -> dict:
 
     # ── 4) 최초 문의 메시지 본문 ──────────────────────────────────────────
     body_text = dump_json.get("bodyText", "")
+    inquiry_time, inquiry_time_status = _extract_inquiry_time(dump_json)
+    if inquiry_time_status != "ok":
+        flags.append(f"inquiry_time_{inquiry_time_status}")
     body_msg = _extract_first_message(body_text)
 
     # ── 5) 첨부 파일명 목록 ───────────────────────────────────────────────
@@ -609,6 +649,7 @@ def parse_ticket(dump_json: dict) -> dict:
         "app_package": app_package,
         "category": category,
         "ticket_status": ticket_status,
+        "inquiry_time": inquiry_time,
         "sender": sender,
         "custom_fields": custom_field_map,
         "selected_custom_fields": selected_custom_fields,
@@ -775,6 +816,27 @@ def _run_tests():
     for raw, expected_n in bad_cases:
         n3, s3 = normalize_gpa_order(raw)
         check(f"불일치→None: {raw!r}", n3 is None and s3 == f"digit_count={expected_n}")
+
+    # ── 문의 생성 시각 단위 테스트 ──────────────────────────────────────
+    inquiry_time, inquiry_status = _extract_inquiry_time({
+        "ticketMetaTimes": [
+            "Created 2026-07-05 17:45:56(KST)",
+            "Updated 2026-07-05 18:00:01(KST)",
+        ]
+    })
+    check(
+        "문의시각 초 단위 KST 우선·분 내림",
+        inquiry_status == "ok" and inquiry_time == "2026-07-05T17:45:00+09:00",
+        f"{inquiry_time!r}, {inquiry_status!r}",
+    )
+    _ambiguous_time, ambiguous_status = _extract_inquiry_time({
+        "ticketMetaTimes": [
+            "2026-07-05 17:45:56(KST)",
+            "2026-07-05 17:46:01(KST)",
+            "2026-07-05 17:47:01(KST)",
+        ]
+    })
+    check("문의시각 다수면 임의 선택 금지", ambiguous_status == "ambiguous")
 
     # ── dump 3건 파싱 테스트 (형식 검증, 실값 하드코딩 금지) ─────────────
     print("\n[2] dump 파일 파싱 테스트 (형식·왕복 검증)")

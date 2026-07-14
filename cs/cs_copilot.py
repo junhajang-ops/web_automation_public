@@ -199,6 +199,12 @@ EXTRACT_JS = r"""
     });
   });
 
+  // 현재 티켓의 우측 메타 영역(생성/업데이트 시각). 라벨 문자열은 파서에서 쓰지 않고
+  // 이 구조 안의 KST 시각 값만 사용한다.
+  const ticketMetaTimes = Array.from(
+    document.querySelectorAll(".box-aside-body-top-upper p.text-xs.text-dark-grey span")
+  ).map(el => clean(el.innerText)).filter(Boolean);
+
   const bodyText = document.body ? document.body.innerText : "";
   const labeledLines = [];
   bodyText.split("\n").forEach(line => {
@@ -210,6 +216,7 @@ EXTRACT_JS = r"""
 
   return { url: location.href, title: document.title,
            definitionLists, tables, formFields, labeledLines, bodyText,
+           ticketMetaTimes,
            customFields: customFields.pairs, customFieldMap: customFields.map };
 }
 """
@@ -718,6 +725,7 @@ class ConsoleJudgeWorker:
                 "order_id": parsed.get("order_id"),
                 "product_id": product_id,
                 "order_create_time": order_result.get("createTime"),
+                "inquiry_time": parsed.get("inquiry_time"),
             }
         )
 
@@ -971,6 +979,7 @@ class ConsoleJudgeWorker:
                             order_id=task["order_id"] or None,
                             product_id=task.get("product_id") or None,
                             order_create_time=task.get("order_create_time") or None,
+                            inquiry_time=task.get("inquiry_time") or None,
                             nickname=task.get("nickname") or None,
                             nickname_source=task.get("nickname_source"),
                             logging_service=logging_service,
@@ -1023,6 +1032,8 @@ class ConsoleJudgeWorker:
 #    1건이면 SINGLE과 동일하게 product_code가 이미 확정돼 있고, 2건 이상이면
 #    번호 지정이 필요하다.
 REGRANT_SINGLE_VERDICTS = {
+    "pattern1_regrant_shopdata_missing",  # ShopData에 상품 기록 없음 → 재지급
+    "pattern1_regrant_no_followup_order",  # Count 미달 + 문의 이후 재결제 없음 → 재지급
     "pattern1_regrant_no_receipt_code",  # 같은 상품 정상 영수증 기록 없음 → 재지급
     "pattern1_regrant_unlimited",  # 무제한 구매 예외 상품 → 재지급
     "pattern1_regrant_limit_not_reached",  # ShopData Count가 구매 제한보다 작음 → 재지급
@@ -1030,6 +1041,9 @@ REGRANT_SINGLE_VERDICTS = {
     "pattern1_regrant_period_limit_not_reached",  # 주기형 상품 Count가 제한보다 작음 → 재지급
     "pattern3_count_confirmed_missing",  # ShopData Count 기준 미지급 확정 (None/Onetime 한정)
     "pattern3_code_not_found",  # ShopData PurchaseCode 자체가 없음 → 구매 시도 기록조차 없어 미지급 확정
+    "pattern2_regrant_unlimited",  # PurchaseCodeNull + 무제한 예외 → 재지급
+    "pattern2_regrant_shopdata_missing",  # PurchaseCodeNull + ShopData 상품 기록 없음 → 재지급
+    "pattern2_regrant_no_followup_order",  # PurchaseCodeNull + 문의 이후 재결제 없음 → 재지급
 }
 REGRANT_CANDIDATE_VERDICTS = {
     "pattern2_purchase_code_null",  # description=PurchaseCodeNull/빈값 → GCP 로그 후보로 상품 특정
@@ -1071,11 +1085,9 @@ def _resolve_regrant_context(ticket_id, result):
 def _payment_error_sources_label(result):
     """이번 판정에서 실제로 조회한 데이터 소스를 판정 결과에서 도출해 헤더에 쓴다.
 
-    분기마다 조회 소스가 다르다 — 주문번호 미기록/상품코드 비었음 분기(미지급 확정)는
-    영수증검증 + GCP 로그 후보만 보고 ShopData는 열지 않으며, description 정상 분기만
-    ShopData Count를 조회한다. 따라서 "영수증검증 + ShopData"를 모든 판정에 고정으로
-    찍으면 사실과 다른 출력이 된다(상품코드 비었음 분기인데 ShopData를 본 것처럼 보임).
-    verdict 기준으로 실제 소스를 표기한다.
+    분기마다 조회 소스가 다르다. 주문번호 미기록/PurchaseCodeNull은 상품 특정 후
+    Onetime/None일 때 ShopData Count까지 조회할 수 있고, description 정상 분기도 ShopData를
+    조회한다. verdict와 실제 결과값을 기준으로 조회 소스를 표기한다.
 
     "영수증검증 O/X"의 O/X는 영수증검증에서 매칭 행을 확인했는지(matched_row 존재
     여부, 2026-07-10 사용자 요청) 여부다 — pattern1(주문번호 미기록)은 매칭 행이
@@ -1090,8 +1102,10 @@ def _payment_error_sources_label(result):
         return f"{receipt_label} + ShopData"
     if verdict and verdict.startswith("pattern1_"):
         return f"{receipt_label} + 상품분기"
-    if verdict == "pattern2_purchase_code_null":
-        return f"{receipt_label} + GCP 로그 후보"
+    if verdict.startswith("pattern2"):
+        if (result or {}).get("shopdata") is not None:
+            return f"{receipt_label} + 상품분기 + ShopData"
+        return f"{receipt_label} + 상품분기"
     return receipt_label
 
 
@@ -1170,12 +1184,12 @@ def _print_payment_error(ticket_id, result, error):
             c = candidates[0]
             code = c.get("shop_click_id", "?")
             cand_line = (
-                f"   GCP 로그 후보 1건: {code} @ {_short_date(c.get('update_date', '?'))} "
+                f"   GCP 로그 구매상품 1개: {code} @ {_short_date(c.get('update_date', '?'))} "
                 f"({_candidate_limit_str(code)})"
             )
             print(_green(cand_line) if is_actionable else cand_line)
         else:
-            cand_header = f"   GCP 로그 후보 {len(candidates)}건:"
+            cand_header = f"   GCP 로그 구매상품 {len(candidates)}개:"
             print(_green(cand_header) if is_actionable else cand_header)
             for i, c in enumerate(candidates, 1):
                 code = c.get("shop_click_id", "?")
