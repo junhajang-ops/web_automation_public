@@ -1159,11 +1159,6 @@ def _print_payment_error(ticket_id, result, error):
     # 상품코드는 아래 Inapp/GCP 후보 조회로 확정되는 결과이므로, 후보 나열보다 먼저
     # 보여주면 "이미 정해진 값"처럼 보여 인과관계가 뒤바뀐다(2026-07-10 사용자 지적) —
     # 후보 블록을 먼저 찍고 상품코드는 그 결과로서 마지막에 찍는다.
-    inapp_candidates = result.get("inapp_candidates")
-    if inapp_candidates:
-        print(f"   Inapp 후보 {len(inapp_candidates)}건:")
-        for code in inapp_candidates:
-            print(f"     - {code}")
     candidates = result.get("product_candidates")
     if candidates:
         # 구매제한(유형/횟수)은 후보 상품마다 다르므로 후보 하나당 한 번씩 붙여 표시한다
