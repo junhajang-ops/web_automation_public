@@ -28,6 +28,7 @@ from console_step_verify import (
     retry_with_recovery,
     save_page_artifacts,
     step_and_verify_ui,
+    wait_for_loading_settled,
     wait_until,
 )
 from console_user_search import (
@@ -248,7 +249,61 @@ def fill_shopdata_uuid_filter(page, uuid_value):
     search_input.fill(uuid_value)
 
 
+def wait_for_shopdata_result_render_stable(
+    page,
+    timeout_ms: int = 15_000,
+    stable_rounds: int = 2,
+):
+    """테이블 선택으로 시작된 자동 조회가 끝난 뒤 결과 영역이 고정될 때까지 기다린다.
+
+    ShopData 옵션을 선택하면 검색 버튼을 누르기 전에도 현재 상세검색 조건으로 목록을
+    비동기 조회한다. 이 요청은 role=progressbar를 표시하지 않아 공용
+    wait_for_loading_settled()만으로는 로딩 중인 "데이터가 없습니다" 화면을 완료 상태로
+    오인할 수 있다. 네트워크 유휴와 결과 행/페이지네이션/빈 결과 표시의 연속 동일 상태를
+    모두 확인한 뒤에만 shopdata_search_submit_pre 지문을 기록한다.
+    """
+    print("[8-1] ShopData 결과 영역 로딩이 안정될 때까지 기다립니다.")
+
+    # 옵션 클릭 이벤트가 비동기 요청을 등록할 시간을 준 뒤 그 요청의 종료를 기다린다.
+    page.wait_for_timeout(POLL_WAIT_MS)
+    if not safe_wait_for_load(page, "networkidle", timeout_ms):
+        raise RuntimeError("ShopData 테이블 선택 후 네트워크 로딩이 안정되지 않았습니다.")
+    if not wait_for_loading_settled(page, timeout_ms=timeout_ms):
+        raise RuntimeError("ShopData 결과 영역의 로딩 표시가 사라지지 않았습니다.")
+
+    previous_signature = None
+    stable_count = 0
+
+    def _result_render_stable():
+        nonlocal previous_signature, stable_count
+        signature = page.evaluate(
+            """() => {
+                const resultRows = document.querySelectorAll('td#gamer_id').length;
+                const pagination = document.querySelector(
+                    "[role='navigation'][aria-label='Pagination Navigation']"
+                ) !== null;
+                const noData = (document.body.innerText || '').includes('데이터가 없습니다.');
+                return `${resultRows}|${pagination}|${noData}`;
+            }"""
+        )
+        if signature == previous_signature:
+            stable_count += 1
+        else:
+            previous_signature = signature
+            stable_count = 1
+        return stable_count >= stable_rounds
+
+    if not wait_until(
+        page,
+        _result_render_stable,
+        timeout_ms=timeout_ms,
+        wait_ms=POLL_WAIT_MS,
+    ):
+        raise RuntimeError("ShopData 결과 영역 렌더가 안정되지 않았습니다.")
+
+
 def click_shopdata_search_button(page):
+    wait_for_shopdata_result_render_stable(page)
     print("[9] 검색 버튼을 클릭합니다.")
     record_step_dump(page, "shopdata_search_submit_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
     page.locator("form button[type='submit']").first.click()
