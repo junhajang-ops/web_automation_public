@@ -882,14 +882,67 @@ def shutdown_gcp_executor():
         _gcp_executor = None
 
 
-def enrich_board_with_gcp(board_rows, credentials, project, log_name, now_utc):
+def _enrich_board_by_uuid(board_rows, cache, query_one, label):
+    """board_rows에 계정 생성일 결과를 in-place로 채우되, 같은 실행 안에서 이미 조회한
+    UUID는 재조회하지 않는다(실행 내 중복 제거 — 상위권 유저가 여러 보드에 겹칠 때 낭비 제거).
+
+    - cache: {uuid: result_dict}. run() 1회 동안 공유되며 보드 간 재사용된다.
+      실행이 끝나면 버려진다(교차 실행 캐시가 아님 — 계정 생성일 불변성은 여기서 활용하지 않는다).
+    - query_one(uuid) -> result_dict: 처음 보는 고유 UUID에만 호출된다(스레드풀 병렬).
+    - 성공 판정만 캐시한다. "조회실패(...)"는 일시적 오류이므로 캐시하지 않아,
+      같은 UUID가 다른 보드에 다시 나오면 재조회 기회를 남긴다.
+    """
+    if cache is None:
+        cache = {}
+
+    to_query = []
+    pending = set()
+    cached_hits = 0
+    for row in board_rows:
+        uuid_value = row["uuid"]
+        if uuid_value in cache:
+            row.update(cache[uuid_value])
+            cached_hits += 1
+        elif uuid_value not in pending:
+            pending.add(uuid_value)
+            to_query.append(uuid_value)
+
+    if not to_query:
+        if cached_hits:
+            print(f"    [{label}] {cached_hits}명 전원 이번 실행에서 이미 조회됨 — 재조회 생략.")
+        return
+
+    reuse_note = f" (이번 실행 재사용 {cached_hits}명 생략)" if cached_hits else ""
+    print(f"    [{label}] {len(to_query)}명 계정 생성일 조회{reuse_note}...")
+
+    executor = _get_gcp_executor()
+    results = {}
+    futures = {executor.submit(query_one, uuid_value): uuid_value for uuid_value in to_query}
+    for future in as_completed(futures):
+        uuid_value = futures[future]
+        try:
+            result = future.result()
+        except Exception as exc:  # noqa: BLE001
+            result = {"account_type": f"조회실패({exc})", "create_account_date": ""}
+        results[uuid_value] = result
+        # 성공분만 캐시 — 조회실패는 다음 보드에서 재시도 여지를 남긴다.
+        if not str(result.get("account_type", "")).startswith("조회실패"):
+            cache[uuid_value] = result
+
+    for row in board_rows:
+        result = results.get(row["uuid"])
+        if result is not None:
+            row.update(result)
+
+
+def enrich_board_with_gcp(board_rows, credentials, project, log_name, now_utc, cache=None):
     """board_rows 각 행에 GCP 최근 로그(종류 무관) 1건 기준 계정 생성일을 in-place로 추가.
-    credentials는 공유, service만 스레드별. 스레드풀은 보드 간 재사용한다."""
+    credentials는 공유, service만 스레드별. 스레드풀은 보드 간 재사용한다.
+    cache가 주어지면 같은 실행 안에서 이미 조회한 UUID는 재조회하지 않는다."""
     if not credentials or not project or not log_name:
         for row in board_rows:
             row.update({"account_type": "GCP미설정", "create_account_date": ""})
         return
-    print(f"    [GCP] {len(board_rows)}명 최근 로그 1건씩 계정 생성일 조회 중...")
 
     def _work(uuid_value):
         # 스레드별 service로 조회 → SSL 연결 공유 충돌 방지
@@ -898,14 +951,7 @@ def enrich_board_with_gcp(board_rows, credentials, project, log_name, now_utc):
             raise RuntimeError("logging service build 실패(credentials 확인)")
         return query_account_creation_info(service, project, log_name, uuid_value, now_utc)
 
-    executor = _get_gcp_executor()
-    futures = {executor.submit(_work, row["uuid"]): row for row in board_rows}
-    for future in as_completed(futures):
-        row = futures[future]
-        try:
-            row.update(future.result())
-        except Exception as exc:
-            row.update({"account_type": f"조회실패({exc})", "create_account_date": ""})
+    _enrich_board_by_uuid(board_rows, cache, _work, "GCP")
 
 
 def _is_retryable_bq_error(err_text: str) -> bool:
@@ -993,14 +1039,14 @@ def _thread_bigquery_client(bq_credentials, bq_project):
     return client
 
 
-def enrich_board_with_bigquery(board_rows, bq_credentials, bq_project, dataset, table, user_col, date_col, now_utc):
+def enrich_board_with_bigquery(board_rows, bq_credentials, bq_project, dataset, table, user_col, date_col, now_utc, cache=None):
     """board_rows 각 행에 BigQuery 유저 마스터 테이블 기준 계정 신규 여부를 in-place로 추가.
-    credentials는 공유, client만 스레드별. 스레드풀은 GCP Cloud Logging 조회와 공용(_get_gcp_executor)이다."""
+    credentials는 공유, client만 스레드별. 스레드풀은 GCP Cloud Logging 조회와 공용(_get_gcp_executor)이다.
+    cache가 주어지면 같은 실행 안에서 이미 조회한 UUID는 재조회하지 않는다."""
     if not (bq_credentials and bq_project and dataset and table and user_col and date_col):
         for row in board_rows:
             row.update({"account_type": "BQ미설정", "create_account_date": ""})
         return
-    print(f"    [BQ] {len(board_rows)}명 가입일(BigQuery) 조회 중...")
 
     def _work(uuid_value):
         client = _thread_bigquery_client(bq_credentials, bq_project)
@@ -1010,14 +1056,7 @@ def enrich_board_with_bigquery(board_rows, bq_credentials, bq_project, dataset, 
             client, bq_project, dataset, table, user_col, date_col, uuid_value, now_utc
         )
 
-    executor = _get_gcp_executor()
-    futures = {executor.submit(_work, row["uuid"]): row for row in board_rows}
-    for future in as_completed(futures):
-        row = futures[future]
-        try:
-            row.update(future.result())
-        except Exception as exc:
-            row.update({"account_type": f"조회실패({exc})", "create_account_date": ""})
+    _enrich_board_by_uuid(board_rows, cache, _work, "BQ")
 
 
 def _parse_price_to_int(text: str) -> int:
@@ -1606,6 +1645,9 @@ def run(
     skipped_boards = []
     found_any_board = False
     is_first_open = True
+    # 실행 단위 계정 생성일 캐시({uuid: result}). 같은 UUID가 여러 보드 상위권에 겹칠 때
+    # 보드마다 반복 조회하던 낭비를 없앤다(GCP read 요청 급감). 이 실행이 끝나면 버려진다.
+    account_cache = {}
 
     # 키워드마다: 검색 -> 검색된 리더보드 전부 조회 -> 다음 키워드로 넘어감.
     # 목록 진입+검색+결과 읽기 재시도가 소진돼도 이 키워드만 스킵하고 다음 키워드로
@@ -1668,10 +1710,12 @@ def run(
                 if bq_credentials is not None:
                     enrich_board_with_bigquery(
                         board_rows, bq_credentials, bq_project, bq_dataset, bq_table,
-                        bq_user_col, bq_date_col, now_utc,
+                        bq_user_col, bq_date_col, now_utc, cache=account_cache,
                     )
                 else:
-                    enrich_board_with_gcp(board_rows, credentials, gcp_project, gcp_log, now_utc)
+                    enrich_board_with_gcp(
+                        board_rows, credentials, gcp_project, gcp_log, now_utc, cache=account_cache,
+                    )
                 return board_rows
 
             try:
