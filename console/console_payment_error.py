@@ -588,7 +588,16 @@ def _pattern1_result(
     }
 
 
-def _resolve_unidentified_product_code(logging_service, brand, uuid_value, product_id, order_create_time, notes):
+def _resolve_unidentified_product_code(
+    logging_service,
+    brand,
+    uuid_value,
+    product_id,
+    order_create_time,
+    notes,
+    *,
+    announce_inapp_count=False,
+):
     """주문번호 미기록/PurchaseCodeNull 공용 상품 특정.
 
     반환: (status, product_code, source, distinct_gcp_candidates, inapp_candidates).
@@ -600,6 +609,8 @@ def _resolve_unidentified_product_code(logging_service, brand, uuid_value, produ
         return "lookup_failed", None, None, [], []
 
     notes.append(f"AOS '{product_id}' → Inapp 후보 {len(inapp_candidates)}건")
+    if announce_inapp_count:
+        print(f" 미지급 확정 - Inapp 상품 후보 {len(inapp_candidates)}건 확인")
     if len(inapp_candidates) == 1:
         product_code = inapp_candidates[0]
         notes.append(f"Inapp 후보 1건 — shop_click 없이 상품 확정: {product_code}")
@@ -629,13 +640,14 @@ def _resolve_unidentified_product_code(logging_service, brand, uuid_value, produ
     if gcp_err:
         print(f" [지급 상태 판정] GCP log_shop_click 조회 실패/불완전 — {gcp_err}")
     else:
-        print(f" [지급 상태 판정] GCP 로그 구매상품 {len(candidates)}개")
         if len(candidates) == 1:
             print(green(
                 " [지급 상태 판정] GCP 로그 구매상품 1개 확정 — "
                 f"{candidates[0].get('shop_click_id', '?')}"
             ))
-        elif len(candidates) > 1:
+        else:
+            print(f" [지급 상태 판정] GCP 로그 구매상품 {len(candidates)}개")
+        if len(candidates) > 1:
             for index, candidate in enumerate(candidates, start=1):
                 print(f"   상품 {index}) {candidate.get('shop_click_id', '?')}")
 
@@ -1216,9 +1228,14 @@ def judge_nonpayment(
     if pattern == "pattern2":
         print(green(f" [지급 상태 판정] 매칭 행 발견 — description='{matched_desc}'"))
         status, product_code, product_source, candidates, inapp_candidates = _resolve_unidentified_product_code(
-            logging_service, brand, effective_uuid, product_id, order_create_time, notes
+            logging_service,
+            brand,
+            effective_uuid,
+            product_id,
+            order_create_time,
+            notes,
+            announce_inapp_count=True,
         )
-        print(f" 미지급 확정 - Inapp 상품 후보 {len(inapp_candidates)}건 확인")
 
         status_result = {
             "lookup_failed": ("pattern2_product_lookup_review", "review", "상품조회실패 미결정"),
@@ -1243,6 +1260,7 @@ def judge_nonpayment(
                 decision_label=label,
             )
 
+        print()
         try:
             limit_type, limit_count = get_purchase_limit_info(product_code)
         except Exception as exc:  # noqa: BLE001
