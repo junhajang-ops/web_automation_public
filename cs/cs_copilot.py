@@ -6,7 +6,8 @@ cs_copilot.py — cs 실시간 보조 co-pilot
 상담원이 cs 티켓 상세 페이지를 열면 자동으로:
   필드 추출 → UUID·주문번호 정규화 → Play API orders.get 조회
   → 채널·환불상태 verdict를 PowerShell 패널에 출력
-  → 판정 분기에 따라 사람이 터미널에 '재지급'/'환불'을 입력한 경우에만 실행
+  → 사람이 터미널에 '재지급'/'환불'을 입력한 경우에만 실행
+    (판정과 다른 명령은 같은 명령을 한 번 더 입력해야 예외 처리)
   → 터미널에 '차트 갱신'을 입력하면 콘솔 차트 CSV 캐시를 갱신.
 
 실행:
@@ -630,16 +631,106 @@ def _run_refund_tests():
         "ticket",
         {"recommended_action": "refund", "order_id": "GPA.test", "package_name": "pkg.test"},
     )
-    check("환불 분기와 정확한 주문 대상이 있어야 명령 허용", bool(ctx))
+    check("정확한 주문 대상이 있으면 환불 문맥 생성", bool(ctx))
     check(
-        "재지급 분기에서는 환불 명령 문맥 미생성",
+        "재지급 분기여도 정확한 주문 대상이면 환불 문맥 생성",
         _resolve_refund_context(
             "ticket",
             {"recommended_action": "regrant", "order_id": "GPA.test", "package_name": "pkg.test"},
-        ) is None,
+        ) is not None,
+    )
+    check(
+        "환불 분기여도 UUID와 상품이 있으면 재지급 문맥 생성",
+        _resolve_regrant_context(
+            "ticket",
+            {
+                "recommended_action": "refund",
+                "submitted_uuid": "uuid.test",
+                "product_code": "product.test",
+            },
+        ) is not None,
     )
     check("정확한 '환불' 명령 허용", REFUND_COMMAND_RE.fullmatch("환불") is not None)
     check("추가 인자가 붙은 환불 명령 차단", REFUND_COMMAND_RE.fullmatch("환불 1") is None)
+
+    class _Worker:
+        def __init__(self):
+            self.regrant_calls = []
+
+        def submit_regrant(self, *args):
+            self.regrant_calls.append(args)
+
+    refund_ctx = _resolve_refund_context(
+        "ticket",
+        {"recommended_action": "regrant", "order_id": "GPA.test", "package_name": "pkg.test"},
+    )
+    regrant_ctx = _resolve_regrant_context(
+        "ticket",
+        {
+            "recommended_action": "refund",
+            "submitted_uuid": "uuid.test",
+            "product_code": "product.test",
+        },
+    )
+
+    # 재지급 판정에서 환불을 선택하면 첫 입력은 경고만, 같은 두 번째 입력만 실행한다.
+    orders = _Orders(["PROCESSED", "PENDING_REFUND"])
+    action_state = {
+        "last_actionable": {
+            "ticket_id": "ticket",
+            "recommended_action": "regrant",
+            "regrant": regrant_ctx,
+            "refund": refund_ctx,
+        },
+        "pending_override": None,
+    }
+    _handle_command("환불", action_state, _Worker(), _Service(orders))
+    check("반대 분기 환불 첫 입력은 실행하지 않음", len(orders.refund_calls) == 0)
+    _handle_command("환불", action_state, _Worker(), _Service(orders))
+    check("반대 분기 환불 같은 명령 두 번째 입력은 실행", len(orders.refund_calls) == 1)
+
+    # 환불 판정에서 재지급도 같은 방식으로 두 번 확인한다.
+    worker = _Worker()
+    action_state = {
+        "last_actionable": {
+            "ticket_id": "ticket",
+            "recommended_action": "refund",
+            "regrant": regrant_ctx,
+            "refund": refund_ctx,
+        },
+        "pending_override": None,
+    }
+    _handle_command("재지급", action_state, worker, None)
+    check("반대 분기 재지급 첫 입력은 실행하지 않음", len(worker.regrant_calls) == 0)
+    _handle_command("재지급", action_state, worker, None)
+    check("반대 분기 재지급 같은 명령 두 번째 입력은 실행", len(worker.regrant_calls) == 1)
+
+    # 판정과 같은 작업은 기존대로 한 번 입력하면 바로 진행한다.
+    orders = _Orders(["PROCESSED", "PENDING_REFUND"])
+    action_state = {
+        "last_actionable": {
+            "ticket_id": "ticket",
+            "recommended_action": "refund",
+            "regrant": regrant_ctx,
+            "refund": refund_ctx,
+        },
+        "pending_override": None,
+    }
+    _handle_command("환불", action_state, _Worker(), _Service(orders))
+    check("같은 분기 환불은 한 번 입력으로 실행", len(orders.refund_calls) == 1)
+
+    worker = _Worker()
+    action_state = {
+        "last_actionable": {
+            "ticket_id": "ticket",
+            "recommended_action": "regrant",
+            "regrant": regrant_ctx,
+            "refund": refund_ctx,
+        },
+        "pending_override": None,
+    }
+    _handle_command("재지급", action_state, worker, None)
+    check("같은 분기 재지급은 한 번 입력으로 실행", len(worker.regrant_calls) == 1)
 
     print(f"\n환불 안전장치 결과: 통과 {passed}건 / 실패 {failed}건")
     if failed:
@@ -1185,55 +1276,31 @@ class ConsoleJudgeWorker:
                 context.close()
 
 
-# ── 재지급(우편 발송) ────────────────────────────────────────────────────────
-# 사람이 이미 확정한 미지급 판정에 한해, 터미널에 '재지급'(단일 확정 상품) 또는
-# '재지급 N'(GCP 후보 여러 건 중 N번)을 입력하면 우편으로 재지급한다.
-# 대상 verdict는 두 그룹으로 나뉜다:
-#  - SINGLE: product_code가 이미 하나로 확정됨 → '재지급'만으로 충분.
-#  - CANDIDATE: GCP 로그 후보로 상품을 특정하는 분기 → 후보가 정확히
-#    1건이면 SINGLE과 동일하게 product_code가 이미 확정돼 있고, 2건 이상이면
-#    번호 지정이 필요하다.
-REGRANT_SINGLE_VERDICTS = {
-    "pattern1_regrant_shopdata_missing",  # ShopData에 상품 기록 없음 → 재지급
-    "pattern1_regrant_no_followup_order",  # Count 미달 + 문의 이후 재결제 없음 → 재지급
-    "pattern1_regrant_no_receipt_code",  # 같은 상품 정상 영수증 기록 없음 → 재지급
-    "pattern1_regrant_unlimited",  # 무제한 구매 예외 상품 → 재지급
-    "pattern1_regrant_limit_not_reached",  # ShopData Count가 구매 제한보다 작음 → 재지급
-    "pattern1_regrant_no_period_receipt_code",  # 주기 초기화 이후 같은 상품 기록 없음 → 재지급
-    "pattern1_regrant_period_limit_not_reached",  # 주기형 상품 Count가 제한보다 작음 → 재지급
-    "pattern3_count_confirmed_missing",  # ShopData Count 기준 미지급 확정 (None/Onetime 한정)
-    "pattern3_code_not_found",  # ShopData PurchaseCode 자체가 없음 → 구매 시도 기록조차 없어 미지급 확정
-    "pattern2_regrant_unlimited",  # PurchaseCodeNull + 무제한 예외 → 재지급
-    "pattern2_regrant_shopdata_missing",  # PurchaseCodeNull + ShopData 상품 기록 없음 → 재지급
-    "pattern2_regrant_no_followup_order",  # PurchaseCodeNull + 문의 이후 재결제 없음 → 재지급
-}
-REGRANT_CANDIDATE_VERDICTS = {
-    "pattern2_purchase_code_null",  # description=PurchaseCodeNull/빈값 → GCP 로그 후보로 상품 특정
-}
+# ── 재지급/환불 사람 승인 명령 ───────────────────────────────────────────────
+# 판정과 실행 대상을 분리한다. UUID·상품이 확정되면 재지급, 주문번호·패키지명이
+# 확정되면 환불을 열며, 판정과 다른 작업은 같은 명령을 연속 두 번 입력해야 진행한다.
 REGRANT_COMMAND_RE = re.compile(r"^재지급(?:\s+(\d+))?$")
 REFUND_COMMAND_RE = re.compile(r"^환불$")
 CHART_REFRESH_COMMAND = "차트 갱신"
 
 
 def _resolve_regrant_context(ticket_id, result):
-    """판정 결과에서 재지급 가능 여부/대상을 뽑는다. 대상 아니면 None.
+    """판정 결과에서 재지급 대상을 뽑는다. 대상을 특정할 수 없으면 None.
 
     반환: {"ticket_id", "uuid", "product_code"(확정 시) | None,
            "candidates"(여러 건일 때만) | None}
     """
     if not result:
         return None
-    verdict = result.get("verdict")
     uuid_value = result.get("resolved_uuid") or result.get("submitted_uuid")
     if not uuid_value:
         return None
-    if result.get("recommended_action") and result.get("recommended_action") != "regrant":
-        return None
 
-    if verdict in REGRANT_SINGLE_VERDICTS:
-        product_code = result.get("product_code")
-        if not product_code:
-            return None
+    # 판정 분기와 실행 가능 여부를 분리한다. 환불/미결정 판정이어도 UUID와 상품이
+    # 확정돼 있으면 고객 요청에 따른 예외 재지급을 열되, 명령 처리부에서 2회 확인한다.
+    product_code = result.get("product_code")
+    candidates = result.get("product_candidates") or []
+    if product_code:
         return {
             "action_type": "regrant",
             "ticket_id": ticket_id,
@@ -1243,35 +1310,33 @@ def _resolve_regrant_context(ticket_id, result):
             "brand": result.get("brand"),
         }
 
-    if verdict in REGRANT_CANDIDATE_VERDICTS:
-        product_code = result.get("product_code")
-        candidates = result.get("product_candidates") or []
-        if product_code and len(candidates) == 1:
+    if len(candidates) == 1:
+        candidate_code = candidates[0].get("shop_click_id")
+        if candidate_code:
             return {
                 "action_type": "regrant",
                 "ticket_id": ticket_id,
                 "uuid": uuid_value,
-                "product_code": product_code,
+                "product_code": candidate_code,
                 "candidates": None,
                 "brand": result.get("brand"),
             }
-        if len(candidates) > 1:
-            return {
-                "action_type": "regrant",
-                "ticket_id": ticket_id,
-                "uuid": uuid_value,
-                "product_code": None,
-                "candidates": candidates,
-                "brand": result.get("brand"),
-            }
-        return None
+    if len(candidates) > 1:
+        return {
+            "action_type": "regrant",
+            "ticket_id": ticket_id,
+            "uuid": uuid_value,
+            "product_code": None,
+            "candidates": candidates,
+            "brand": result.get("brand"),
+        }
 
     return None
 
 
 def _resolve_refund_context(ticket_id, result):
-    """환불 판정이며 주문 대상이 완전하게 특정된 경우에만 실행 문맥을 만든다."""
-    if not result or result.get("recommended_action") != "refund":
+    """주문 대상이 완전하게 특정된 경우 환불 실행 문맥을 만든다."""
+    if not result:
         return None
     order_id = (result.get("order_id") or "").strip()
     package_name = (result.get("package_name") or "").strip()
@@ -1282,6 +1347,22 @@ def _resolve_refund_context(ticket_id, result):
         "ticket_id": ticket_id,
         "order_id": order_id,
         "package_name": package_name,
+    }
+
+
+def _build_action_context(ticket_id, result):
+    """최신 판정 1건에서 재지급/환불 실행 대상을 각각 보관한다."""
+    if not result:
+        return None
+    regrant_ctx = _resolve_regrant_context(ticket_id, result)
+    refund_ctx = _resolve_refund_context(ticket_id, result)
+    if not regrant_ctx and not refund_ctx:
+        return None
+    return {
+        "ticket_id": ticket_id,
+        "recommended_action": result.get("recommended_action"),
+        "regrant": regrant_ctx,
+        "refund": refund_ctx,
     }
 
 
@@ -1357,9 +1438,9 @@ def _print_payment_error(ticket_id, result, error):
     resolved_uuid = result.get("resolved_uuid")
     if submitted_uuid and resolved_uuid and submitted_uuid != resolved_uuid:
         print(f"   UUID       : 제출값={submitted_uuid} → 닉네임 대조로 확정={resolved_uuid}")
-    regrant_ctx = _resolve_regrant_context(ticket_id, result)
-    refund_ctx = _resolve_refund_context(ticket_id, result)
-    action_ctx = regrant_ctx or refund_ctx
+    action_ctx = _build_action_context(ticket_id, result)
+    regrant_ctx = action_ctx.get("regrant") if action_ctx else None
+    refund_ctx = action_ctx.get("refund") if action_ctx else None
     is_actionable = bool(action_ctx)
 
     # 상품코드는 아래 Inapp/GCP 후보 조회로 확정되는 결과이므로, 후보 나열보다 먼저
@@ -1407,18 +1488,25 @@ def _print_payment_error(ticket_id, result, error):
         # 최종 확정 결론(미지급 확정 / 이미 지급됨)은 초록색으로 강조(2026-07-08 사용자 요청).
         print(_green(line) if _is_final_verdict_note(note) else line)
 
+    recommended_action = result.get("recommended_action")
     if regrant_ctx:
+        label = "재지급 가능" if recommended_action == "regrant" else "예외 재지급 가능"
         if regrant_ctx["candidates"]:
-            print(f"   [재지급 가능] 후보 중 번호를 골라 '재지급 N' 입력(예: 재지급 1)")
+            print(f"   [{label}] 후보 중 번호를 골라 '재지급 N' 입력(예: 재지급 1)")
         else:
-            print(f"   [재지급 가능] 상품코드={regrant_ctx['product_code']} — 터미널에 '재지급' 입력 시 우편 발송")
-    elif refund_ctx:
-        print(f"   [환불 가능] {describe_decision(result) or describe_verdict(result.get('verdict'))}")
-        print(f"   [환불 가능] 터미널에 '환불' 입력 시 해당 주문번호로 Google Play API 환불 실행")
-    elif result.get("recommended_action") == "refund":
+            print(f"   [{label}] 상품코드={regrant_ctx['product_code']} — 터미널에 '재지급' 입력 시 우편 발송")
+    if refund_ctx:
+        label = "환불 가능" if recommended_action == "refund" else "예외 환불 가능"
+        print(f"   [{label}] 터미널에 '환불' 입력 시 해당 주문번호로 Google Play API 환불 실행")
+    elif recommended_action == "refund":
         print("   [환불 후보] 주문번호 또는 조회 패키지를 확정하지 못해 자동 환불 실행 불가")
-    elif result.get("recommended_action") == "review":
+    if recommended_action == "review":
         print(f"   [미결정] 사람 확인 필요")
+    if (
+        (regrant_ctx and recommended_action != "regrant")
+        or (refund_ctx and recommended_action != "refund")
+    ):
+        print("   [예외 처리] 판정과 다른 명령은 경고 후 같은 명령을 한 번 더 입력해야 진행")
     print(_SEP)
     return action_ctx
 
@@ -1575,6 +1663,7 @@ def _handle_command(command_text, action_state, console_worker, service):
     """터미널 명령을 검증해 콘솔 작업 큐 또는 Google 환불 실행기로 전달한다."""
     command_text = command_text.strip()
     if command_text == CHART_REFRESH_COMMAND:
+        action_state["pending_override"] = None
         console_worker.submit_chart_refresh()
         print("[차트 갱신] 콘솔 차트 CSV 갱신을 작업 큐에 등록했습니다.")
         return
@@ -1582,45 +1671,73 @@ def _handle_command(command_text, action_state, console_worker, service):
     regrant_match = REGRANT_COMMAND_RE.match(command_text)
     refund_match = REFUND_COMMAND_RE.match(command_text)
     if not regrant_match and not refund_match:
+        action_state["pending_override"] = None
         print(f"[안내] 알 수 없는 명령: '{command_text}' (지원: 재지급, 재지급 N, 환불, 차트 갱신)")
         return
 
-    ctx = action_state.get("last_actionable")
-    if not ctx:
+    action_ctx = action_state.get("last_actionable")
+    if not action_ctx:
+        action_state["pending_override"] = None
         print(f"[{command_text.split()[0]}] 실행 가능한 최신 판정 결과가 없습니다.")
         return
 
-    if refund_match:
-        if ctx.get("action_type") != "refund":
-            print("[환불] 최신 판정 결과가 환불 분기가 아닙니다.")
+    action_type = "refund" if refund_match else "regrant"
+    ctx = action_ctx.get(action_type)
+    if not ctx:
+        action_state["pending_override"] = None
+        missing = "주문번호·패키지명" if action_type == "refund" else "UUID·상품코드"
+        print(f"[{command_text.split()[0]}] 최신 판정에서 실행 대상({missing})을 확정하지 못했습니다.")
+        return
+
+    product_code = None
+    if regrant_match:
+        index_str = regrant_match.group(1)
+        index = int(index_str) if index_str else None
+        if ctx["candidates"]:
+            if index is None:
+                action_state["pending_override"] = None
+                print(f"[재지급] 후보가 {len(ctx['candidates'])}건입니다 — '재지급 N' 형식으로 번호를 지정하세요(예: 재지급 1).")
+                return
+            if not (1 <= index <= len(ctx["candidates"])):
+                action_state["pending_override"] = None
+                print(f"[재지급] 잘못된 번호입니다: {index} (1~{len(ctx['candidates'])})")
+                return
+            product_code = ctx["candidates"][index - 1].get("shop_click_id")
+            if not product_code:
+                action_state["pending_override"] = None
+                print("[재지급] 선택한 후보에 상품코드(shop_click_id)가 없습니다.")
+                return
+        else:
+            product_code = ctx["product_code"]
+
+    recommended_action = action_ctx.get("recommended_action")
+    if recommended_action != action_type:
+        confirmation = {
+            "ticket_id": action_ctx.get("ticket_id"),
+            "command_text": command_text,
+            "action_type": action_type,
+        }
+        if action_state.get("pending_override") != confirmation:
+            action_state["pending_override"] = confirmation
+            recommended_label = {
+                "regrant": "재지급",
+                "refund": "환불",
+                "review": "미결정(사람 확인)",
+            }.get(recommended_action, recommended_action or "권장 분기 없음")
+            requested_label = "환불" if action_type == "refund" else "재지급"
+            print(f"[경고] 현재 판정 분기는 '{recommended_label}'이지만 '{requested_label}'을 요청했습니다.")
+            print(f"[확인] 고객 요청에 따른 예외 처리라면 같은 명령 '{command_text}'을 한 번 더 입력하세요.")
             return
+        print(f"[확인] 같은 명령 '{command_text}'이 다시 입력되어 예외 처리를 진행합니다.")
+    action_state["pending_override"] = None
+
+    if refund_match:
         # 1회성 소비: API가 응답을 잃어 결과가 불확실해도 같은 명령으로 재호출하지 않는다.
         action_state["last_actionable"] = None
         print(f"[환불] 티켓 {ctx['ticket_id']} — 주문번호 {ctx['order_id']} 환불을 요청합니다.")
         result = _execute_refund(service, ctx["package_name"], ctx["order_id"])
         _print_refund_result(ctx, result)
         return
-
-    if ctx.get("action_type") != "regrant":
-        print("[재지급] 최신 판정 결과가 재지급 분기가 아닙니다.")
-        return
-
-    index_str = regrant_match.group(1)
-    index = int(index_str) if index_str else None
-
-    if ctx["candidates"]:
-        if index is None:
-            print(f"[재지급] 후보가 {len(ctx['candidates'])}건입니다 — '재지급 N' 형식으로 번호를 지정하세요(예: 재지급 1).")
-            return
-        if not (1 <= index <= len(ctx["candidates"])):
-            print(f"[재지급] 잘못된 번호입니다: {index} (1~{len(ctx['candidates'])})")
-            return
-        product_code = ctx["candidates"][index - 1].get("shop_click_id")
-        if not product_code:
-            print("[재지급] 선택한 후보에 상품코드(shop_click_id)가 없습니다.")
-            return
-    else:
-        product_code = ctx["product_code"]
 
     # 1회성 소비 — 같은 결과에 '재지급'을 두 번 입력해도 중복 발송되지 않는다.
     action_state["last_actionable"] = None
@@ -1774,7 +1891,10 @@ def main():
     console_worker.start()
     command_reader = TerminalCommandReader()
     command_reader.start()
-    action_state = {"last_actionable": None}  # 최신 재지급/환불 판정 1건(1회성 소비)
+    action_state = {
+        "last_actionable": None,  # 최신 판정 1건의 재지급/환불 대상(실행 시 1회성 소비)
+        "pending_override": None,  # 판정과 다른 명령의 2회 입력 확인 상태
+    }
 
     def _register_page(page):
         pid = id(page)
@@ -1907,6 +2027,7 @@ def main():
                     # 최신 판정만 실행할 수 있게 교체한다. 실행 불가 판정이 뒤이어 오면
                     # 이전 티켓의 오래된 재지급/환불 문맥도 즉시 폐기한다.
                     action_state["last_actionable"] = action_ctx
+                    action_state["pending_override"] = None
                     if result_ticket_id in console_jobs:
                         console_jobs.pop(result_ticket_id, None)
 
