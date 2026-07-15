@@ -1,0 +1,32 @@
+# === 비밀(secret) — 절대 커밋 금지 ===
+serviceaccount-*.json
+*-service-account*.json
+*.key
+.env
+
+# === 고객 PII / 추출물 (기능 폴더 하위 포함 — 패턴은 깊이 무관) ===
+dumps/
+dumps_console*/
+web_docs/
+# CSV는 자동화 산출물·입력(리더보드 닉네임/UUID/결제합계 등 PII 포함) — 전역 차단.
+# 의도적으로 커밋할 CSV는 git add -f 로 예외 처리.
+*.csv
+
+# === UI 변경 감지 런타임 파일 ===
+console/ui_fingerprints/
+
+# === 예약 실행 로그(작업 스케줄러 래퍼가 남기는 실행 로그) ===
+logs_*/
+
+# === 로그인 세션(쿠키) ===
+pw_profile/
+pw_profile*/
+
+# === 파이썬 가상환경 / 캐시 ===
+.venv/
+__pycache__/
+*.pyc
+
+# === 로컬 에디터/도구 설정 — 커밋 금지 ===
+.vscode/
+.idea/

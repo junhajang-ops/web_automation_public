@@ -1,0 +1,14 @@
+# cs_payment 의존성 목록
+# 설치(이 폴더에서): .venv\Scripts\python.exe -m pip install -r requirements.txt
+# 브라우저(한 번만):  .venv\Scripts\python.exe -m playwright install chromium
+
+# --- cs / 콘솔 화면 자동화 ---
+playwright==1.60.0
+
+# --- Google Play Developer API (주문 조회·환불) ---
+google-api-python-client==2.197.0
+google-auth==2.53.0
+google-auth-httplib2==0.4.0
+
+# --- BigQuery (게임B 등 BigQuery로 로그를 내보내는 프로젝트의 계정 생성일 조회) ---
+google-cloud-bigquery==3.27.0
