@@ -56,6 +56,15 @@ POLL_WAIT_MS = 1_000
 HIGHLIGHT_WAIT_MS = 3_000
 RETRY_MAX_RETRIES = get_retry_max_retries()
 
+# 'gameinfo_nav_pre'는 게임 정보 메뉴를 누르기 직전 화면을 기록한다. 지급 상태 판정에서
+# 이 함수로 넘어오면 직전 영수증 검증 결과가 0건일 수도, 행이 있을 수도 있으므로
+# gridcell/rowgroup 유무는 화면 구조 변경이 아니라 조회 결과 차이다. 결과 유무는 앞 단계의
+# collect_result()가 명시적으로 판정하므로 이 이동 전 지문에서만 중복 경보를 제외한다.
+GAMEINFO_NAV_PRE_IGNORE_PATTERNS = SIDEBAR_BASE_MENU_IGNORE_PATTERNS + [
+    r"role: gridcell$",
+    r"role: rowgroup$",
+]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -125,7 +134,7 @@ def open_game_info_menu(page):
     game_info_link = page.locator("a#baseGameInfo, a[href*='/baseGameInfo']").first
     game_info_link.wait_for(state="visible", timeout=15_000)
     game_info_link.scroll_into_view_if_needed()
-    record_step_dump(page, "gameinfo_nav_pre", ignore_patterns=SIDEBAR_BASE_MENU_IGNORE_PATTERNS)
+    record_step_dump(page, "gameinfo_nav_pre", ignore_patterns=GAMEINFO_NAV_PRE_IGNORE_PATTERNS)
     game_info_link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)

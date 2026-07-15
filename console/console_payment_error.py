@@ -255,7 +255,7 @@ def get_purchase_limit_info(product_code):
 
 
 def _print_matched_limit_info(limit_type, limit_count):
-    """상품이 매칭/확정된 직후 구매 제한 유형·횟수를 초록색으로 즉시 출력한다.
+    """상품이 매칭/확정된 직후 구매 제한 유형·횟수를 초록색으로 간단히 출력한다.
 
     사용자 요청(2026-07-08): ShopData Count 조회 이후가 아니라, GCP 로그든 영수증검증이든
     상품이 매칭되는 순간 유형(Onetime 등)·Purchase_Limit_Count를 초록색으로 보여준다.
@@ -265,8 +265,7 @@ def _print_matched_limit_info(limit_type, limit_count):
     type_disp = limit_type or "(미확인)"
     count_disp = limit_count if limit_count is not None else "(미확인)"
     print(green(
-        f" [지급 상태 판정] 확인된 상품 구매제한 — 유형={type_disp}, "
-        f"Purchase_Limit_Count={count_disp}"
+        f" [지급 상태 판정] 확인된 상품 구매제한 — {type_disp}, {count_disp}"
     ))
 
 
@@ -1164,7 +1163,7 @@ def judge_nonpayment(
     rows = receipt.get("rows") or []
     if not receipt.get("has_results"):
         matched = None
-        no_record_reason = "그 UUID의 영수증검증 결과가 통째로 0건"
+        no_record_reason = "영수증 검증 내 주문 없음"
     else:
         matched = _select_target_row(rows, order_id)
         no_record_reason = (
@@ -1190,7 +1189,9 @@ def judge_nonpayment(
                 "submitted_uuid": uuid_value,
                 "resolved_uuid": effective_uuid,
             }
-        print(f" [지급 상태 판정] {no_record_reason} → 상품 특정·재구매 흔적 확인으로 진행")
+        print(green(
+            f" [지급 상태 판정] {no_record_reason} → 상품 특정·재구매 흔적 확인으로 진행"
+        ))
         return judge_pattern1_missing_receipt(
             page,
             receipt=receipt,
