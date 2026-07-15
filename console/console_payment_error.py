@@ -254,19 +254,18 @@ def get_purchase_limit_info(product_code):
     return info.get("type"), info.get("count")
 
 
-def _print_matched_limit_info(limit_type, limit_count):
-    """상품이 매칭/확정된 직후 구매 제한 유형·횟수를 초록색으로 간단히 출력한다.
+def _print_matched_limit_info(product_code, limit_type, limit_count):
+    """상품이 매칭/확정된 직후 상품코드·구매 제한을 초록색으로 간단히 출력한다.
 
     사용자 요청(2026-07-08): ShopData Count 조회 이후가 아니라, GCP 로그든 영수증검증이든
     상품이 매칭되는 순간 유형(Onetime 등)·Purchase_Limit_Count를 초록색으로 보여준다.
     """
-    if limit_type is None and limit_count is None:
+    if not product_code and limit_type is None and limit_count is None:
         return
+    code_disp = product_code or "(미확인)"
     type_disp = limit_type or "(미확인)"
     count_disp = limit_count if limit_count is not None else "(미확인)"
-    print(green(
-        f" [지급 상태 판정] 확인된 상품 구매제한 — {type_disp}, {count_disp}"
-    ))
+    print(green(f" [지급 상태 판정] {code_disp} — {type_disp},{count_disp}"))
 
 
 # 첨부 결정 트리(2026-07-10 사용자 스크린샷)의 노드 텍스트를 그대로 상수화한다.
@@ -324,7 +323,7 @@ def _print_matched_limit_info_by_code(product_code):
         info = load_purchase_limit_info_map().get(product_code) or {}
     except Exception:  # noqa: BLE001 — 표시용 부가정보라 실패해도 판정은 계속한다
         return
-    _print_matched_limit_info(info.get("type"), info.get("count"))
+    _print_matched_limit_info(product_code, info.get("type"), info.get("count"))
 
 
 def resolve_product_candidates_via_gcp(logging_service, brand, uuid_value, product_id, order_create_time):
@@ -604,6 +603,7 @@ def _resolve_unidentified_product_code(logging_service, brand, uuid_value, produ
     if len(inapp_candidates) == 1:
         product_code = inapp_candidates[0]
         notes.append(f"Inapp 후보 1건 — shop_click 없이 상품 확정: {product_code}")
+        print(green(" [지급 상태 판정] Inapp후보 1개, 로그 조회 생략"))
         return "resolved", product_code, "aos_single_candidate", [], inapp_candidates
 
     raw_candidates, gcp_err = resolve_product_candidates_via_gcp(
@@ -946,7 +946,7 @@ def judge_pattern1_missing_receipt(
 
     notes.append(f"Purchase_Limit_Type={limit_type}, Purchase_Limit_Count={limit_count}")
     # 상품 특정(CSV 단일 후보 또는 GCP 로그) 완료 → 유형·횟수를 즉시 초록색으로 표시.
-    _print_matched_limit_info(limit_type, limit_count)
+    _print_matched_limit_info(product_code, limit_type, limit_count)
     if limit_type in NO_RESET_PURCHASE_LIMIT_TYPES:
         return _judge_no_reset_unidentified_product(
             page,
@@ -1264,7 +1264,7 @@ def judge_nonpayment(
             )
 
         notes.append(f"Purchase_Limit_Type={limit_type}, Purchase_Limit_Count={limit_count}")
-        _print_matched_limit_info(limit_type, limit_count)
+        _print_matched_limit_info(product_code, limit_type, limit_count)
         if limit_type in NO_RESET_PURCHASE_LIMIT_TYPES:
             return _judge_no_reset_unidentified_product(
                 page,
