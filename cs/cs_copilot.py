@@ -6,7 +6,8 @@ cs_copilot.py — cs 실시간 보조 co-pilot
 상담원이 cs 티켓 상세 페이지를 열면 자동으로:
   필드 추출 → UUID·주문번호 정규화 → Play API orders.get 조회
   → 채널·환불상태 verdict를 PowerShell 패널에 출력
-  → 판정 분기에 따라 사람이 터미널에 '재지급'/'환불'을 입력한 경우에만 실행.
+  → 판정 분기에 따라 사람이 터미널에 '재지급'/'환불'을 입력한 경우에만 실행
+  → 터미널에 '차트 갱신'을 입력하면 콘솔 차트 CSV 캐시를 갱신.
 
 실행:
   .venv\\Scripts\\python.exe cs_copilot.py --key <JSON키파일>
@@ -832,6 +833,10 @@ class ConsoleJudgeWorker:
             }
         )
 
+    def submit_chart_refresh(self) -> None:
+        """사람이 터미널에 '차트 갱신'을 입력하면 읽기 전용 차트 갱신을 예약한다."""
+        self._tasks.put({"task_type": "chart_refresh", "ticket_id": None})
+
     def drain_results(self) -> list[dict]:
         items = []
         while True:
@@ -846,6 +851,7 @@ class ConsoleJudgeWorker:
             from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
             from playwright.sync_api import sync_playwright as console_sync_playwright
 
+            from console_chart_lookup import DEFAULT_CHART_NAME, run_chart_lookup
             from console_payment_error import judge_nonpayment
             from console_post_register import (
                 PostSendUncertainError,
@@ -936,6 +942,65 @@ class ConsoleJudgeWorker:
 
                     ticket_id = task["ticket_id"]
                     task_type = task.get("task_type", "judge")
+
+                    if task_type == "chart_refresh":
+                        # console_chart_lookup.py의 --gametitle 실행과 같은 대상이다. 프로젝트
+                        # 표시명은 정확 일치값을 env에서 받아, 없을 때 유사 후보를 임의로
+                        # 선택하지 않고 중단한다(운영 대상 모호성 금지 원칙).
+                        console_project_name = os.environ.get("GAMETITLE_PROJECT_NAME", "").strip()
+                        if not console_project_name:
+                            self._results.put({
+                                "task_type": "chart_refresh",
+                                "ticket_id": None,
+                                "result": {"status": "failed", "chart_name": DEFAULT_CHART_NAME},
+                                "error": "GAMETITLE_PROJECT_NAME 설정 없음",
+                            })
+                            continue
+
+                        def _do_chart_refresh():
+                            page = context.pages[0] if context.pages else context.new_page()
+                            page = select_console_target_page(context, page)
+                            return run_chart_lookup(
+                                page=page,
+                                chart_name=DEFAULT_CHART_NAME,
+                                explicit_project_base="",
+                                start_url=CONSOLE_START_URL,
+                                project_name=console_project_name,
+                            )
+
+                        def _recover_chart_refresh():
+                            page = context.pages[0] if context.pages else context.new_page()
+                            page = select_console_target_page(context, page)
+                            prepare_console_project(page, "", CONSOLE_START_URL, console_project_name)
+
+                        try:
+                            summary = retry_with_recovery(
+                                _do_chart_refresh,
+                                _recover_chart_refresh,
+                                label=f"차트 {DEFAULT_CHART_NAME} 갱신",
+                                recovery_desc="콘솔 홈부터 재시작(필요 시 재로그인)",
+                                max_retries=get_retry_max_retries(),
+                            )
+                            self._results.put({
+                                "task_type": "chart_refresh",
+                                "ticket_id": None,
+                                "result": {
+                                    "status": "updated",
+                                    "chart_name": DEFAULT_CHART_NAME,
+                                    **summary,
+                                },
+                                "error": None,
+                            })
+                        except Exception as exc:  # noqa: BLE001
+                            short_msg = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+                            self._results.put({
+                                "task_type": "chart_refresh",
+                                "ticket_id": None,
+                                "result": {"status": "failed", "chart_name": DEFAULT_CHART_NAME},
+                                "error": short_msg,
+                            })
+                        _capture_window_bounds(context, "console_browser")
+                        continue
 
                     if task_type == "regrant":
                         console_project_name = resolve_brand_console_project(task.get("brand"))
@@ -1147,6 +1212,7 @@ REGRANT_CANDIDATE_VERDICTS = {
 }
 REGRANT_COMMAND_RE = re.compile(r"^재지급(?:\s+(\d+))?$")
 REFUND_COMMAND_RE = re.compile(r"^환불$")
+CHART_REFRESH_COMMAND = "차트 갱신"
 
 
 def _resolve_regrant_context(ticket_id, result):
@@ -1450,6 +1516,23 @@ def _print_refund_result(ctx: dict, result: dict) -> None:
     print(_SEP)
 
 
+def _print_chart_refresh_result(result, error) -> None:
+    result = result or {}
+    chart_name = result.get("chart_name") or "(미확인)"
+    print()
+    print(_SEP)
+    print(f" [차트 갱신] {chart_name}")
+    if error or result.get("status") != "updated":
+        print("   상태       : 실패")
+        print(f"   오류       : {error or '(원인 미확인)'}")
+    else:
+        print("   상태       : 완료")
+        print(f"   적용 파일  : {result.get('applied_file_id') or '(미확인)'}")
+        print(f"   CSV 파일   : {result.get('csv_file') or '(미확인)'}")
+        print(f"   데이터     : {result.get('csv_row_count', '?')}행, {result.get('csv_col_count', '?')}열")
+    print(_SEP)
+
+
 class TerminalCommandReader:
     """터미널 입력을 별도 daemon thread에서 non-blocking하게 읽어 큐에 쌓는다.
 
@@ -1489,12 +1572,17 @@ class TerminalCommandReader:
 
 
 def _handle_command(command_text, action_state, console_worker, service):
-    """최신 판정과 일치하는 '재지급'/'환불' 명령만 한 번 실행한다."""
+    """터미널 명령을 검증해 콘솔 작업 큐 또는 Google 환불 실행기로 전달한다."""
     command_text = command_text.strip()
+    if command_text == CHART_REFRESH_COMMAND:
+        console_worker.submit_chart_refresh()
+        print("[차트 갱신] 콘솔 차트 CSV 갱신을 작업 큐에 등록했습니다.")
+        return
+
     regrant_match = REGRANT_COMMAND_RE.match(command_text)
     refund_match = REFUND_COMMAND_RE.match(command_text)
     if not regrant_match and not refund_match:
-        print(f"[안내] 알 수 없는 명령: '{command_text}' (지원: 재지급, 재지급 N, 환불)")
+        print(f"[안내] 알 수 없는 명령: '{command_text}' (지원: 재지급, 재지급 N, 환불, 차트 갱신)")
         return
 
     ctx = action_state.get("last_actionable")
@@ -1749,7 +1837,7 @@ def main():
 
         print()
         print("=" * 44)
-        print(" cs co-pilot 실행 중 (조회 + 명령 승인 후 재지급/환불)")
+        print(" cs co-pilot 실행 중 (조회 + 명령 승인 후 재지급/환불/차트 갱신)")
         print("=" * 44)
         print()
 
@@ -1798,6 +1886,12 @@ def main():
 
                 for console_result in console_worker.drain_results():
                     result_ticket_id = console_result.get("ticket_id")
+                    if console_result.get("task_type") == "chart_refresh":
+                        _print_chart_refresh_result(
+                            console_result.get("result"),
+                            console_result.get("error"),
+                        )
+                        continue
                     if console_result.get("task_type") == "regrant":
                         _print_regrant_result(
                             result_ticket_id or "(unknown)",
