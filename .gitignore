@@ -30,3 +30,8 @@ __pycache__/
 # === 로컬 에디터/도구 설정 — 커밋 금지 ===
 .vscode/
 .idea/
+
+# === 커밋 안전 훅 도구(로컬 전용, 커밋하지 않음) ===
+hooks/pre-commit
+tools/precommit_check.py
+tools/install_safety_hooks.ps1
