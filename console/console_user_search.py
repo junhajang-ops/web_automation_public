@@ -304,15 +304,12 @@ def select_project_by_name(page, project_name):
     target_norm = normalize_project_name(project_name)
 
     exact_candidates = []
-    partial_candidates = []
     for index in range(count):
         item = menu_items.nth(index)
         name = item.locator("p").first.inner_text().strip()
         name_norm = normalize_project_name(name)
         if name_norm == target_norm:
             exact_candidates.append((name, index))
-        elif target_norm and target_norm in name_norm:
-            partial_candidates.append((name, index))
 
     if len(exact_candidates) == 1:
         selected_name, selected_index = exact_candidates[0]
@@ -321,16 +318,11 @@ def select_project_by_name(page, project_name):
         raise RuntimeError(
             f"프로젝트 목록에서 '{project_name}'와 정확히 일치하는 후보가 {len(exact_candidates)}개로 모호합니다: {names}"
         )
-    elif len(partial_candidates) == 1:
-        selected_name, selected_index = partial_candidates[0]
-    elif len(partial_candidates) > 1:
-        names = ", ".join(name for name, _ in partial_candidates)
-        raise RuntimeError(
-            f"프로젝트 목록에서 '{project_name}'를 포함하는 후보가 {len(partial_candidates)}개로 모호합니다: {names}. "
-            "--project-name 또는 TITLE_PROJECT_NAME env를 실제 표시명으로 더 정확히 지정하세요."
-        )
     else:
-        raise RuntimeError(f"프로젝트 목록에서 '{project_name}' 후보를 찾지 못했습니다.")
+        raise RuntimeError(
+            f"프로젝트 목록에서 '{project_name}'와 정확히 일치하는 후보를 찾지 못했습니다. "
+            "--project-name 또는 TITLE_PROJECT_NAME env를 실제 표시명으로 지정하세요."
+        )
 
     selected_item = menu_items.nth(selected_index)
 

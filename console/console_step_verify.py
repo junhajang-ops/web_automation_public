@@ -590,11 +590,57 @@ def _append_change_log(
         handle.write("\n".join(lines) + "\n")
 
 
+# --- 실행 단위 UI 변경 탐지 집계 ---------------------------------------------
+# 한 번의 실행(예: 리더보드 예약 실행) 동안 실제 UI 변경(kept_diffs 발생 = changed)이
+# 하나라도 있었는지 집계한다. 화이트리스트로 걸러진 diff·로그인 화면 스킵은 포함하지 않는다
+# (그건 오탐/일시상태이지 실제 변경이 아니므로). 호출자가 실행 시작 시 reset하고, 완료
+# 요약(예: 슬랙)에서 any_ui_change_detected()로 O/X를 붙일 수 있다.
+_UI_CHANGE_EVENTS: list[tuple[str, int]] = []
+
+
+def reset_ui_change_tracking() -> None:
+    """실행 시작 시 호출 — 이번 실행의 UI 변경 집계를 초기화한다."""
+    _UI_CHANGE_EVENTS.clear()
+
+
+def any_ui_change_detected() -> bool:
+    """이번 실행 중 실제 UI 변경이 하나라도 탐지됐으면 True."""
+    return len(_UI_CHANGE_EVENTS) > 0
+
+
+def get_ui_change_events() -> list[tuple[str, int]]:
+    """이번 실행 중 탐지된 (스텝이름, 변경건수) 목록의 복사본."""
+    return list(_UI_CHANGE_EVENTS)
+
+
+def _is_login_screen(page) -> bool:
+    # 세션 만료 시 콘솔 콘솔은 로그인 화면으로 리다이렉트된다. 정상 콘솔 화면엔 없는
+    # username/password 입력이 함께 존재하는지로 판별한다. count()는 폴링 없이 즉시
+    # 반환하므로 로그인 화면이 아닌 정상 화면에는 지연을 주지 않는다(wait_for_visible의
+    # 1.5초 대기를 매 스텝마다 무는 것을 피한다).
+    try:
+        return (
+            page.locator("input[name='password']").count() > 0
+            and page.locator("input[name='username']").count() > 0
+        )
+    except Exception:
+        return False
+
+
 def snap_and_check_ui(
     page,
     name: str,
     ignore_patterns=None,
 ) -> bool:
+    # 로그인 세션이 24시간 주기 등으로 만료돼 잠시 로그인 화면이 뜬 상태면, 곧
+    # retry_with_recovery(또는 click_login_if_needed)가 재로그인·재시도한다. 이 일시
+    # 화면을 baseline(정상 화면)과 비교하면 사이드바·nav 등 화면 전체가 사라진 것처럼
+    # 수십 건 대량 오탐이 난다. 따라서 비교·로그·baseline 저장을 모두 건너뛴다
+    # (baseline은 마지막 정상 화면으로 보존 — 623행 원칙과 동일 취지). 로딩 스피너를
+    # wait_for_loading_settled로 기다려 넘기는 것과 같은 결의 처리다.
+    if _is_login_screen(page):
+        print(f"  [UI monitor] '{name}' skipped (login screen — 세션 만료, 재로그인 대기).")
+        return False
     curr = _extract_page_fingerprint(page)
     if not curr:
         return False
@@ -616,6 +662,7 @@ def snap_and_check_ui(
                 print(_red(diff))
             print(_red("  -> See console/ui_fingerprints/ui_change_log.txt"))
             _append_change_log(name, kept_diffs, ignored_diffs)
+            _UI_CHANGE_EVENTS.append((name, len(kept_diffs)))
             # 근본 원칙: changed 지문은 베이스라인으로 덮어쓰지 않는다. 마지막으로 확인된
             # 정상 화면을 기준으로 보존해야, 일시적 이상 화면(로그인 만료·미개봉 팝업 등)이
             # 기준을 오염시켜 다음 정상 화면을 무조건 changed로 뒤집는 flip-flop을 막는다.

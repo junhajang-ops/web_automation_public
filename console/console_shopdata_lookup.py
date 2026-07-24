@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from console_step_verify import (
+    POLL_INTERVAL_MS,
     SIDEBAR_BASE_MENU_IGNORE_PATTERNS,
     configure_console_output,
     get_retry_max_retries,
@@ -52,7 +53,8 @@ DEFAULT_OUTPUT = "dumps_console_shopdata_lookup"
 DEFAULT_UUID = TEST_UUID
 DEFAULT_TABLE_NAME = TEST_TABLE_NAME
 DEFAULT_PURCHASE_CODE = TEST_PURCHASE_CODE
-POLL_WAIT_MS = 1_000
+# 공용 폴링/정착 대기 = console_step_verify.POLL_INTERVAL_MS(500). (2026-07-23 공용화)
+POLL_WAIT_MS = POLL_INTERVAL_MS
 HIGHLIGHT_WAIT_MS = 3_000
 RETRY_MAX_RETRIES = get_retry_max_retries()
 
@@ -271,8 +273,6 @@ def wait_for_shopdata_result_render_stable(
     오인할 수 있다. 네트워크 유휴와 결과 행/페이지네이션/빈 결과 표시의 연속 동일 상태를
     모두 확인한 뒤에만 shopdata_search_submit_pre 지문을 기록한다.
     """
-    print("[8-1] ShopData 결과 영역 로딩이 안정될 때까지 기다립니다.")
-
     # 옵션 클릭 이벤트가 비동기 요청을 등록할 시간을 준 뒤 그 요청의 종료를 기다린다.
     page.wait_for_timeout(POLL_WAIT_MS)
     if not safe_wait_for_load(page, "networkidle", timeout_ms):

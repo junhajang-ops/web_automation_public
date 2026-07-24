@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from console_step_verify import (
+    POLL_INTERVAL_MS,
     SIDEBAR_BASE_MENU_IGNORE_PATTERNS,
     configure_console_output,
     get_retry_max_retries,
@@ -51,7 +52,9 @@ from test_config import TEST_UUID, apply_title_profile
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = "dumps_console_receipt"
 DEFAULT_UUID = TEST_UUID
-POLL_WAIT_MS = 1_000
+# 공용 폴링/정착 대기는 console_step_verify.POLL_INTERVAL_MS(500)를 그대로 쓴다.
+# (이전에는 로컬 1000으로 공용 500을 덮어써 폴링이 규약보다 느렸음 — 2026-07-23 공용화)
+POLL_WAIT_MS = POLL_INTERVAL_MS
 GRID_SCROLL_STEP_PX = 1_200
 GRID_SCROLL_IDLE_LIMIT = 3
 RECEIPT_IGNORE_PATTERNS = [
@@ -162,12 +165,21 @@ def parse_args():
     return parser.parse_args()
 
 
-def open_receipt_verification_menu(page):
+def open_receipt_verification_menu(page, nav_step_name="receipt_nav_pre"):
+    # nav_step_name: 영수증검증 클릭 직전(pre) 지문의 스텝 이름. 이 pre-dump는 "직전까지
+    # 거쳐온 경로가 남긴 화면"을 찍으므로 호출 경로마다 착지 화면이 다르다 —
+    #   · 단독 경로(console_receipt_verification): 앞단 ensure_uuid_registered가 '유저' 탭을
+    #     열어 → 유저 검색 화면
+    #   · 리더보드 경로(console_leaderboard): ensure_uuid_registered 없이 프로젝트 선택 직후
+    #     → 콘솔 홈 화면
+    # 같은 이름을 공유하면 두 정상 화면이 매 실행 서로를 changed로 뒤집어 대량 오탐이 난다
+    # (하나의 baseline이 둘을 동시에 만족 불가). 경로별로 이름을 분리해 각자 안정된 baseline을
+    # 갖게 한다. 셀렉터/판정 로직은 동일하며 지문 이름만 다르다.
     print("[4] 사이드 메뉴에서 '영수증 검증'으로 이동합니다.")
     receipt_link = page.locator("a", has_text="영수증 검증").first
     receipt_link.wait_for(state="visible", timeout=15_000)
     receipt_link.scroll_into_view_if_needed()
-    record_step_dump(page, "receipt_nav_pre", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
+    record_step_dump(page, nav_step_name, ignore_patterns=RECEIPT_IGNORE_PATTERNS)
     receipt_link.click()
     click_login_if_needed(page)
     safe_wait_for_load(page, "domcontentloaded", 15_000)
@@ -186,7 +198,6 @@ def _read_visible_role_signature(page):
 
 
 def wait_for_receipt_page_render_stable(page, timeout_ms: int = 6_000, stable_rounds: int = 2):
-    print("[4-1] 영수증 검증 페이지 렌더가 안정될 때까지 기다립니다.")
     page.locator("input#searchValue").first.wait_for(state="visible", timeout=15_000)
 
     previous_signature = ""

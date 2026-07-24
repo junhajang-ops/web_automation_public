@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 
 from console_step_verify import (
+    POLL_INTERVAL_MS,
     configure_console_output,
     get_retry_max_retries,
     init_dump_dir,
@@ -44,7 +45,8 @@ from test_config import TEST_UUID, apply_title_profile
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = "dumps_console_webshop_history"
 DEFAULT_UUID = TEST_UUID
-POLL_WAIT_MS = 1_000
+# 공용 폴링/정착 대기 = console_step_verify.POLL_INTERVAL_MS(500). (2026-07-23 공용화)
+POLL_WAIT_MS = POLL_INTERVAL_MS
 GRID_SCROLL_STEP_PX = 900
 GRID_SCROLL_IDLE_LIMIT = 3
 PAYITEM_ITEM_RE = re.compile(r"(?:^|_)payitem_(\d+)$", re.I)
@@ -97,7 +99,6 @@ def _read_visible_role_signature(page):
 
 
 def wait_for_webshop_history_page_render_stable(page, timeout_ms: int = 6_000, stable_rounds: int = 2):
-    print("[4-1] 지급 내역 페이지 렌더가 안정될 때까지 기다립니다.")
     page.locator("input#searchValue").first.wait_for(state="visible", timeout=15_000)
 
     previous_signature = ""

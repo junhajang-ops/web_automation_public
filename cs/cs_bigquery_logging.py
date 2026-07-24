@@ -51,10 +51,68 @@ def build_bigquery_client_from_credentials(credentials, project):
         return None
 
 
-def fetch_min_date_for_user(bq_client, project, dataset, table, user_col, date_col, uuid):
+def run_readonly_query(bq_client, query, query_parameters, maximum_bytes_billed, location=None):
+    """읽기 전용 쿼리를 **dry-run 예상 처리량 확인 + maximum_bytes_billed 강제** 하에 실행한다.
+
+    BIGQUERY_COST_GUARDRAILS.md §4-C(dry run)·§4-D(강제 상한)의 코드 강제 지점.
+    반환: (rows | None, error | None).
+
+    fail-closed 원칙:
+      - maximum_bytes_billed가 없거나(0/None) 양수가 아니면 **쿼리를 실행하지 않고** 오류를 반환한다.
+      - dry-run 예상 스캔량이 상한을 초과하면 실제 쿼리를 실행하지 않고 오류를 반환한다.
+      - 실제 쿼리에도 maximum_bytes_billed를 걸어, dry-run 이후 데이터 증가로 상한을 넘으면
+        BigQuery가 과금 전에 job을 실패시킨다(경쟁 상태 방어).
+    """
+    if not maximum_bytes_billed or maximum_bytes_billed <= 0:
+        return None, (
+            "maximum_bytes_billed 미설정(fail-closed): "
+            "BQ_MAXIMUM_BYTES_BILLED(또는 {TITLE}_BQ_MAXIMUM_BYTES_BILLED)를 양수로 설정해야 쿼리를 실행합니다"
+        )
+
+    try:
+        from google.cloud import bigquery
+    except ImportError:
+        return None, "google-cloud-bigquery 미설치"
+
+    params = list(query_parameters or [])
+
+    # 1) dry-run: 실제 스캔·과금 없이 예상 처리량만 확인(INFORMATION_SCHEMA 없이 저비용 확인 경로).
+    dry_config = bigquery.QueryJobConfig(
+        dry_run=True,
+        use_query_cache=False,
+        query_parameters=params,
+    )
+    try:
+        dry_job = bq_client.query(query, job_config=dry_config, location=location)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"dry-run 실패: {exc}"
+
+    estimated = int(getattr(dry_job, "total_bytes_processed", 0) or 0)
+    if estimated > maximum_bytes_billed:
+        return None, (
+            f"예상 스캔 {estimated:,}B > 상한 {maximum_bytes_billed:,}B — 쿼리 중단(fail-closed). "
+            "쿼리에 파티션(날짜) 조건을 추가하거나 상한을 재검토하세요"
+        )
+
+    # 2) 실제 실행: 상한을 job에도 강제해 초과 시 과금 전에 실패시킨다.
+    real_config = bigquery.QueryJobConfig(
+        query_parameters=params,
+        maximum_bytes_billed=int(maximum_bytes_billed),
+    )
+    try:
+        rows = list(bq_client.query(query, job_config=real_config, location=location).result())
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
+    return rows, None
+
+
+def fetch_min_date_for_user(
+    bq_client, project, dataset, table, user_col, date_col, uuid, maximum_bytes_billed
+):
     """dc_all처럼 유저당 레코드가 존재하는 테이블에서 uuid의 최초 날짜(date_col 최솟값)를 조회한다.
 
-    읽기 전용(SELECT MIN(...)). 반환: (datetime | None, error | None).
+    읽기 전용(SELECT MIN(...)). 모든 실행은 dry-run 예상 처리량 확인 + maximum_bytes_billed
+    강제를 거친다(run_readonly_query). 반환: (datetime | None, error | None).
     해당 uuid 행이 없으면 (None, None) — 정상 상태(레코드 없음)이며, 그 의미 판단은 호출부가 한다.
     """
     if not (project and dataset and table and user_col and date_col and uuid):
@@ -70,14 +128,11 @@ def fetch_min_date_for_user(bq_client, project, dataset, table, user_col, date_c
         f"FROM `{project}.{dataset}.{table}` "
         f"WHERE `{user_col}` = @uuid"
     )
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ScalarQueryParameter("uuid", "STRING", uuid)]
-    )
+    params = [bigquery.ScalarQueryParameter("uuid", "STRING", uuid)]
 
-    try:
-        rows = list(bq_client.query(query, job_config=job_config).result())
-    except Exception as exc:  # noqa: BLE001
-        return None, str(exc)
+    rows, err = run_readonly_query(bq_client, query, params, maximum_bytes_billed)
+    if err:
+        return None, err
 
     if not rows or rows[0]["min_date"] is None:
         return None, None

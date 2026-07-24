@@ -38,6 +38,7 @@ import re
 import sys
 import time
 import threading
+import uuid as uuid_module
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -57,7 +58,7 @@ from console_user_search import (
 )
 from console_chart_lookup import PAYMENT_DOCS_DIR
 from console_receipt_verification import (
-    RECEIPT_IGNORE_PATTERNS,
+    RECEIPT_RESULTS_IGNORE_PATTERNS,
     click_search_button,
     collect_result,
     fill_uuid_search,
@@ -73,12 +74,16 @@ from console_user_block import (
 )
 from console_slack_notify import get_slack_webhook_url, send_slack_message
 from console_step_verify import (
+    POLL_INTERVAL_MS,
+    any_ui_change_detected,
     configure_console_output,
     display_width,
     get_retry_max_retries,
+    get_ui_change_events,
     pad_display,
     init_dump_dir,
     record_step_dump,
+    reset_ui_change_tracking,
     retry_with_recovery,
     save_page_artifacts,
     step_and_verify_ui,
@@ -118,7 +123,8 @@ MAX_RANK = min(
 )  # 상위 몇 명까지 볼지. {TITLE}_LEADERBOARD_MAX_RANK로 프로젝트별 override 가능(main()에서 재적용)
 LIST_ROWS_PER_PAGE = 100
 DETAIL_ROWS_PER_PAGE = 100
-POLL_WAIT_MS = 1_000
+# 공용 폴링/정착 대기 = console_step_verify.POLL_INTERVAL_MS(500). (2026-07-23 공용화)
+POLL_WAIT_MS = POLL_INTERVAL_MS
 GRID_SCROLL_STEP_PX = 900
 UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
@@ -197,6 +203,14 @@ def _resolve_title_bool_env(prefix: str, suffix: str, default_value: bool) -> bo
     return _parse_bool_env(raw) if raw else default_value
 
 
+def _resolve_title_float_env(prefix: str, suffix: str, default_value: float) -> float:
+    """{prefix}_{suffix} env가 있으면 그 값(float), 없으면 default_value(전역 fallback) 그대로."""
+    if not prefix:
+        return default_value
+    raw = os.environ.get(f"{prefix}_{suffix}", "").strip()
+    return float(raw) if raw else default_value
+
+
 def _is_visible(locator) -> bool:
     try:
         return locator.count() > 0 and locator.first.is_visible()
@@ -241,13 +255,27 @@ def parse_args():
     parser.add_argument(
         "--log-console",
         default="",
-        help="계정 생성일 조회 백엔드: cloud_logging(기본) 또는 bigquery (직접 지정, 보통 --title로 env에서 자동 설정)",
+        help=(
+            "계정 생성일(가입일) 판정 백엔드: cloud_logging(기본) / bigquery / uuid_v1 "
+            "(직접 지정, 보통 --title로 env에서 자동 설정). uuid_v1은 UUID v1 내장 타임스탬프만으로 "
+            "판정해 외부 조회가 없다(--dc는 항상 uuid_v1로 동작)."
+        ),
     )
     parser.add_argument("--bq-project", default="", help="BigQuery GCP 프로젝트 ID (직접 지정)")
     parser.add_argument("--bq-dataset", default="", help="BigQuery 데이터셋명 (직접 지정)")
     parser.add_argument("--bq-table", default="", help="BigQuery 테이블명 (직접 지정)")
     parser.add_argument("--bq-user-col", default="", help="BigQuery 유저 식별 컬럼명 (직접 지정)")
     parser.add_argument("--bq-date-col", default="", help="BigQuery 계정생성일(가입일) 컬럼명 (직접 지정)")
+    parser.add_argument(
+        "--bq-max-bytes",
+        type=int,
+        default=0,
+        help=(
+            "BigQuery 쿼리 1건당 강제 최대 청구 바이트(maximum_bytes_billed). "
+            "0/미지정이면 fail-closed로 BigQuery 조회를 하지 않음. "
+            "env {TITLE}_BQ_MAXIMUM_BYTES_BILLED / BQ_MAXIMUM_BYTES_BILLED로도 지정 가능."
+        ),
+    )
     parser.add_argument(
         "--keywords",
         default=DEFAULT_SEARCH_KEYWORDS,
@@ -270,7 +298,11 @@ def parse_args():
         ),
     )
     parser.add_argument("--gametitle", action="store_true", help="--title gametitle 단축키")
-    parser.add_argument("--dc", action="store_true", help="--title dc 단축키 (게임B)")
+    parser.add_argument(
+        "--dc",
+        action="store_true",
+        help="--title dc 단축키 (게임B). 가입일은 UUID v1 내장 타임스탬프로 판정(BigQuery/GCP 조회 없음).",
+    )
     parser.add_argument(
         "--unattended",
         action="store_true",
@@ -334,14 +366,25 @@ def open_leaderboard_page(page, nav_context: str = "initial"):
     link = page.locator("a#baseRank, a[href*='/baseRank']").first
     ensure_sidebar_link_expanded(page, link, "leaderboard_category_expand_pre")
     link.scroll_into_view_if_needed()
-    ignore_patterns = (
-        LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS
-        if nav_context in ("return", "board_loop")
-        else None
-    )
+    if nav_context in ("return", "board_loop"):
+        # 이 pre-dump는 "직전에 처리한 보드의 상세" 상태를 찍는다. 그 보드가 순위 0명(빈
+        # 리더보드)이면 표시 개수(페이지네이션) 드롭다운이 렌더되지 않아 role=combobox가
+        # 사라진다 — leaderboard_complete 스텝과 동일한, 데이터 유무에 따른 정상적 차이다.
+        # 따라서 직전 화면이 상세(detail)일 때는 combobox 소실도 무시한다. 목록(list) 화면일
+        # 때는 combobox 소실이 실제 문제일 수 있으므로 공용 패턴만 쓴다(2026-06-29 국소 whitelist 원칙).
+        source = _leaderboard_nav_source(page)
+        step_name = f"leaderboard_nav_{nav_context}_{source}_pre"
+        ignore_patterns = (
+            LEADERBOARD_COMPLETE_IGNORE_PATTERNS
+            if source == "detail"
+            else LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS
+        )
+    else:
+        step_name = _leaderboard_nav_step_name(page, nav_context)
+        ignore_patterns = None
     record_step_dump(
         page,
-        _leaderboard_nav_step_name(page, nav_context),
+        step_name,
         ignore_patterns=ignore_patterns,
     )
     link.click()
@@ -969,10 +1012,12 @@ def _is_retryable_bq_error(err_text: str) -> bool:
     )
 
 
-def _fetch_account_creation_date_with_retry(bq_client, bq_project, dataset, table, user_col, date_col, uuid):
+def _fetch_account_creation_date_with_retry(bq_client, bq_project, dataset, table, user_col, date_col, uuid, maximum_bytes_billed):
     last_err = None
     for attempt in range(1, GCP_QUERY_MAX_RETRIES + 1):
-        min_date, err = fetch_min_date_for_user(bq_client, bq_project, dataset, table, user_col, date_col, uuid)
+        min_date, err = fetch_min_date_for_user(
+            bq_client, bq_project, dataset, table, user_col, date_col, uuid, maximum_bytes_billed
+        )
         if not err:
             return min_date, None
 
@@ -990,7 +1035,7 @@ def _fetch_account_creation_date_with_retry(bq_client, bq_project, dataset, tabl
     return None, last_err
 
 
-def query_account_creation_info_bigquery(bq_client, bq_project, dataset, table, user_col, date_col, uuid, now_utc) -> dict:
+def query_account_creation_info_bigquery(bq_client, bq_project, dataset, table, user_col, date_col, uuid, now_utc, maximum_bytes_billed) -> dict:
     """BigQuery 유저 마스터 테이블(예: dc_all)에서 유저의 가입일(date_col 최솟값)로 신규/기존을 판정한다.
 
     dc_all은 "유저당 한 행"인 마스터 테이블이 아니라 Firebase/GA4 스타일 이벤트 로그 테이블이다
@@ -1003,7 +1048,7 @@ def query_account_creation_info_bigquery(bq_client, bq_project, dataset, table, 
     신규 차단 후보 판정에서 조용히 누락되지 않게 한다.
     """
     create_dt, err = _fetch_account_creation_date_with_retry(
-        bq_client, bq_project, dataset, table, user_col, date_col, uuid
+        bq_client, bq_project, dataset, table, user_col, date_col, uuid, maximum_bytes_billed
     )
     if err:
         return {"account_type": f"조회실패({err})", "create_account_date": ""}
@@ -1039,13 +1084,22 @@ def _thread_bigquery_client(bq_credentials, bq_project):
     return client
 
 
-def enrich_board_with_bigquery(board_rows, bq_credentials, bq_project, dataset, table, user_col, date_col, now_utc, cache=None):
+def enrich_board_with_bigquery(board_rows, bq_credentials, bq_project, dataset, table, user_col, date_col, now_utc, maximum_bytes_billed, cache=None):
     """board_rows 각 행에 BigQuery 유저 마스터 테이블 기준 계정 신규 여부를 in-place로 추가.
     credentials는 공유, client만 스레드별. 스레드풀은 GCP Cloud Logging 조회와 공용(_get_gcp_executor)이다.
-    cache가 주어지면 같은 실행 안에서 이미 조회한 UUID는 재조회하지 않는다."""
+    cache가 주어지면 같은 실행 안에서 이미 조회한 UUID는 재조회하지 않는다.
+
+    maximum_bytes_billed는 BIGQUERY_COST_GUARDRAILS.md §4-D의 강제 상한이다. 미설정(0/None)이면
+    fail-closed로 **한 건도 조회하지 않고** 전 행을 "BQ상한미설정"으로 남긴다 — 상한 없는 자동 쿼리 금지."""
     if not (bq_credentials and bq_project and dataset and table and user_col and date_col):
         for row in board_rows:
             row.update({"account_type": "BQ미설정", "create_account_date": ""})
+        return
+
+    if not maximum_bytes_billed or maximum_bytes_billed <= 0:
+        # fail-closed: 상한이 없으면 무제한 스캔 위험이 있으므로 조회 자체를 하지 않는다.
+        for row in board_rows:
+            row.update({"account_type": "BQ상한미설정", "create_account_date": ""})
         return
 
     def _work(uuid_value):
@@ -1053,10 +1107,143 @@ def enrich_board_with_bigquery(board_rows, bq_credentials, bq_project, dataset, 
         if client is None:
             raise RuntimeError("BigQuery client build 실패(credentials 확인)")
         return query_account_creation_info_bigquery(
-            client, bq_project, dataset, table, user_col, date_col, uuid_value, now_utc
+            client, bq_project, dataset, table, user_col, date_col, uuid_value, now_utc, maximum_bytes_billed
         )
 
     _enrich_board_by_uuid(board_rows, cache, _work, "BQ")
+
+
+# UUID v1은 60비트 타임스탬프(1582-10-15 00:00:00 UTC 기준 100ns 단위)를 값 자체에 담는다.
+# 게임B(--dc)처럼 유저 식별자가 UUID v1인 프로젝트는 이 타임스탬프가 곧 계정 생성 시각이므로,
+# BigQuery(dc_all 이벤트 로그 MIN(in_date_UTC), 근사치·비용 발생) 조회 없이 UUID만으로 가입일을 판정한다.
+_UUID_V1_EPOCH = datetime.datetime(1582, 10, 15)  # naive UTC — now_utc(datetime.utcnow())와 동일 기준
+
+
+def account_creation_info_from_uuid_v1(uuid_value, now_utc) -> dict:
+    """UUID v1 값에 내장된 타임스탬프만으로 가입일을 판정한다(외부 조회 없음).
+
+    - UUID로 파싱되지 않으면 "UUID형식아님"
+    - version이 1이 아니면 "UUIDv1아님" — 시간 정보를 신뢰할 수 없으므로 신규로 단정하지 않는다.
+    두 경우 모두 account_type이 "계정 신규 생성"이 아니므로 신규 차단 후보에서 조용히 누락되지 않고
+    별도 상태로 드러난다(BigQuery 경로의 "계정정보없음"과 같은 취지)."""
+    if not uuid_value:
+        return {"account_type": "UUID없음", "create_account_date": ""}
+    try:
+        parsed = uuid_module.UUID(str(uuid_value))
+    except (ValueError, AttributeError, TypeError):
+        return {"account_type": "UUID형식아님", "create_account_date": ""}
+    if parsed.version != 1:
+        return {"account_type": "UUIDv1아님", "create_account_date": ""}
+
+    # parsed.time: 100ns 단위. 마이크로초로 환산해 epoch에 더한다(naive UTC).
+    create_dt = _UUID_V1_EPOCH + datetime.timedelta(microseconds=parsed.time // 10)
+
+    hours_diff = (now_utc - create_dt).total_seconds() / 3600
+    account_type = "계정 신규 생성" if hours_diff <= ACCOUNT_NEW_HOURS else "기존 유저"
+    return {
+        "account_type": account_type,
+        "create_account_date": create_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def enrich_board_with_uuid_v1(board_rows, now_utc, cache=None):
+    """board_rows 각 행에 UUID v1 내장 타임스탬프 기준 계정 신규 여부를 in-place로 추가.
+    외부(BigQuery/GCP) 조회가 없어 스레드풀·credentials가 필요 없다. cache는 같은 UUID 재계산만 생략한다."""
+    if cache is None:
+        cache = {}
+    for row in board_rows:
+        uuid_value = row.get("uuid")
+        if uuid_value in cache:
+            row.update(cache[uuid_value])
+            continue
+        result = account_creation_info_from_uuid_v1(uuid_value, now_utc)
+        cache[uuid_value] = result
+        row.update(result)
+
+
+# UUID v1 역산 가입일 판정(--dc)은 "콘솔이 계속 v1 UUID를 발급한다"는 암묵적 전제에 의존한다.
+# 콘솔이 예고 없이 버전을 바꾸면(v4/v6/v7 등) account_creation_info_from_uuid_v1이 각 행을
+# "UUIDv1아님"으로 안전 처리해 틀린 가입일/오차단은 막지만, 신규 유저 탐지가 통째로 조용히
+# 멈춘다(개별 행에만 흩어져 사람이 표를 다 훑어야만 보임). 아래 A층 감시는 조회한 UUID의
+# 실제 버전 분포를 집계해 이 "조용한 기능 정지"를 값싸게(외부 조회 0) 드러낸다.
+# 기준선은 매우 깨끗하다(실측 dc 100% v1)이라 비-v1이 하나라도 등장하면 유의미한 신호다.
+# 임계치 기본 0 = 비-v1이 하나라도 있으면 경고. 프로젝트별 override는 {TITLE}_ 접두사 env.
+UUID_NONV1_WARN_RATIO = max(
+    0.0, float(os.environ.get("LEADERBOARD_UUID_NONV1_WARN_RATIO", "0"))
+)
+
+
+def summarize_uuid_versions(all_rows) -> dict:
+    """조회한 모든 행의 UUID를 중복 제거해 버전 분포를 집계한다(순수 함수, 외부 조회 없음).
+
+    파싱 불가(UUID 형식 자체가 바뀐 경우 포함)는 unparseable로 분리해 비-v1과 함께 신호로 본다.
+    반환: {version_counts: {버전숫자: 개수}, unparseable, total_unique, nonv1_count, nonv1_ratio}.
+    """
+    seen = set()
+    version_counts: dict = {}
+    unparseable = 0
+    for row in all_rows:
+        uuid_value = (row.get("uuid") or "").strip()
+        if not uuid_value or uuid_value in seen:
+            continue
+        seen.add(uuid_value)
+        try:
+            version = uuid_module.UUID(uuid_value).version
+        except (ValueError, AttributeError, TypeError):
+            unparseable += 1
+            continue
+        version_counts[version] = version_counts.get(version, 0) + 1
+
+    total_unique = len(seen)
+    v1_count = version_counts.get(1, 0)
+    nonv1_count = total_unique - v1_count  # 파싱 불가도 "v1로 신뢰 불가"이므로 비-v1로 취급
+    nonv1_ratio = (nonv1_count / total_unique) if total_unique else 0.0
+    return {
+        "version_counts": version_counts,
+        "unparseable": unparseable,
+        "total_unique": total_unique,
+        "nonv1_count": nonv1_count,
+        "nonv1_ratio": nonv1_ratio,
+    }
+
+
+def _format_uuid_version_distribution(summary: dict) -> str:
+    """'v1=28, v7=2, 파싱불가=0 → 비-v1 6.7%' 형태의 한 줄 분포 문자열."""
+    parts = [
+        f"v{ver}={cnt}"
+        for ver, cnt in sorted(summary["version_counts"].items(), key=lambda kv: kv[0])
+    ]
+    parts.append(f"파싱불가={summary['unparseable']}")
+    ratio_pct = summary["nonv1_ratio"] * 100
+    return f"{', '.join(parts)} → 비-v1 {ratio_pct:.1f}%"
+
+
+def report_uuid_version_drift(all_rows, warn_ratio: float = UUID_NONV1_WARN_RATIO) -> bool:
+    """UUID 버전 분포를 항상 한 줄 출력하고, 비-v1 비율이 warn_ratio를 초과하면 경고 배너를
+    출력한다(경고만 — 실행은 중단하지 않는다). 드리프트 감지 여부(bool)를 반환한다.
+
+    warn_ratio 기본 0 → 비-v1이 하나라도 있으면(nonv1_count>0) 드리프트로 본다.
+    호출부는 use_uuid_v1(--dc 등) 경로에서만 부른다 — gametitle/bigquery는 이 감시 대상이 아니다.
+    """
+    summary = summarize_uuid_versions(all_rows)
+    if summary["total_unique"] == 0:
+        return False
+
+    distribution = _format_uuid_version_distribution(summary)
+    print(f"\nUUID 버전 분포: {distribution} (고유 {summary['total_unique']}개)")
+
+    drift = summary["nonv1_count"] > 0 and summary["nonv1_ratio"] > warn_ratio
+    if drift:
+        print("  " + "!" * 60)
+        print("  [경고] 콘솔 UUID 버전 변경 의심 — 가입일 판정 신뢰 불가.")
+        print(
+            f"    비-v1 UUID {summary['nonv1_count']}개"
+            f"(비율 {summary['nonv1_ratio'] * 100:.1f}% > 임계 {warn_ratio * 100:.1f}%) 감지."
+        )
+        print("    UUID v1 내장 타임스탬프 역산이 의도대로 동작하지 않아,")
+        print("    신규 유저 탐지·차단이 조용히 누락될 수 있습니다. 사람 확인이 필요합니다.")
+        print("  " + "!" * 60)
+    return drift
 
 
 def _parse_price_to_int(text: str) -> int:
@@ -1072,7 +1259,10 @@ def prepare_receipt_verification_session(page, explicit_project_base, start_url,
         start_url=start_url,
         project_name=project_name,
     )
-    open_receipt_verification_menu(page)
+    # 리더보드 경로는 ensure_uuid_registered('유저' 탭 이동)를 거치지 않아 프로젝트 선택
+    # 직후 콘솔 홈에서 이 pre-dump를 찍는다 — 단독 경로(유저 검색 화면)와 착지 화면이 달라
+    # 지문 이름을 분리해야 상호 오탐이 없다(receipt_nav_pre_leaderboard).
+    open_receipt_verification_menu(page, nav_step_name="receipt_nav_pre_leaderboard")
     wait_for_receipt_page_render_stable(page)
     return {
         "initialized": True,
@@ -1108,7 +1298,7 @@ def summarize_recent_payments(page, uuid_value, start_url, project_name, timeout
 
     fill_uuid_search(page, uuid_value)
     click_search_button(page)
-    step_and_verify_ui(page, "receipt_results", ignore_patterns=RECEIPT_IGNORE_PATTERNS)
+    step_and_verify_ui(page, "receipt_results", ignore_patterns=RECEIPT_RESULTS_IGNORE_PATTERNS)
     result = collect_result(
         page,
         uuid_value,
@@ -1624,6 +1814,8 @@ def run(
     bq_table="",
     bq_user_col="",
     bq_date_col="",
+    bq_maximum_bytes_billed=0,
+    use_uuid_v1=False,
     timeout_error=Exception,
     single_board_test=False,
     dc_mode=False,
@@ -1706,11 +1898,14 @@ def run(
                         ignore_patterns=LEADERBOARD_REWARD_MAIL_IGNORE_PATTERNS,
                     )
                     board_rows = extract_top_ranks(page, board_name)
-                # 각 보드 추출 직후 계정 생성일 보강 (Cloud Logging 또는 BigQuery, 프로젝트별 설정에 따름)
-                if bq_credentials is not None:
+                # 각 보드 추출 직후 계정 생성일 보강 (UUID v1 / BigQuery / Cloud Logging, 프로젝트별 설정에 따름)
+                if use_uuid_v1:
+                    enrich_board_with_uuid_v1(board_rows, now_utc, cache=account_cache)
+                elif bq_credentials is not None:
                     enrich_board_with_bigquery(
                         board_rows, bq_credentials, bq_project, bq_dataset, bq_table,
-                        bq_user_col, bq_date_col, now_utc, cache=account_cache,
+                        bq_user_col, bq_date_col, now_utc, bq_maximum_bytes_billed,
+                        cache=account_cache,
                     )
                 else:
                     enrich_board_with_gcp(
@@ -1828,13 +2023,15 @@ def save_csv(rows: list, out_dir: Path, project_key: str, csv_path: Path = None)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_path = out_dir / f"leaderboard_{project_key}_{ts}.csv"
     base_fields = ["leaderboard", "rank", "uuid", "nickname"]
-    gcp_fields = ["account_type", "create_account_date"]
+    # 계정상태/가입일 컬럼. 값의 출처(GCP Cloud Logging / BigQuery / UUID v1)와 무관하게
+    # 컬럼명·존재 여부는 동일하다 — 아래 has_account 판단·로그 문구도 소스를 뜻하지 않는다.
+    account_fields = ["account_type", "create_account_date"]
     payment_fields = ["recent_payment_count", "recent_payment_sum"]
     purchase_count_fields = ["recent_purchase_count"]  # --dc: 가격 대신 구매 제품 건수만
     webshop_fields = ["payitem_match_count", "payitem_quantity_total", "payitem_item_value_sum"]
     total_fields = ["total_payment_sum"]
     block_fields = ["block_status"]
-    has_gcp = any(row.get("account_type") for row in rows)
+    has_account = any(row.get("account_type") for row in rows)
     has_payment = any("recent_payment_sum" in row for row in rows)
     has_purchase_count = any("recent_purchase_count" in row for row in rows)
     has_webshop = any("payitem_item_value_sum" in row for row in rows)
@@ -1842,7 +2039,7 @@ def save_csv(rows: list, out_dir: Path, project_key: str, csv_path: Path = None)
     has_block = any("block_status" in row for row in rows)
     fieldnames = (
         base_fields
-        + (gcp_fields if has_gcp else [])
+        + (account_fields if has_account else [])
         + (payment_fields if has_payment else [])
         + (purchase_count_fields if has_purchase_count else [])
         + (webshop_fields if has_webshop else [])
@@ -1853,7 +2050,7 @@ def save_csv(rows: list, out_dir: Path, project_key: str, csv_path: Path = None)
         writer = csv.DictWriter(file_obj, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
-    print(f"\nCSV 저장: {csv_path.name} ({len(rows)}행, GCP컬럼={'포함' if has_gcp else '없음'})")
+    print(f"\nCSV 저장: {csv_path.name} ({len(rows)}행, 계정상태/가입일컬럼={'포함' if has_account else '없음'})")
     return csv_path
 
 
@@ -1921,16 +2118,31 @@ def build_slack_summary(
     dc_mode: bool,
     error_message: str,
     keywords: list,
+    uuid_version_drift: bool = False,
+    ui_change_detected: bool = False,
+    ui_change_step_count: int = 0,
 ) -> str:
     """예약 실행(--unattended) 완료 후 슬랙에 보낼 요약 텍스트.
 
     차단 대상은 없어도 "없음"을 명시한다 — 침묵으로 "0명"을 표현하지 않는다.
+    무인 실행은 stdout를 아무도 보지 않으므로, UUID 버전 드리프트(가입일 역산 신뢰 불가)는
+    슬랙 요약에 반드시 노출한다.
     """
     lines = [f"*[리더보드 예약 실행] {project_key}* — {'성공' if succeeded else '실패'}"]
+
+    # 전 과정 중 실제 UI 변경(화이트리스트·로그인 화면 스킵 제외)이 하나라도 탐지됐는지 O/X.
+    # 성공/실패·조기 종료와 무관하게 항상 보고하려고 헤더 바로 뒤에 둔다.
+    if ui_change_detected:
+        lines.append(f"UI 변경 탐지: 있음 ⚠️ ({ui_change_step_count}개 스텝)")
+    else:
+        lines.append("UI 변경 탐지: 없음")
 
     if not succeeded:
         lines.append(f"오류: {error_message}")
         return "\n".join(lines)
+
+    if uuid_version_drift:
+        lines.append("⚠ *UUID 버전 변경 의심* — 가입일 역산 신뢰 불가, 신규 유저 탐지 누락 가능. 사람 확인 필요.")
 
     lines.append(f"검색어: {', '.join(keywords) if keywords else '없음'}")
     keyword_counts = count_boards_by_keyword(all_rows, keywords)
@@ -1965,6 +2177,8 @@ def build_slack_summary(
 
 def main():
     configure_console_output()
+    # 이번 실행의 UI 변경 탐지 집계 초기화 — 완료 후 슬랙 요약에 O/X로 보고한다.
+    reset_ui_change_tracking()
     args = parse_args()
     apply_title_profile(
         args,
@@ -1993,13 +2207,23 @@ def main():
     LEADERBOARD_OUT_DIR.mkdir(parents=True, exist_ok=True)
     init_dump_dir(out_dir)
 
-    use_bigquery = args.log_console.strip().lower() == "bigquery"
+    # 계정 생성일(가입일) 판정 소스 결정:
+    # - --dc(게임B)는 유저 식별자가 UUID v1이므로 UUID 내장 타임스탬프만으로 판정한다(BigQuery/GCP 조회 없음).
+    #   BigQuery 비용·근사치 문제(dc_all은 이벤트 로그라 MIN이 가입일 근사치)를 원천 제거하기 위함.
+    # - 그 외에는 기존대로 log_console 값(bigquery/그 외=GCP Cloud Logging)을 따른다.
+    # - 명시적으로 log_console=uuid_v1(또는 uuid)로 지정하면 dc가 아니어도 UUID v1 판정을 쓴다.
+    use_uuid_v1 = dc_mode or args.log_console.strip().lower() in ("uuid_v1", "uuid")
+    use_bigquery = (not use_uuid_v1) and args.log_console.strip().lower() == "bigquery"
 
     if args.title:
         prefix = args.title.upper()
-        required = [("KEY_FILE", args.key), ("PROJECT_NAME", args.project_name)]
-        if use_bigquery:
-            required += [
+        if use_uuid_v1:
+            # UUID v1 판정은 외부 조회가 없어 key/BQ/GCP env가 필요 없다. 프로젝트명만 있으면 된다.
+            required = [("PROJECT_NAME", args.project_name)]
+        elif use_bigquery:
+            required = [
+                ("KEY_FILE", args.key),
+                ("PROJECT_NAME", args.project_name),
                 ("BQ_PROJECT", args.bq_project),
                 ("BQ_DATASET", args.bq_dataset),
                 ("BQ_TABLE", args.bq_table),
@@ -2007,7 +2231,12 @@ def main():
                 ("BQ_DATE_COL", args.bq_date_col),
             ]
         else:
-            required += [("GCP_PROJECT", args.gcp_project), ("LOGNAME", args.gcp_log)]
+            required = [
+                ("KEY_FILE", args.key),
+                ("PROJECT_NAME", args.project_name),
+                ("GCP_PROJECT", args.gcp_project),
+                ("LOGNAME", args.gcp_log),
+            ]
         missing = [f"{prefix}_{k}" for k, v in required if not v]
         if missing:
             raise SystemExit(f"[오류] --title {args.title}: 다음 env가 비어 있습니다 — {', '.join(missing)}")
@@ -2023,6 +2252,17 @@ def main():
     ACCOUNT_LOOKUP_LOOKBACK_HOURS = max(
         1, _resolve_title_int_env(prefix, "ACCOUNT_LOOKUP_LOOKBACK_HOURS", ACCOUNT_NEW_HOURS)
     )
+    # BigQuery 쿼리 1건당 강제 상한(maximum_bytes_billed). 우선순위:
+    #   {TITLE}_BQ_MAXIMUM_BYTES_BILLED > --bq-max-bytes(CLI) > BQ_MAXIMUM_BYTES_BILLED(전역) > 0(fail-closed).
+    # 0이면 BigQuery 경로가 조회를 하지 않는다(BIGQUERY_COST_GUARDRAILS.md §4-D).
+    _global_bq_max = 0
+    try:
+        _global_bq_max = int(os.environ.get("BQ_MAXIMUM_BYTES_BILLED", "0") or 0)
+    except ValueError:
+        _global_bq_max = 0
+    bq_maximum_bytes_billed = max(
+        0, _resolve_title_int_env(prefix, "BQ_MAXIMUM_BYTES_BILLED", args.bq_max_bytes or _global_bq_max)
+    )
     BLOCK_MAX_TOTAL_PAYMENT = max(
         0, _resolve_title_int_env(prefix, "USER_BLOCK_MAX_TOTAL_PAYMENT", BLOCK_MAX_TOTAL_PAYMENT)
     )
@@ -2032,6 +2272,10 @@ def main():
     BLOCK_NEW_USERS_ENABLED = _resolve_title_bool_env(
         prefix, "USER_BLOCK_NEW_USERS_ENABLED", BLOCK_NEW_USERS_ENABLED
     )
+    # UUID 버전 드리프트 경고 임계치(--dc 등 uuid_v1 경로 전용). 프로젝트별 override 허용.
+    uuid_nonv1_warn_ratio = max(
+        0.0, _resolve_title_float_env(prefix, "LEADERBOARD_UUID_NONV1_WARN_RATIO", UUID_NONV1_WARN_RATIO)
+    )
     # --block-new-users(CLI, 수동 실행용)와 {TITLE}_USER_BLOCK_NEW_USERS_ENABLED(env, 예약 실행용)는
     # 둘 중 하나만 켜도 실제 차단을 진행한다 — 예약 실행은 CLI 플래그를 넘기지 않으므로 env가
     # 유일한 활성화 경로다. 어느 쪽으로 켜졌는지는 아래 로그에 남긴다.
@@ -2040,7 +2284,10 @@ def main():
 
     credentials = None
     bq_credentials = None
-    if use_bigquery:
+    if use_uuid_v1:
+        # UUID v1 판정은 외부 조회가 없어 서비스계정 로드가 필요 없다.
+        pass
+    elif use_bigquery:
         if args.key:
             bq_credentials = load_bigquery_credentials(args.key)
             if bq_credentials is None:
@@ -2058,10 +2305,16 @@ def main():
     print(f"출력     : {out_dir.name}")
     print(f"CSV 저장 : {LEADERBOARD_OUT_DIR}")
     print(f"덤프     : {out_dir} (30일 초과 자동 삭제)")
-    if use_bigquery:
+    if use_uuid_v1:
+        print("가입일   : UUID v1 내장 타임스탬프로 판정 (BigQuery/GCP 조회 없음)")
+    elif use_bigquery:
         bq_ready = bq_credentials and args.bq_project and args.bq_dataset and args.bq_table
         bq_desc = f"{args.bq_project}.{args.bq_dataset}.{args.bq_table}"
         print(f"BQ 조회  : {'활성 (' + bq_desc + ')' if bq_ready else '비활성 (--key / --bq-* 미지정)'}")
+        if bq_maximum_bytes_billed > 0:
+            print(f"BQ 상한  : {bq_maximum_bytes_billed:,} bytes/쿼리 (dry-run 선확인 + maximum_bytes_billed 강제)")
+        else:
+            print("BQ 상한  : 미설정 — fail-closed로 BigQuery 조회를 하지 않음 (BQ_MAXIMUM_BYTES_BILLED 필요)")
     else:
         gcp_ready = credentials and args.gcp_project and args.gcp_log
         print(f"GCP 조회 : {'활성 (' + args.gcp_project + ' / ' + args.gcp_log + ')' if gcp_ready else '비활성 (--key / --gcp-project / --gcp-log 미지정)'}")
@@ -2090,6 +2343,7 @@ def main():
     error_message = ""
     block_had_failures = False
     block_outcome = None
+    uuid_version_drift = False
     page = None
 
     # 보드 1개, 신규 유저 보강 1명, 차단 대상 1명을 처리할 때마다 이 같은 파일을 계속
@@ -2138,6 +2392,8 @@ def main():
                 bq_table=args.bq_table,
                 bq_user_col=args.bq_user_col,
                 bq_date_col=args.bq_date_col,
+                bq_maximum_bytes_billed=bq_maximum_bytes_billed,
+                use_uuid_v1=use_uuid_v1,
                 timeout_error=_timeout_error,
                 single_board_test=args.test_single_board,
                 dc_mode=dc_mode,
@@ -2167,6 +2423,11 @@ def main():
             print(f"\n=== 완료: {board_count}개 리더보드, 총 {len(all_rows)}행 ===")
             if skipped_boards:
                 print(f"    (스킵된 리더보드 {len(skipped_boards)}건 — 상세는 위 [요약]/artifacts 참고)")
+            # A층: uuid_v1 판정 경로(--dc 등)에서만 UUID 버전 분포를 집계해, 콘솔이 예고 없이
+            # 버전을 바꾼 경우(가입일 역산 무력화)를 조용히 넘기지 않고 경고/종료코드로 드러낸다.
+            # gametitle 등 Cloud Logging/BigQuery 경로는 UUID 역산을 쓰지 않으므로 대상이 아니다.
+            if use_uuid_v1:
+                uuid_version_drift = report_uuid_version_drift(all_rows, uuid_nonv1_warn_ratio)
             succeeded = True
 
             if args.hold_seconds > 0:
@@ -2204,7 +2465,9 @@ def main():
                 webhook_url,
                 build_slack_summary(
                     project_key, succeeded, all_rows, skipped_boards, block_outcome, dc_mode, error_message,
-                    keyword_list,
+                    keyword_list, uuid_version_drift,
+                    ui_change_detected=any_ui_change_detected(),
+                    ui_change_step_count=len(get_ui_change_events()),
                 ),
             )
         else:
@@ -2216,6 +2479,10 @@ def main():
         # 실행 자체는 완료됐지만 일부 리더보드 스킵 또는 일부 차단 실패가 있었다는 사실을
         # 종료 코드로 숨기지 않는다.
         sys.exit(2)
+    if uuid_version_drift:
+        # 조회는 완료됐지만 UUID 버전 드리프트(가입일 역산 신뢰 불가)를 감지했다는 사실을
+        # 전용 종료 코드로 드러낸다(skip/차단실패와 구분). 실행 중단은 하지 않는다(경고만).
+        sys.exit(3)
 
 
 if __name__ == "__main__":

@@ -1420,7 +1420,7 @@ def _print_payment_error(ticket_id, result, error):
         # 판정을 못 끝냈으면(예외/결과 없음) 조회 소스를 특정할 수 없으므로 단정하지 않는다.
         print(f" [지급 상태 판정] 티켓 {ticket_id}")
     else:
-        print(f" [지급 상태 판정] 티켓 {ticket_id} — {_payment_error_sources_label(result)}")
+        print(_green(f" [지급 상태 판정] 티켓 {ticket_id} — {_payment_error_sources_label(result)}"))
     if error:
         print(f"   판정 실패: {error}")
         print(_SEP)
@@ -1430,7 +1430,7 @@ def _print_payment_error(ticket_id, result, error):
         print(_SEP)
         return None
     verdict_text = describe_verdict(result.get("verdict"))
-    print(f"   판정       : {verdict_text}")
+    print(_green(f"   판정       : {verdict_text}"))
     decision_text = describe_decision(result)
     if decision_text and decision_text != verdict_text:
         print(f"   처리분기   : {decision_text}")
@@ -1439,9 +1439,7 @@ def _print_payment_error(ticket_id, result, error):
     if submitted_uuid and resolved_uuid and submitted_uuid != resolved_uuid:
         print(f"   UUID       : 제출값={submitted_uuid} → 닉네임 대조로 확정={resolved_uuid}")
     action_ctx = _build_action_context(ticket_id, result)
-    regrant_ctx = action_ctx.get("regrant") if action_ctx else None
     refund_ctx = action_ctx.get("refund") if action_ctx else None
-    is_actionable = bool(action_ctx)
 
     # 상품코드는 아래 Inapp/GCP 후보 조회로 확정되는 결과이므로, 후보 나열보다 먼저
     # 보여주면 "이미 정해진 값"처럼 보여 인과관계가 뒤바뀐다(2026-07-10 사용자 지적) —
@@ -1469,16 +1467,16 @@ def _print_payment_error(ticket_id, result, error):
                 f"   GCP 로그 구매상품 1개: {code} @ {_short_date(c.get('update_date', '?'))} "
                 f"({_candidate_limit_str(code)})"
             )
-            print(_green(cand_line) if is_actionable else cand_line)
+            print(cand_line)
         else:
             cand_header = f"   GCP 로그 구매상품 {len(candidates)}개:"
-            print(_green(cand_header) if is_actionable else cand_header)
+            print(cand_header)
             for i, c in enumerate(candidates, 1):
                 code = c.get("shop_click_id", "?")
                 print(f"     {i}) {code} @ {_short_date(c.get('update_date', '?'))} "
                       f"({_candidate_limit_str(code)})")
     product_line = f"   상품코드   : {result.get('product_code') or '(미특정)'}"
-    print(_green(product_line) if is_actionable else product_line)
+    print(product_line)
     sd = result.get("shopdata")
     if sd:
         print(f"   ShopData   : line={sd.get('purchase_line_number')} "
@@ -1489,24 +1487,10 @@ def _print_payment_error(ticket_id, result, error):
         print(_green(line) if _is_final_verdict_note(note) else line)
 
     recommended_action = result.get("recommended_action")
-    if regrant_ctx:
-        label = "재지급 가능" if recommended_action == "regrant" else "예외 재지급 가능"
-        if regrant_ctx["candidates"]:
-            print(f"   [{label}] 후보 중 번호를 골라 '재지급 N' 입력(예: 재지급 1)")
-        else:
-            print(f"   [{label}] 상품코드={regrant_ctx['product_code']} — 터미널에 '재지급' 입력 시 우편 발송")
-    if refund_ctx:
-        label = "환불 가능" if recommended_action == "refund" else "예외 환불 가능"
-        print(f"   [{label}] 터미널에 '환불' 입력 시 해당 주문번호로 Google Play API 환불 실행")
-    elif recommended_action == "refund":
+    if recommended_action == "refund" and not refund_ctx:
         print("   [환불 후보] 주문번호 또는 조회 패키지를 확정하지 못해 자동 환불 실행 불가")
     if recommended_action == "review":
         print(f"   [미결정] 사람 확인 필요")
-    if (
-        (regrant_ctx and recommended_action != "regrant")
-        or (refund_ctx and recommended_action != "refund")
-    ):
-        print("   [예외 처리] 판정과 다른 명령은 경고 후 같은 명령을 한 번 더 입력해야 진행")
     print(_SEP)
     return action_ctx
 
@@ -1515,17 +1499,17 @@ def _print_regrant_result(ticket_id, result, error):
     result = result or {}
     status = result.get("status")
     print(_SEP)
-    print(f" [재지급] 티켓 {ticket_id}")
+    print(_green(f" [재지급] 티켓 {ticket_id}"))
     print(f"   UUID       : {result.get('uuid')}")
     print(f"   상품코드   : {result.get('product_code')}")
     if status == "sent":
-        print(f"   상태       : 발송 완료 (ShopTable_ID={result.get('shop_table_id')}, chart={result.get('chart_name')})")
+        print(_green(f"   상태       : 발송 완료 (ShopTable_ID={result.get('shop_table_id')}, chart={result.get('chart_name')})"))
     elif status == "uncertain":
-        print("   상태       : 불확실 — 발송 확인 클릭 이후 오류 발생, 실제 발송 여부 화면 확인 필요")
+        print(_green("   상태       : 불확실 — 발송 확인 클릭 이후 오류 발생, 실제 발송 여부 화면 확인 필요"))
         print("   조치       : 콘솔 우편 목록에서 직접 확인하세요. 이 건은 자동 재시도하지 않습니다.")
         print(f"   오류       : {error}")
     else:
-        print("   상태       : 실패 (발송 전 단계에서 중단 — 우편이 발송되지 않았습니다)")
+        print(_green("   상태       : 실패 (발송 전 단계에서 중단 — 우편이 발송되지 않았습니다)"))
         print(f"   오류       : {error}")
     print(_SEP)
 
@@ -1580,26 +1564,26 @@ def _execute_refund(service, package_name: str, order_id: str) -> dict:
 def _print_refund_result(ctx: dict, result: dict) -> None:
     status = result.get("status")
     print(_SEP)
-    print(f" [환불] 티켓 {ctx['ticket_id']}")
+    print(_green(f" [환불] 티켓 {ctx['ticket_id']}"))
     print(f"   주문번호   : {ctx['order_id']}")
     if status == "submitted":
-        print("   상태       : Google Play API 환불 요청 접수 완료")
+        print(_green("   상태       : Google Play API 환불 요청 접수 완료"))
         if result.get("after_state"):
             print(f"   환불 후 상태: {result['after_state']} ({_STATE_LABEL.get(result['after_state'], '?')})")
         if result.get("warning"):
             print(f"   참고       : {result['warning']}")
     elif status == "already_done":
         state = result.get("before_state")
-        print(f"   상태       : 실행 생략 — 이미 환불/취소 상태({state})")
+        print(_green(f"   상태       : 실행 생략 — 이미 환불/취소 상태({state})"))
     elif status == "blocked":
         state = result.get("before_state")
-        print(f"   상태       : 실행 중단 — 환불 가능한 PROCESSED 상태가 아님({state})")
+        print(_green(f"   상태       : 실행 중단 — 환불 가능한 PROCESSED 상태가 아님({state})"))
     elif status == "uncertain":
-        print("   상태       : 불확실 — 환불 API 호출 중 오류, 같은 주문을 다시 환불하지 마세요")
+        print(_green("   상태       : 불확실 — 환불 API 호출 중 오류, 같은 주문을 다시 환불하지 마세요"))
         print("   조치       : Play Console에서 주문 상태를 직접 확인하세요.")
         print(f"   오류       : {result.get('error')}")
     else:
-        print("   상태       : 실패 — 환불 API 호출 전 단계에서 중단")
+        print(_green("   상태       : 실패 — 환불 API 호출 전 단계에서 중단"))
         print(f"   오류       : {result.get('error')}")
     print(_SEP)
 
@@ -1609,12 +1593,12 @@ def _print_chart_refresh_result(result, error) -> None:
     chart_name = result.get("chart_name") or "(미확인)"
     print()
     print(_SEP)
-    print(f" [차트 갱신] {chart_name}")
+    print(_green(f" [차트 갱신] {chart_name}"))
     if error or result.get("status") != "updated":
-        print("   상태       : 실패")
+        print(_green("   상태       : 실패"))
         print(f"   오류       : {error or '(원인 미확인)'}")
     else:
-        print("   상태       : 완료")
+        print(_green("   상태       : 완료"))
         print(f"   적용 파일  : {result.get('applied_file_id') or '(미확인)'}")
         print(f"   CSV 파일   : {result.get('csv_file') or '(미확인)'}")
         print(f"   데이터     : {result.get('csv_row_count', '?')}행, {result.get('csv_col_count', '?')}열")

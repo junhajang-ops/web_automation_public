@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 from console_step_verify import (
+    POLL_INTERVAL_MS,
     configure_console_output,
     get_retry_max_retries,
     init_dump_dir,
@@ -54,7 +55,8 @@ BASE_DIR = Path(__file__).resolve().parent
 PAYMENT_DOCS_DIR = BASE_DIR.parent / "web_docs"
 DEFAULT_OUTPUT = "dumps_console_chart_lookup"
 DEFAULT_CHART_NAME = TEST_CHART_NAME
-POLL_WAIT_MS = 1_000
+# 공용 폴링/정착 대기 = console_step_verify.POLL_INTERVAL_MS(500). (2026-07-23 공용화)
+POLL_WAIT_MS = POLL_INTERVAL_MS
 SCROLL_STEP_PX = 1_200
 MAX_SCROLL_ATTEMPTS = 20
 ROWS_PER_PAGE = 100
@@ -371,7 +373,7 @@ def open_chart_detail(page, chart_name):
     page.get_by_text("현재 적용 차트 파일").wait_for(state="visible", timeout=15_000)
 
     current_file = ""
-    current_file_locator = page.locator("text=/Myapp_.*\\.xlsx/").first
+    current_file_locator = page.locator("text=/IdleGametitle_.*\\.xlsx/").first
     if wait_for_visible(current_file_locator, 2_000):
         current_file = current_file_locator.inner_text().strip()
 
